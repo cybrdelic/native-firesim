@@ -149,45 +149,126 @@ void drawLine(std::vector<std::uint32_t>& pixels, float ax, float ay, float bx, 
     }
 }
 
+float screenDistance(float ax, float ay, float bx, float by) {
+    const float dx = ax - bx;
+    const float dy = ay - by;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+int hitTestGizmo(float mouseX, float mouseScreenY) {
+    if (!g_showGizmos) {
+        return 0;
+    }
+    if (screenDistance(mouseX, mouseScreenY, 0.50f, 0.69f) < 0.075f) {
+        return 1;
+    }
+    if (screenDistance(mouseX, mouseScreenY, 0.37f, 0.46f) < 0.052f) {
+        return 2;
+    }
+    if (mouseScreenY > 0.62f && mouseScreenY < 0.70f && mouseX > 0.20f && mouseX < 0.47f) {
+        return 3;
+    }
+    if (screenDistance(mouseX, mouseScreenY, 0.64f, 0.59f) < 0.058f) {
+        return 4;
+    }
+    return 0;
+}
+
 void renderCpuSafeFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, float time) {
+    const float yaw = settings.cameraYaw;
+    const float pitch = clampf(settings.cameraPitch, -0.55f, 0.55f);
+    const float zoom = clampf(3.35f / std::max(1.7f, settings.cameraDistance), 0.62f, 1.95f);
+    const float horizon = clampf(0.55f + pitch * 0.22f, 0.36f, 0.72f);
+    const float centerX = 0.5f + std::sin(yaw) * 0.10f;
+    const float sourceY = clampf(horizon + 0.20f * zoom, 0.62f, 0.84f);
+    const float plumeHeight = 0.56f * zoom;
+    const float baseWidth = 0.13f * zoom;
+    const float smokeGain = clampf(settings.smoke, 0.0f, 1.6f);
+    const float turbulence = clampf(settings.turbulence, 0.05f, 1.8f);
+
     for (int y = 0; y < kFrameHeight; ++y) {
         const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(kFrameHeight);
         for (int x = 0; x < kFrameWidth; ++x) {
             const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kFrameWidth);
-            const float floorMask = v > 0.56f ? 1.0f : 0.0f;
-            float r = mixf(0.052f, 0.032f, floorMask);
-            float g = mixf(0.055f, 0.030f, floorMask);
-            float b = mixf(0.057f, 0.028f, floorMask);
+            const float floorMask = v > horizon ? 1.0f : 0.0f;
+            float r = mixf(0.062f, 0.038f, floorMask);
+            float g = mixf(0.064f, 0.036f, floorMask);
+            float b = mixf(0.065f, 0.034f, floorMask);
 
             if (floorMask > 0.0f) {
-                const float perspective = 0.18f + (v - 0.56f) * 2.1f;
-                const float gx = std::fabs((u - 0.5f) / perspective * 10.0f - std::floor((u - 0.5f) / perspective * 10.0f + 0.5f));
-                const float gy = std::fabs((v - 0.56f) * 14.0f - std::floor((v - 0.56f) * 14.0f + 0.5f));
-                const float grid = (gx < 0.018f || gy < 0.018f) ? 0.12f : 0.0f;
+                const float depth = std::max(0.001f, v - horizon);
+                const float perspective = 0.16f + depth * (1.8f / zoom);
+                const float yawSkew = std::sin(yaw) * depth * 0.28f;
+                const float gx = std::fabs((u - 0.5f + yawSkew) / perspective * 10.0f - std::floor((u - 0.5f + yawSkew) / perspective * 10.0f + 0.5f));
+                const float gy = std::fabs(depth * 15.0f / zoom - std::floor(depth * 15.0f / zoom + 0.5f));
+                const float grid = (gx < 0.015f || gy < 0.015f) ? 0.095f : 0.0f;
                 r += grid;
                 g += grid;
                 b += grid;
             }
 
-            const float x0 = u - 0.5f - settings.wind * (1.0f - v) * 0.10f;
-            const float y0 = 0.80f - v;
-            const float height = clamp01(y0 / 0.55f);
-            const float plumeWidth = 0.10f + height * 0.20f;
-            const float n = fbm(u * 14.0f + time * 0.55f, v * 12.0f - time * 0.85f);
-            const float radial = std::exp(-(x0 * x0) / (plumeWidth * plumeWidth));
-            const float flame = radial * clamp01(height * 1.7f) * (0.45f + n * 0.95f);
-            const float smoke = radial * clamp01(height * 1.15f) * clamp01((0.78f - v) * 2.0f) * (0.20f + settings.smoke * 0.55f);
-            const float glow = std::exp(-(x0 * x0 * 9.0f + (v - 0.80f) * (v - 0.80f) * 45.0f));
+            const float above = clamp01((sourceY - v) / plumeHeight);
+            const float windLean = settings.wind * above * 0.18f;
+            const float swirl = (fbm(u * 7.0f + time * 0.35f, v * 9.0f - time * 0.62f) - 0.5f) * 0.11f * turbulence * above;
+            const float x0 = u - centerX - windLean - swirl;
+            const float flameWidth = baseWidth * (0.30f + above * 0.58f);
+            const float smokeWidth = baseWidth * (0.82f + above * 1.55f);
+            const float flameRadial = std::exp(-(x0 * x0) / std::max(0.00001f, flameWidth * flameWidth));
+            const float smokeRadial = std::exp(-(x0 * x0) / std::max(0.00001f, smokeWidth * smokeWidth));
+            const float lickNoise = fbm(u * 30.0f + time * 2.4f, v * 42.0f - time * 3.1f + yaw);
+            const float filament = clamp01((lickNoise - 0.48f) * 2.4f) * clamp01((0.86f - above) * 2.3f);
+            const float flameMask = clamp01(above * 4.6f) * clamp01((0.76f - above) * 3.2f);
+            float flame = flameRadial * flameMask * (0.55f + lickNoise * 0.92f + filament * 0.90f);
+            const float baseGlow = std::exp(-(x0 * x0 * 18.0f + (v - sourceY) * (v - sourceY) * 170.0f));
+            float smoke = smokeRadial * clamp01((above - 0.20f) * 1.35f) * clamp01((1.08f - above) * 1.3f) * smokeGain;
 
-            r += glow * 0.48f + flame * 1.15f;
-            g += glow * 0.17f + flame * 0.42f;
-            b += glow * 0.035f + flame * 0.045f;
-            r = mixf(r, 0.028f, smoke * 0.38f);
-            g = mixf(g, 0.026f, smoke * 0.38f);
-            b = mixf(b, 0.024f, smoke * 0.38f);
+            if (settings.leftDown != 0) {
+                const float sx = settings.mouseX;
+                const float sy = 1.0f - settings.mouseY;
+                const float d2 = (u - sx) * (u - sx) * 70.0f + (v - sy) * (v - sy) * 120.0f;
+                flame += std::exp(-d2) * 1.8f;
+            }
+            if (settings.rightDown != 0) {
+                const float sx = settings.mouseX;
+                const float sy = 1.0f - settings.mouseY;
+                const float d2 = (u - sx) * (u - sx) * 46.0f + (v - sy) * (v - sy) * 72.0f;
+                smoke += std::exp(-d2) * 1.3f;
+            }
+
+            const float tray = (std::fabs(u - centerX) < 0.24f * zoom && std::fabs(v - sourceY) < 0.040f * zoom) ? 1.0f : 0.0f;
+            r = mixf(r, 0.040f, tray * 0.55f);
+            g = mixf(g, 0.028f, tray * 0.55f);
+            b = mixf(b, 0.018f, tray * 0.55f);
+
+            r += baseGlow * 0.35f + flame * 1.85f;
+            g += baseGlow * 0.12f + flame * (0.66f + flame * 0.19f);
+            b += baseGlow * 0.030f + flame * flame * 0.085f;
+
+            const float smokeAlpha = clamp01(smoke * 0.62f);
+            r = mixf(r, 0.030f, smokeAlpha);
+            g = mixf(g, 0.028f, smokeAlpha);
+            b = mixf(b, 0.026f, smokeAlpha);
+
+            const float core = flameRadial * clamp01(above * 7.0f) * clamp01((0.46f - above) * 3.4f);
+            r += core * 1.25f;
+            g += core * 0.74f;
+            b += core * 0.16f;
 
             pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(r, g, b);
         }
+    }
+
+    for (int i = 0; i < 48; ++i) {
+        const float seed = static_cast<float>(i);
+        const float age = hash2(seed, std::floor(time * 2.0f)) + std::fmod(time * (0.22f + hash2(seed, 3.0f) * 0.25f), 1.0f);
+        const float life = age - std::floor(age);
+        const float sx = centerX + (hash2(seed, 9.0f) - 0.5f) * 0.30f * zoom + settings.wind * life * 0.16f;
+        const float sy = sourceY - life * (0.36f + hash2(seed, 11.0f) * 0.26f) + life * life * 0.12f;
+        const int px = static_cast<int>(sx * kFrameWidth);
+        const int py = static_cast<int>(sy * kFrameHeight);
+        const float hot = (1.0f - life) * hash2(seed, 15.0f);
+        blendPixel(pixels, px, py, 1.0f, 0.38f, 0.055f, hot);
+        blendPixel(pixels, px + 1, py, 1.0f, 0.22f, 0.035f, hot * 0.42f);
     }
 
     if (settings.showGizmos != 0) {
@@ -245,6 +326,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SetCapture(hwnd);
         g_leftDown = true;
         updateMouseFromLParam(lParam);
+        if (!g_useCudaBackend) {
+            const int hit = hitTestGizmo(g_mouseX, 1.0f - g_mouseY);
+            if (hit != 0) {
+                g_activeGizmo = hit;
+            }
+        }
         applyActiveGizmo();
         return 0;
     case WM_LBUTTONUP:

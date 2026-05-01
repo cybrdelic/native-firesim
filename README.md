@@ -1,6 +1,6 @@
 # Native FireSim
 
-Clean native Windows rewrite prototype for FireSim's core idea: an interactive fire/smoke sandbox rendered locally with CUDA and shown through a Win32 window.
+Clean native Windows rewrite prototype for FireSim's core idea: an interactive fire/smoke sandbox shown through a Win32 window. The default launcher uses a safe CPU preview; CUDA remains available only behind explicit opt-in flags.
 
 The generated image reference is copied into:
 
@@ -62,12 +62,13 @@ Explicit CUDA smoke test:
 
 ## Controls
 
-- Right mouse drag: orbit the camera.
+- Right mouse drag: orbit the camera in the safe preview and CUDA opt-in modes.
 - Mouse wheel: zoom the camera.
-- `1`: fire/fuel source gizmo; left-drag injects hot fuel.
-- `2`: smoke source gizmo; left-drag injects cold soot/smoke.
-- `3`: wind gizmo; left-drag left/right to steer plume advection.
-- `4`: turbulence gizmo; left-drag up/down to change breakup intensity.
+- Click the fire, smoke, wind, or turbulence gizmo to select that tool.
+- `1`: fire/fuel source; left-drag injects hot flame at the cursor.
+- `2`: smoke source; left-drag injects cold soot/smoke at the cursor.
+- `3`: wind; left-drag left/right to steer plume advection.
+- `4`: turbulence; left-drag up/down to change breakup intensity.
 - `G`: show/hide gizmos.
 - Arrow left/right: steer wind.
 - Arrow up/down: raise/lower turbulence.
