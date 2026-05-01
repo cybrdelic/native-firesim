@@ -22,9 +22,23 @@ cmd /c "`"C:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat`" && cmake -S . -B bui
 .\build\NativeFireSim.exe
 ```
 
+The default interactive app uses the safe CPU preview path. It does not launch live CUDA kernels.
+
+To opt into the experimental live CUDA backend:
+
+```powershell
+.\build\NativeFireSim.exe --allow-live-cuda
+```
+
 ## Verification
 
-Render an offscreen CUDA proof frame:
+Build, collect diagnostics, and render a safe CPU proof frame:
+
+```powershell
+.\scripts\verify.ps1
+```
+
+Render only the safe CPU smoke frame:
 
 ```powershell
 .\build\NativeFireSim.exe --smoke-test
@@ -32,7 +46,19 @@ Render an offscreen CUDA proof frame:
 
 That writes:
 
-`out/smoke-test-frame.bmp`
+`out/cpu-smoke-test-frame.bmp`
+
+CUDA diagnostics only, without simulation kernels:
+
+```powershell
+.\build\NativeFireSim.exe --diagnostics
+```
+
+Explicit CUDA smoke test:
+
+```powershell
+.\build\NativeFireSim.exe --cuda-smoke-test
+```
 
 ## Controls
 
@@ -50,19 +76,25 @@ That writes:
 
 ## Current Scope
 
-This is a native first-pass renderer/sandbox, not a final physics solver. It already separates the parts that matter for the bigger product:
+This is a native first-pass renderer/sandbox, not a final physics solver. It currently separates the parts that matter for the bigger product:
 
 - CUDA simulation step
 - orbit-camera CUDA volume renderer
+- safe CPU preview renderer
 - native Windows presentation
 - copied visual target image
 - interactive input
 - projected gizmos for fire, smoke, wind, turbulence, and world axes
 - ballistic ember particles with wind coupling
 
-The live window defaults are capped at 960x540, 36 ray steps, and 30 FPS to avoid hammering the display GPU from a desktop shortcut.
+The live CUDA path is opt-in. The desktop launcher opens the safe CPU preview so a shortcut click does not run heavy display-GPU kernels.
 
 Next hardening steps are real 3D voxel fields, pressure projection, Direct3D interop, video/frame export, and benchmark-driven tuning against physical burn references.
+
+See:
+
+- `docs/crash-analysis.md`
+- `docs/physics-architecture.md`
 
 ## Desktop Launcher
 

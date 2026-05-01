@@ -2,6 +2,17 @@
 
 #include <cstdint>
 
+struct FireCudaDiagnostics {
+    int driverVersion = 0;
+    int runtimeVersion = 0;
+    int deviceCount = 0;
+    int activeDevice = -1;
+    int computeMajor = 0;
+    int computeMinor = 0;
+    std::uint64_t totalGlobalMem = 0;
+    char deviceName[128] = {};
+};
+
 struct FireSettings {
     int width = 1280;
     int height = 720;
@@ -26,5 +37,6 @@ struct FireSettings {
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);
 bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settings);
 bool fireCudaReset();
+bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics);
 void fireCudaShutdown();
 const char* fireCudaLastError();

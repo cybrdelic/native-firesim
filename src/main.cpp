@@ -30,6 +30,7 @@ bool g_rightDown = false;
 bool g_orbiting = false;
 bool g_needsReset = false;
 bool g_showGizmos = true;
+bool g_useCudaBackend = false;
 float g_mouseX = 0.5f;
 float g_mouseY = 0.10f;
 int g_lastMouseX = 0;
@@ -42,9 +43,162 @@ float g_cameraDistance = 3.35f;
 int g_activeGizmo = 1;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
+float g_cpuTime = 0.0f;
 
 float clamp01(float v) {
     return std::max(0.0f, std::min(1.0f, v));
+}
+
+float clampf(float v, float lo, float hi) {
+    return std::max(lo, std::min(hi, v));
+}
+
+float mixf(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+float hash2(float x, float y) {
+    const float v = std::sin(x * 127.1f + y * 311.7f) * 43758.5453f;
+    return v - std::floor(v);
+}
+
+float valueNoise(float x, float y) {
+    const float ix = std::floor(x);
+    const float iy = std::floor(y);
+    const float fx = x - ix;
+    const float fy = y - iy;
+    const float ux = fx * fx * (3.0f - 2.0f * fx);
+    const float uy = fy * fy * (3.0f - 2.0f * fy);
+    const float a = hash2(ix, iy);
+    const float b = hash2(ix + 1.0f, iy);
+    const float c = hash2(ix, iy + 1.0f);
+    const float d = hash2(ix + 1.0f, iy + 1.0f);
+    return mixf(mixf(a, b, ux), mixf(c, d, ux), uy);
+}
+
+float fbm(float x, float y) {
+    float sum = 0.0f;
+    float amp = 0.5f;
+    for (int i = 0; i < 5; ++i) {
+        sum += amp * valueNoise(x, y);
+        x = x * 2.03f + 13.7f;
+        y = y * 2.01f - 7.4f;
+        amp *= 0.5f;
+    }
+    return sum;
+}
+
+std::uint32_t packBgra(float r, float g, float b) {
+    const auto ri = static_cast<std::uint32_t>(clamp01(r) * 255.0f);
+    const auto gi = static_cast<std::uint32_t>(clamp01(g) * 255.0f);
+    const auto bi = static_cast<std::uint32_t>(clamp01(b) * 255.0f);
+    return 0xff000000u | (ri << 16) | (gi << 8) | bi;
+}
+
+void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
+    if (x < 0 || y < 0 || x >= kFrameWidth || y >= kFrameHeight || alpha <= 0.0f) {
+        return;
+    }
+    const std::uint32_t dst = pixels[static_cast<std::size_t>(y) * kFrameWidth + x];
+    const float dr = static_cast<float>((dst >> 16) & 0xff) / 255.0f;
+    const float dg = static_cast<float>((dst >> 8) & 0xff) / 255.0f;
+    const float db = static_cast<float>(dst & 0xff) / 255.0f;
+    alpha = clamp01(alpha);
+    pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(
+        mixf(dr, r, alpha),
+        mixf(dg, g, alpha),
+        mixf(db, b, alpha));
+}
+
+void drawCircle(std::vector<std::uint32_t>& pixels, float cx, float cy, float radius, float r, float g, float b, float alpha) {
+    const int minX = static_cast<int>(std::floor((cx - radius - 0.004f) * kFrameWidth));
+    const int maxX = static_cast<int>(std::ceil((cx + radius + 0.004f) * kFrameWidth));
+    const int minY = static_cast<int>(std::floor((cy - radius - 0.004f) * kFrameHeight));
+    const int maxY = static_cast<int>(std::ceil((cy + radius + 0.004f) * kFrameHeight));
+    for (int y = minY; y <= maxY; ++y) {
+        for (int x = minX; x <= maxX; ++x) {
+            const float ux = (static_cast<float>(x) + 0.5f) / static_cast<float>(kFrameWidth);
+            const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(kFrameHeight);
+            const float dx = ux - cx;
+            const float dy = uy - cy;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            const float ring = 1.0f - clampf(std::fabs(d - radius) / 0.006f, 0.0f, 1.0f);
+            blendPixel(pixels, x, y, r, g, b, alpha * ring);
+        }
+    }
+}
+
+void drawLine(std::vector<std::uint32_t>& pixels, float ax, float ay, float bx, float by, float r, float g, float b, float alpha) {
+    const int minX = static_cast<int>(std::floor(std::min(ax, bx) * kFrameWidth)) - 8;
+    const int maxX = static_cast<int>(std::ceil(std::max(ax, bx) * kFrameWidth)) + 8;
+    const int minY = static_cast<int>(std::floor(std::min(ay, by) * kFrameHeight)) - 8;
+    const int maxY = static_cast<int>(std::ceil(std::max(ay, by) * kFrameHeight)) + 8;
+    const float vx = bx - ax;
+    const float vy = by - ay;
+    const float vv = std::max(0.000001f, vx * vx + vy * vy);
+    for (int y = minY; y <= maxY; ++y) {
+        for (int x = minX; x <= maxX; ++x) {
+            const float ux = (static_cast<float>(x) + 0.5f) / static_cast<float>(kFrameWidth);
+            const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(kFrameHeight);
+            const float h = clampf(((ux - ax) * vx + (uy - ay) * vy) / vv, 0.0f, 1.0f);
+            const float dx = ux - (ax + vx * h);
+            const float dy = uy - (ay + vy * h);
+            const float d = std::sqrt(dx * dx + dy * dy);
+            blendPixel(pixels, x, y, r, g, b, alpha * (1.0f - clampf(d / 0.006f, 0.0f, 1.0f)));
+        }
+    }
+}
+
+void renderCpuSafeFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, float time) {
+    for (int y = 0; y < kFrameHeight; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(kFrameHeight);
+        for (int x = 0; x < kFrameWidth; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kFrameWidth);
+            const float floorMask = v > 0.56f ? 1.0f : 0.0f;
+            float r = mixf(0.052f, 0.032f, floorMask);
+            float g = mixf(0.055f, 0.030f, floorMask);
+            float b = mixf(0.057f, 0.028f, floorMask);
+
+            if (floorMask > 0.0f) {
+                const float perspective = 0.18f + (v - 0.56f) * 2.1f;
+                const float gx = std::fabs((u - 0.5f) / perspective * 10.0f - std::floor((u - 0.5f) / perspective * 10.0f + 0.5f));
+                const float gy = std::fabs((v - 0.56f) * 14.0f - std::floor((v - 0.56f) * 14.0f + 0.5f));
+                const float grid = (gx < 0.018f || gy < 0.018f) ? 0.12f : 0.0f;
+                r += grid;
+                g += grid;
+                b += grid;
+            }
+
+            const float x0 = u - 0.5f - settings.wind * (1.0f - v) * 0.10f;
+            const float y0 = 0.80f - v;
+            const float height = clamp01(y0 / 0.55f);
+            const float plumeWidth = 0.10f + height * 0.20f;
+            const float n = fbm(u * 14.0f + time * 0.55f, v * 12.0f - time * 0.85f);
+            const float radial = std::exp(-(x0 * x0) / (plumeWidth * plumeWidth));
+            const float flame = radial * clamp01(height * 1.7f) * (0.45f + n * 0.95f);
+            const float smoke = radial * clamp01(height * 1.15f) * clamp01((0.78f - v) * 2.0f) * (0.20f + settings.smoke * 0.55f);
+            const float glow = std::exp(-(x0 * x0 * 9.0f + (v - 0.80f) * (v - 0.80f) * 45.0f));
+
+            r += glow * 0.48f + flame * 1.15f;
+            g += glow * 0.17f + flame * 0.42f;
+            b += glow * 0.035f + flame * 0.045f;
+            r = mixf(r, 0.028f, smoke * 0.38f);
+            g = mixf(g, 0.026f, smoke * 0.38f);
+            b = mixf(b, 0.024f, smoke * 0.38f);
+
+            pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(r, g, b);
+        }
+    }
+
+    if (settings.showGizmos != 0) {
+        drawCircle(pixels, 0.50f, 0.69f, 0.052f, settings.activeGizmo == 1 ? 1.0f : 0.45f, 0.22f, 0.04f, 0.95f);
+        drawCircle(pixels, 0.37f, 0.46f, 0.030f, 0.72f, 0.72f, 0.74f, settings.activeGizmo == 2 ? 0.95f : 0.55f);
+        drawCircle(pixels, 0.64f, 0.59f, 0.033f, 0.82f, 0.22f, 0.96f, settings.activeGizmo == 4 ? 0.95f : 0.55f);
+        drawLine(pixels, 0.30f, 0.66f, 0.30f + settings.wind * 0.16f, 0.66f, 0.0f, 0.82f, 1.0f, settings.activeGizmo == 3 ? 0.95f : 0.55f);
+        drawLine(pixels, 0.88f, 0.86f, 0.94f, 0.86f, 1.0f, 0.10f, 0.08f, 0.95f);
+        drawLine(pixels, 0.88f, 0.86f, 0.88f, 0.78f, 0.18f, 1.0f, 0.25f, 0.95f);
+        drawLine(pixels, 0.88f, 0.86f, 0.84f, 0.89f, 0.20f, 0.42f, 1.0f, 0.95f);
+    }
 }
 
 void updateMouseFromLParam(LPARAM lParam) {
@@ -72,7 +226,8 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim CUDA | %.0f fps | tool %d | wind %.2f | turbulence %.2f | RMB orbit, wheel zoom",
+        "Native FireSim %s | %.0f fps | tool %d | wind %.2f | turbulence %.2f | RMB orbit, wheel zoom",
+        g_useCudaBackend ? "CUDA opt-in" : "safe CPU preview",
         fps,
         g_activeGizmo,
         g_wind,
@@ -264,7 +419,39 @@ bool writeBmp(const char* path, const std::vector<std::uint32_t>& pixels, int wi
     return out.good();
 }
 
-int runSmokeTest() {
+int runCpuSmokeTest() {
+    CreateDirectoryA("out", nullptr);
+    std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
+    FireSettings settings;
+    settings.showGizmos = 1;
+    settings.activeGizmo = 1;
+    settings.wind = 0.15f;
+    settings.turbulence = 0.82f;
+    settings.smoke = 0.96f;
+    renderCpuSafeFrame(frame, settings, 2.5f);
+    return writeBmp("out\\cpu-smoke-test-frame.bmp", frame, kFrameWidth, kFrameHeight) ? 0 : 3;
+}
+
+int runInputStressTest() {
+    std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
+    for (int i = 0; i < 80; ++i) {
+        FireSettings settings;
+        settings.mouseX = (i % 2) == 0 ? -4.0f : 5.0f;
+        settings.mouseY = (i % 3) == 0 ? -3.0f : 4.0f;
+        settings.showGizmos = 1;
+        settings.activeGizmo = (i % 8) - 2;
+        settings.wind = -2.0f + static_cast<float>(i % 17) * 0.25f;
+        settings.turbulence = -1.0f + static_cast<float>(i % 23) * 0.15f;
+        settings.smoke = -0.5f + static_cast<float>(i % 11) * 0.24f;
+        settings.cameraYaw = -20.0f + static_cast<float>(i) * 0.5f;
+        settings.cameraPitch = -5.0f + static_cast<float>(i % 30) * 0.32f;
+        settings.cameraDistance = -2.0f + static_cast<float>(i % 18) * 0.55f;
+        renderCpuSafeFrame(frame, settings, static_cast<float>(i) / 24.0f);
+    }
+    return 0;
+}
+
+int runCudaSmokeTest() {
     CreateDirectoryA("out", nullptr);
     std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
 
@@ -303,13 +490,53 @@ int runSmokeTest() {
     return ok ? 0 : 3;
 }
 
+int runDiagnostics() {
+    CreateDirectoryA("out", nullptr);
+    FireCudaDiagnostics diagnostics;
+    const bool cudaOk = fireCudaGetDiagnostics(&diagnostics);
+
+    std::ofstream out("out\\diagnostics.txt", std::ios::binary);
+    if (!out) {
+        return 3;
+    }
+
+    out << "Native FireSim diagnostics\n";
+    out << "cudaDiagnosticsOk=" << (cudaOk ? "true" : "false") << "\n";
+    if (cudaOk) {
+        out << "driverVersion=" << diagnostics.driverVersion << "\n";
+        out << "runtimeVersion=" << diagnostics.runtimeVersion << "\n";
+        out << "deviceCount=" << diagnostics.deviceCount << "\n";
+        out << "activeDevice=" << diagnostics.activeDevice << "\n";
+        out << "deviceName=" << diagnostics.deviceName << "\n";
+        out << "computeCapability=" << diagnostics.computeMajor << "." << diagnostics.computeMinor << "\n";
+        out << "totalGlobalMemMiB=" << (diagnostics.totalGlobalMem / (1024ull * 1024ull)) << "\n";
+    } else {
+        out << "cudaError=" << fireCudaLastError() << "\n";
+    }
+
+    out << "liveCudaDefault=false\n";
+    out << "liveCudaFlag=--allow-live-cuda\n";
+    return out.good() && cudaOk ? 0 : 2;
+}
+
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     const std::string args = commandLine != nullptr ? commandLine : "";
-    if (args.find("--smoke-test") != std::string::npos) {
-        return runSmokeTest();
+    if (args.find("--diagnostics") != std::string::npos) {
+        return runDiagnostics();
     }
+    if (args.find("--cuda-smoke-test") != std::string::npos) {
+        return runCudaSmokeTest();
+    }
+    if (args.find("--input-stress-test") != std::string::npos) {
+        return runInputStressTest();
+    }
+    if (args.find("--smoke-test") != std::string::npos || args.find("--cpu-smoke-test") != std::string::npos) {
+        return runCpuSmokeTest();
+    }
+
+    g_useCudaBackend = args.find("--allow-live-cuda") != std::string::npos;
 
     timeBeginPeriod(1);
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
@@ -320,7 +547,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         return 1;
     }
 
-    if (!fireCudaInitialize(kFrameWidth, kFrameHeight, kGridWidth, kGridHeight)) {
+    if (g_useCudaBackend && !fireCudaInitialize(kFrameWidth, kFrameHeight, kGridWidth, kGridHeight)) {
         MessageBoxA(g_window, fireCudaLastError(), "CUDA initialization failed", MB_ICONERROR);
         return 1;
     }
@@ -364,9 +591,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.cameraDistance = g_cameraDistance;
         g_needsReset = false;
 
-        if (!fireCudaStepAndRender(g_frame.data(), settings)) {
+        if (g_useCudaBackend && !fireCudaStepAndRender(g_frame.data(), settings)) {
             MessageBoxA(g_window, fireCudaLastError(), "CUDA render failed", MB_ICONERROR);
             break;
+        }
+        if (!g_useCudaBackend) {
+            g_cpuTime += dt;
+            renderCpuSafeFrame(g_frame, settings, g_cpuTime);
         }
 
         InvalidateRect(g_window, nullptr, FALSE);
@@ -392,7 +623,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         }
     }
 
-    fireCudaShutdown();
+    if (g_useCudaBackend) {
+        fireCudaShutdown();
+    }
     timeEndPeriod(1);
     return 0;
 }

@@ -774,6 +774,41 @@ bool fireCudaReset() {
     return check("resetKernel sync", cudaDeviceSynchronize());
 }
 
+bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics) {
+    if (diagnostics == nullptr) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "Diagnostics output pointer was null.");
+        return false;
+    }
+
+    FireCudaDiagnostics out = {};
+    if (!check("cudaDriverGetVersion", cudaDriverGetVersion(&out.driverVersion))) {
+        return false;
+    }
+    if (!check("cudaRuntimeGetVersion", cudaRuntimeGetVersion(&out.runtimeVersion))) {
+        return false;
+    }
+    if (!check("cudaGetDeviceCount", cudaGetDeviceCount(&out.deviceCount))) {
+        return false;
+    }
+    if (out.deviceCount > 0) {
+        int device = 0;
+        if (!check("cudaGetDevice", cudaGetDevice(&device))) {
+            return false;
+        }
+        cudaDeviceProp props = {};
+        if (!check("cudaGetDeviceProperties", cudaGetDeviceProperties(&props, device))) {
+            return false;
+        }
+        out.activeDevice = device;
+        out.computeMajor = props.major;
+        out.computeMinor = props.minor;
+        out.totalGlobalMem = static_cast<std::uint64_t>(props.totalGlobalMem);
+        std::snprintf(out.deviceName, sizeof(out.deviceName), "%s", props.name);
+    }
+    *diagnostics = out;
+    return true;
+}
+
 bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settings) {
     if (g_heat == nullptr || g_frameDevice == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "CUDA renderer is not initialized.");
