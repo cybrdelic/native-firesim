@@ -21,9 +21,11 @@ target_include_directories(NativeFireSim PRIVATE src)
 target_compile_definitions(NativeFireSim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(NativeFireSim PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /sdl>
+    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
 )
 target_link_libraries(NativeFireSim PRIVATE user32 gdi32 winmm)
 
 set_target_properties(NativeFireSim PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_RESOLVE_DEVICE_SYMBOLS OFF
 )

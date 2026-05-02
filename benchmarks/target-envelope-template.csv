@@ -1,0 +1,19 @@
+# metric,min,max
+# Replace these broad engineering envelopes with measurements from a real burn.
+# Supported metrics:
+# averageDivergenceReduction,worstDivergenceAfterL2,worstDivergenceAfterMax,
+# maxFlameHeightMeters,finalMeanOpticalDepth,finalHeatReleaseProxy,maxHeat,
+# imageMeanLuma,imageMaxLuma,imageBrightPixels,imageBrightFraction,
+# averageGpuSolveMs,averageGpuRenderMs,
+# finalCharSum,finalAshSum,finalPyrolysisSum,finalProgressSum,
+# finalTurbulenceEnergySum,finalSootOpticalDepthSum,
+# maxPyrolysis,maxProgress,maxTurbulenceEnergy,
+# calibrationHrrShapeRmse,calibrationMassShapeRmse,
+# calibrationThermocoupleShapeRmse,calibrationIrMeanShapeRmse,
+# calibrationIrMaxShapeRmse,calibrationPlumeHeightRmseMeters
+averageDivergenceReduction,0.02,1.00
+worstDivergenceAfterL2,0.00,0.25
+maxFlameHeightMeters,0.40,2.10
+finalMeanOpticalDepth,0.005,0.20
+imageMaxLuma,0.40,1.00
+averageGpuRenderMs,0.00,75.00

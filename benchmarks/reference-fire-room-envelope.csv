@@ -1,0 +1,13 @@
+# metric,min,max
+# Target-image matching envelope for assets/reference-fire-room.png.
+# Reference image metrics: 1536x1024, meanLuma=0.185796, maxLuma=0.988728,
+# brightFraction(luma>0.68)=0.014217.
+# Solver rows are proxies until real burn measurements are imported.
+maxFlameHeightMeters,1.35,2.08
+finalMeanOpticalDepth,0.030,0.280
+imageMeanLuma,0.135,0.245
+imageMaxLuma,0.900,1.000
+imageBrightFraction,0.006,0.026
+averageDivergenceReduction,0.02,1.00
+worstDivergenceAfterL2,0.00,0.35
+averageGpuRenderMs,0.00,110.00

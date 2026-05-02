@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "replace-with-real-burn-id",
+  "units": "meters",
+  "room": {
+    "width": 2.10,
+    "height": 2.03,
+    "depth": 1.64,
+    "ventilation": {
+      "type": "open-front",
+      "inletAreasM2": [],
+      "exhaustAreasM2": []
+    }
+  },
+  "fuelBed": {
+    "type": "solid",
+    "material": "replace-with-material",
+    "initialMassKg": 0.0,
+    "moistureFraction": 0.0,
+    "lowerHeatingValueKJPerKg": 0.0,
+    "tray": {
+      "center": [0.0, 0.02, 0.0],
+      "size": [1.56, 0.04, 0.70]
+    },
+    "geometryMesh": ""
+  },
+  "sensors": {
+    "thermocouples": [
+      {"id": "tc_0", "position": [0.0, 0.25, 0.0]},
+      {"id": "tc_1", "position": [0.0, 0.75, 0.0]},
+      {"id": "tc_2", "position": [0.0, 1.25, 0.0]}
+    ],
+    "cameras": [
+      {
+        "id": "rgb_0",
+        "type": "RGB",
+        "position": [0.0, 0.80, 2.70],
+        "target": [0.0, 0.72, 0.0],
+        "fovDegrees": 53.0
+      },
+      {
+        "id": "ir_0",
+        "type": "IR",
+        "position": [0.0, 0.80, 2.70],
+        "target": [0.0, 0.72, 0.0],
+        "fovDegrees": 53.0
+      }
+    ]
+  },
+  "provenance": {
+    "dataset": "",
+    "license": "",
+    "notes": ""
+  }
+}

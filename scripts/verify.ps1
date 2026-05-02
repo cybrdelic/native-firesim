@@ -1,5 +1,7 @@
 param(
-    [switch]$CudaSmoke
+    [switch]$DiagnosticsOnly,
+    [switch]$RunGpuKernels,
+    [switch]$AcceptBugcheckRisk
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +10,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $vcvars = "C:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 & (Join-Path $PSScriptRoot "lint.ps1")
+& (Join-Path $PSScriptRoot "verify-lab-grade.ps1")
 
 if (-not (Test-Path -LiteralPath $vcvars)) {
     throw "Visual Studio Build Tools were not found at $vcvars"
@@ -19,22 +22,37 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+function Invoke-NativeFireSimCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [int]$TimeoutMs = 120000
+    )
+
+    $process = Start-Process -FilePath ".\build\NativeFireSim.exe" -ArgumentList $Arguments -PassThru
+    if (-not $process.WaitForExit($TimeoutMs)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "NativeFireSim timed out while running: $($Arguments -join ' ')"
+    }
+    return $process.ExitCode
+}
+
 Push-Location $root
 try {
-    & ".\build\NativeFireSim.exe" --diagnostics
-    $diagCode = $LASTEXITCODE
+    $diagCode = Invoke-NativeFireSimCheck -Arguments @("--diagnostics")
 
-    & ".\build\NativeFireSim.exe" --smoke-test
-    $cpuCode = $LASTEXITCODE
+    $inputCode = Invoke-NativeFireSimCheck -Arguments @("--input-stress-test")
 
-    & ".\build\NativeFireSim.exe" --input-stress-test
-    $inputCode = $LASTEXITCODE
-
-    if ($CudaSmoke) {
-        & ".\build\NativeFireSim.exe" --cuda-smoke-test
-        $cudaCode = $LASTEXITCODE
+    if ($DiagnosticsOnly -or -not $RunGpuKernels) {
+        $smokeCode = 0
+        $validationCode = 0
     } else {
-        $cudaCode = 0
+        $riskAccepted = $AcceptBugcheckRisk -or $env:FIRESIM_ACCEPT_BUGCHECK_RISK -eq "1"
+        if (-not $riskAccepted) {
+            throw "GPU kernel verification is blocked because recent runs caused Windows bugchecks. Re-run with -AcceptBugcheckRisk only if you intentionally want to test that driver path."
+        }
+        $smokeCode = Invoke-NativeFireSimCheck -Arguments @("--smoke-test", "--allow-gpu-kernels", "--accept-bugcheck-risk") -TimeoutMs 300000
+        $validationCode = Invoke-NativeFireSimCheck -Arguments @("--validation", "--allow-gpu-kernels", "--accept-bugcheck-risk") -TimeoutMs 300000
     }
 } finally {
     Pop-Location
@@ -44,17 +62,17 @@ if ($diagCode -ne 0) {
     Write-Error "Diagnostics failed with exit code $diagCode"
     exit $diagCode
 }
-if ($cpuCode -ne 0) {
-    Write-Error "CPU smoke test failed with exit code $cpuCode"
-    exit $cpuCode
-}
 if ($inputCode -ne 0) {
     Write-Error "Input stress test failed with exit code $inputCode"
     exit $inputCode
 }
-if ($cudaCode -ne 0) {
-    Write-Error "CUDA smoke test failed with exit code $cudaCode"
-    exit $cudaCode
+if ($smokeCode -ne 0) {
+    Write-Error "CUDA smoke test failed with exit code $smokeCode"
+    exit $smokeCode
+}
+if ($validationCode -ne 0) {
+    Write-Error "CUDA validation failed with exit code $validationCode"
+    exit $validationCode
 }
 
 Write-Host "verify ok"
