@@ -1,4 +1,4 @@
-﻿# NIST FCD Methanol_1m_Pool_R1
+# NIST FCD Methanol_1m_Pool_R1
 
 Imported by scripts/import-nist-fcd-methanol-r1.ps1.
 

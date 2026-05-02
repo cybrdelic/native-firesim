@@ -22,6 +22,7 @@ $geometryPath = Join-Path $OutputRoot "geometry.json"
 $manifestPath = Join-Path $OutputRoot "manifest.json"
 $readmePath = Join-Path $OutputRoot "README.md"
 $culture = [Globalization.CultureInfo]::InvariantCulture
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
 
 function Format-Number {
     param([double]$Value)
@@ -35,6 +36,15 @@ function Get-ClampedNumber {
     )
     $parsed = [double]::Parse([string]$Value, [Globalization.NumberStyles]::Float, $culture)
     return [Math]::Max($Minimum, $parsed)
+}
+
+function Write-LfTextFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+    $normalized = $Content -replace "`r`n", "`n"
+    [IO.File]::WriteAllText($Path, $normalized, $utf8NoBom)
 }
 
 if ($Force -or -not (Test-Path -LiteralPath $rawPath)) {
@@ -99,7 +109,7 @@ foreach ($row in $filteredRows) {
     $previousHrrKW = $hrrKW
 }
 
-$csvLines | Set-Content -LiteralPath $calibrationPath -Encoding UTF8
+Write-LfTextFile $calibrationPath (($csvLines -join "`n") + "`n")
 
 $geometryJson = @"
 {
@@ -158,7 +168,7 @@ $geometryJson = @"
   }
 }
 "@
-$geometryJson | Set-Content -LiteralPath $geometryPath -Encoding UTF8
+Write-LfTextFile $geometryPath $geometryJson
 
 $geometryHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geometryPath).Hash.ToLowerInvariant()
 $calibrationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $calibrationPath).Hash.ToLowerInvariant()
@@ -227,7 +237,7 @@ $manifest = [ordered]@{
     )
 }
 
-$manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Write-LfTextFile $manifestPath (($manifest | ConvertTo-Json -Depth 12) + "`n")
 
 $readme = @"
 # NIST FCD Methanol_1m_Pool_R1
@@ -243,7 +253,7 @@ This benchmark includes direct CSV channels for HRR, natural-gas burner HRR, exh
 
 It intentionally does not claim thermocouple, IR-frame, or plume-height calibration because those are not present as numeric columns in this FCD CSV export.
 "@
-$readme | Set-Content -LiteralPath $readmePath -Encoding UTF8
+Write-LfTextFile $readmePath $readme
 
 Write-Host "Imported NIST FCD Methanol_1m_Pool_R1 into $OutputRoot"
 Write-Host "Rows: $($filteredRows.Count)"
