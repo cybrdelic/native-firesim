@@ -1,4 +1,4 @@
-﻿{
+{
     "schemaVersion":  1,
     "experimentId":  "NIST_FCD_Methanol_1m_Pool_R1",
     "claimScope":  "Controlled 1 m methanol pool-fire calibration for HRR, derived fuel mass, gas concentrations, radiant heat flux, and smoke extinction. This dataset does not claim IR-frame or plume-height calibration.",
@@ -28,8 +28,8 @@
                                ]
               },
     "hashes":  {
-                   "geometrySha256":  "5e4e6a01450c12ec4f4e31283abf4711672d08969b832a919229a13c1a9ea09e",
-                   "calibrationCsvSha256":  "9172b1947940bb050805cc829d50488d5e8dac8838afcaec91504f454a75a5f6",
+                   "geometrySha256":  "4d024b364e9aee63e5de9d63845809b1295172be6b2e1aa93bb51f6d3e676885",
+                   "calibrationCsvSha256":  "19e7d7a6d0faedecf919fd3829190039f45a5ef6a057c52363b2d8bc0c2c9b2f",
                    "rawDataSha256":  {
                                          "raw/Methanol_1m_Pool_R1.csv":  "9b3d0c8831c2ea0e112afa8afcae11c5c64927a57c56fe0982e76b51b00f5684"
                                      }

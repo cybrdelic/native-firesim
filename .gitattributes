@@ -1,0 +1,12 @@
+* text=auto
+
+# Benchmark source/provenance hashes must be byte-stable across Windows checkouts.
+benchmarks/**/*.csv text eol=lf
+benchmarks/**/*.json text eol=lf
+benchmarks/**/*.md text eol=lf
+
+# PR media and generated assets are binary.
+*.gif binary
+*.jpg binary
+*.png binary
+*.webp binary

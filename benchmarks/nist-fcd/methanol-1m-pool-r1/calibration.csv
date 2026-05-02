@@ -1,4 +1,4 @@
-﻿timeSeconds,hrrKW,massRemainingKg,ngBurnerHrrKW,exhaustMassFlowKgPerS,oxygenVolumeFraction,co2VolumeFraction,coVolumeFraction,radiantHeatFluxKWPerM2,smokeExtinctionCoefficientPerM,smokeOpticalDepth
+timeSeconds,hrrKW,massRemainingKg,ngBurnerHrrKW,exhaustMassFlowKgPerS,oxygenVolumeFraction,co2VolumeFraction,coVolumeFraction,radiantHeatFluxKWPerM2,smokeExtinctionCoefficientPerM,smokeOpticalDepth
 0,6.15,37.8,-1.77,1.974,0.20913,0.0006886,0.0000012,0.014023,0.002,0.002
 1,15.58,37.7994545857,-1.8,1.9737,0.20875,0.0012734,0.0000021,0.013343,0.002,0.002
 2,34.09,37.7982078884,-1.7,1.9675,0.20814,0.0017451,0.0000031,0.013196,0.002,0.002
