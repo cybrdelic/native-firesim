@@ -20,6 +20,7 @@ $rawPath = Join-Path $rawDir "Methanol_1m_Pool_R1.csv"
 $calibrationPath = Join-Path $OutputRoot "calibration.csv"
 $geometryPath = Join-Path $OutputRoot "geometry.json"
 $manifestPath = Join-Path $OutputRoot "manifest.json"
+$targetsPath = Join-Path $OutputRoot "validation-targets.csv"
 $readmePath = Join-Path $OutputRoot "README.md"
 $culture = [Globalization.CultureInfo]::InvariantCulture
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -170,6 +171,19 @@ $geometryJson = @"
 "@
 Write-LfTextFile $geometryPath $geometryJson
 
+$targetsCsv = @"
+# metric,min,max
+# Initial engineering envelopes for bounded CUDA-vs-NIST calibration runs.
+# These catch broken or non-comparable outputs; tighten only after calibration work.
+calibrationHrrShapeRmse,0.00,1.00
+calibrationMassShapeRmse,0.00,1.00
+calibrationSmokeOpticalDepthShapeRmse,0.00,1.00
+calibrationRadiantHeatFluxShapeRmse,0.00,1.00
+averageGpuSolveMs,0.00,250.00
+averageGpuRenderMs,0.00,250.00
+"@
+Write-LfTextFile $targetsPath $targetsCsv
+
 $geometryHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geometryPath).Hash.ToLowerInvariant()
 $calibrationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $calibrationPath).Hash.ToLowerInvariant()
 $rawHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $rawPath).Hash.ToLowerInvariant()
@@ -190,6 +204,7 @@ $manifest = [ordered]@{
     files = [ordered]@{
         geometry = "geometry.json"
         calibrationCsv = "calibration.csv"
+        targetEnvelopeCsv = "validation-targets.csv"
         rawData = @("raw/Methanol_1m_Pool_R1.csv")
         processedData = @("calibration.csv")
         videoFrames = @()
@@ -233,7 +248,9 @@ $manifest = [ordered]@{
     }
     expectedValidationMetrics = @(
         "calibrationHrrShapeRmse",
-        "calibrationMassShapeRmse"
+        "calibrationMassShapeRmse",
+        "calibrationSmokeOpticalDepthShapeRmse",
+        "calibrationRadiantHeatFluxShapeRmse"
     )
 }
 
@@ -250,6 +267,8 @@ FCD DOI: https://doi.org/10.18434/mds2-2314
 License/terms: $licenseUrl
 
 This benchmark includes direct CSV channels for HRR, natural-gas burner HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived `massRemainingKg` and `smokeOpticalDepth` columns.
+
+`validation-targets.csv` declares the first bounded CUDA-vs-NIST comparison envelopes. They are deliberately broad until calibration work tightens the model.
 
 It intentionally does not claim thermocouple, IR-frame, or plume-height calibration because those are not present as numeric columns in this FCD CSV export.
 "@

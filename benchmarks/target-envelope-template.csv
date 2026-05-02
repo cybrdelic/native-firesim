@@ -3,12 +3,16 @@
 # Supported metrics:
 # averageDivergenceReduction,worstDivergenceAfterL2,worstDivergenceAfterMax,
 # maxFlameHeightMeters,finalMeanOpticalDepth,finalHeatReleaseProxy,maxHeat,
-# imageMeanLuma,imageMaxLuma,imageBrightPixels,imageBrightFraction,
+# imageMeanLuma,imageMaxLuma,imageMeanSaturation,imageWarmFireFraction,
+# imageTanSmokeFraction,imageBlackSmokeFraction,imageWhiteCoreFraction,
+# imageBrightPixels,imageBrightFraction,
 # averageGpuSolveMs,averageGpuRenderMs,
 # finalCharSum,finalAshSum,finalPyrolysisSum,finalProgressSum,
 # finalTurbulenceEnergySum,finalSootOpticalDepthSum,
 # maxPyrolysis,maxProgress,maxTurbulenceEnergy,
 # calibrationHrrShapeRmse,calibrationMassShapeRmse,
+# calibrationSmokeOpticalDepthShapeRmse,calibrationSmokeExtinctionShapeRmse,
+# calibrationRadiantHeatFluxShapeRmse,
 # calibrationThermocoupleShapeRmse,calibrationIrMeanShapeRmse,
 # calibrationIrMaxShapeRmse,calibrationPlumeHeightRmseMeters
 averageDivergenceReduction,0.02,1.00

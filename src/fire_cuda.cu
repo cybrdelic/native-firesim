@@ -34,6 +34,7 @@ struct SimParams {
     int cinematicMode;
     int raymarchSteps;
     int emberCount;
+    int renderDebugMode;
     float exposure;
     float reflectionGain;
     float smokeDarkness;
@@ -70,12 +71,12 @@ struct MetricAccumulator {
     int invalidCells;
 };
 
-constexpr int kPressureIterations = 24;
+constexpr int kPressureIterations = 40;
 constexpr float kPressureOmega = 1.52f;
 constexpr float kRoomHeightMeters = 2.03f;
 constexpr float kAdvectionScale = 0.62f;
 constexpr int kCudaBlockThreads = 256;
-constexpr int kMaxRaymarchSteps = 72;
+constexpr int kMaxRaymarchSteps = 96;
 constexpr int kMaxEmberCount = 192;
 constexpr int kVolumeLaunchDepth = 12;
 constexpr int kRenderLaunchRows = 36;
@@ -194,6 +195,24 @@ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+__device__ float luminance3(float3 color) {
+    return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
+}
+
+__device__ float saturation3(float3 color) {
+    const float maxc = fmaxf(color.x, fmaxf(color.y, color.z));
+    const float minc = fminf(color.x, fminf(color.y, color.z));
+    return maxc > 0.0001f ? (maxc - minc) / maxc : 0.0f;
+}
+
+__device__ float3 saturateAroundLuma(float3 color, float amount) {
+    const float luma = luminance3(color);
+    return make_float3(
+        saturate(luma + (color.x - luma) * amount),
+        saturate(luma + (color.y - luma) * amount),
+        saturate(luma + (color.z - luma) * amount));
+}
+
 __device__ float3 cross3(float3 a, float3 b) {
     return make_float3(
         a.y * b.z - a.z * b.y,
@@ -262,6 +281,28 @@ __device__ float3 projectPoint(const CameraState& cam, float3 point) {
     const float px = dot3(view, cam.right) / (depth * cam.tanHalfFov * cam.aspect);
     const float py = dot3(view, cam.up) / (depth * cam.tanHalfFov);
     return make_float3(0.5f + px * 0.5f, 0.5f - py * 0.5f, depth);
+}
+
+__device__ float volumeDomainFade(float u, float v, float w) {
+    const float side =
+        smoothstepf(0.000f, 0.065f, u) *
+        smoothstepf(1.000f, 0.935f, u) *
+        smoothstepf(0.000f, 0.070f, w) *
+        smoothstepf(1.000f, 0.930f, w);
+    const float floorFade = smoothstepf(0.000f, 0.018f, v);
+    const float topFade = smoothstepf(1.000f, 0.760f, v);
+    return saturate(side * floorFade * topFade);
+}
+
+__device__ float3 debugHeatColor(float value) {
+    value = saturate(value);
+    const float red = smoothstepf(0.05f, 0.45f, value);
+    const float orange = smoothstepf(0.24f, 0.78f, value);
+    const float white = smoothstepf(0.72f, 1.0f, value);
+    return make_float3(
+        saturate(red + white * 0.70f),
+        saturate(orange * 0.58f + white * 0.78f),
+        saturate(white * 0.62f));
 }
 
 __device__ float hash21(float2 p) {
@@ -511,12 +552,12 @@ __device__ float sampleScalarMacCormack(
 }
 
 __device__ float fuelBedMaterial(float x, float z) {
-    const float tray = smoothstepf(0.78f, 0.04f, fabsf(x)) * smoothstepf(0.35f, 0.035f, fabsf(z));
+    const float tray = smoothstepf(0.92f, 0.045f, fabsf(x)) * smoothstepf(0.43f, 0.040f, fabsf(z));
     const float logMass = fbm(make_float2(x * 3.7f + z * 0.9f, z * 5.4f - x * 0.6f));
     const float chips = fbm(make_float2(x * 15.0f + z * 4.0f, z * 18.0f - x * 5.0f));
     const float cracks = smoothstepf(0.50f, 0.74f, chips) * smoothstepf(0.24f, 0.86f, logMass);
     const float clumps = smoothstepf(0.24f, 0.82f, logMass * 0.86f + chips * 0.30f);
-    return saturate(tray * clumps * (1.0f - cracks * 0.58f));
+    return saturate(tray * (0.34f + clumps * 0.76f) * (1.0f - cracks * 0.42f));
 }
 
 __device__ float fuelBedSource(float x, float z, float h, float time) {
@@ -727,7 +768,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
 
     heat += bed * 4.65f * p.dt * (1.0f + radiativeFeedback * 1.18f) + charRelease * 3.10f;
     fuel += pyrolysisRate * 3.75f;
-    soot += pyrolysisRate * (0.22f + ash * 0.065f + saturate(1.0f - oxygen) * 0.24f) * p.smokeGain;
+    soot += pyrolysisRate * (0.090f + ash * 0.032f + saturate(1.0f - oxygen) * 0.13f) * p.smokeGain;
 
     if (p.leftDown != 0) {
         const float mx = p.mouseX;
@@ -750,8 +791,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float burnMass = fminf(oxygenLimited, oxygenLimited * thermalActivation * arrhenius * (104.0f + p.intensity * 28.0f) * p.dt);
     const float incomplete = saturate(1.0f - oxygen * 1.30f + fuel * 0.065f + soot * 0.015f);
     const float heatRelease = burnMass * 7.25f;
-    const float sootYield = burnMass * (0.10f + incomplete * 0.86f) * p.smokeGain;
-    const float sootOxidation = soot * oxygen * smoothstepf(860.0f, 1660.0f, tempK) * p.dt * 0.46f;
+    const float sootYield = burnMass * (0.035f + incomplete * 0.34f) * p.smokeGain;
+    const float sootOxidation = soot * oxygen * smoothstepf(760.0f, 1540.0f, tempK) * p.dt * 0.82f;
     const float frontProduction = burnMass * (9.5f + turbulenceEnergy * 3.2f) + pyrolysisRate * 0.68f + charRelease * 2.10f;
 
     heat += heatRelease;
@@ -771,7 +812,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     heat -= radiationLoss * p.dt * (0.88f + soot * 0.085f + sootOptics * 0.018f);
     heat *= expf(-p.dt * (0.31f + v * 0.64f + soot * 0.022f));
     fuel *= expf(-p.dt * (0.58f + heat * 0.20f + v * 0.92f));
-    soot *= expf(-p.dt * (0.022f + v * 0.011f));
+    soot *= expf(-p.dt * (0.060f + v * 0.092f + oxygen * 0.028f + saturate(boundaryAir) * 0.42f));
     pyrolysisRate *= expf(-p.dt * (1.55f + v * 0.58f));
 
     const float cellX = 1.0f / static_cast<float>(p.nx);
@@ -835,21 +876,33 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) forceVelocityKernel(
     const float cellX = 1.0f / static_cast<float>(p.nx);
     const float cellY = 1.0f / static_cast<float>(p.ny);
     const float cellZ = 1.0f / static_cast<float>(p.nz);
+    const float3 velL = sampleVelocity(uField, vField, wField, p, u - cellX, v, w);
+    const float3 velR = sampleVelocity(uField, vField, wField, p, u + cellX, v, w);
+    const float3 velD = sampleVelocity(uField, vField, wField, p, u, v - cellY, w);
+    const float3 velU = sampleVelocity(uField, vField, wField, p, u, v + cellY, w);
+    const float3 velB = sampleVelocity(uField, vField, wField, p, u, v, w - cellZ);
+    const float3 velF = sampleVelocity(uField, vField, wField, p, u, v, w + cellZ);
     const float gradX = sampleScalar(heat, p, u + cellX, v, w) - sampleScalar(heat, p, u - cellX, v, w);
     const float gradY = sampleScalar(heat, p, u, v + cellY, w) - sampleScalar(heat, p, u, v - cellY, w);
     const float gradZ = sampleScalar(heat, p, u, v, w + cellZ) - sampleScalar(heat, p, u, v, w - cellZ);
+    const float curlX = (velU.z - velD.z) - (velF.y - velB.y);
+    const float curlY = (velF.x - velB.x) - (velR.z - velL.z);
+    const float curlZ = (velR.y - velL.y) - (velU.x - velD.x);
+    const float curlMagnitude = sqrtf(curlX * curlX + curlY * curlY + curlZ * curlZ);
     const float curlNoiseA = fbm(make_float2(u * 9.0f + w * 3.7f + p.time * 0.22f, v * 13.0f - p.time * 0.31f)) - 0.5f;
     const float curlNoiseB = fbm(make_float2(w * 10.0f - p.time * 0.19f, u * 8.0f + v * 5.5f + p.time * 0.27f)) - 0.5f;
     const float thermalActivity = smoothstepf(0.04f, 4.20f, h + s * 0.28f);
     const float lesGain = sqrtf(fmaxf(0.0f, k)) * (0.30f + c * 0.54f);
     const float curlGain = p.turbulence * (0.18f + thermalActivity * 0.82f + lesGain * 1.12f);
-    const float buoyancy = h * (2.58f + p.turbulence * 0.50f + c * 0.24f) - s * 0.038f - gradY * 0.11f;
+    const float vortexGain = p.turbulence * thermalActivity * saturate(curlMagnitude * 0.46f) * 0.68f;
+    const float buoyancy = h * (2.36f + p.turbulence * 0.42f + c * 0.20f) - s * 0.075f - gradY * 0.14f;
 
     atomicAdd(&vField[vIndex(x, y + 1, z, p)], p.dt * buoyancy);
-    atomicAdd(&uField[uIndex(x, y, z, p)], p.dt * (p.wind * (0.34f + v * 0.96f) + (-gradZ * 1.85f + curlNoiseA * 0.72f) * curlGain));
-    atomicAdd(&uField[uIndex(x + 1, y, z, p)], p.dt * (p.wind * (0.34f + v * 0.96f) + (-gradZ * 1.85f + curlNoiseA * 0.72f) * curlGain));
-    atomicAdd(&wField[wIndex(x, y, z, p)], p.dt * ((gradX * 1.85f + curlNoiseB * 0.72f) * curlGain));
-    atomicAdd(&wField[wIndex(x, y, z + 1, p)], p.dt * ((gradX * 1.85f + curlNoiseB * 0.72f) * curlGain));
+    atomicAdd(&uField[uIndex(x, y, z, p)], p.dt * (p.wind * (0.34f + v * 0.96f) + (-gradZ * 1.62f + curlNoiseA * 0.18f + curlX * vortexGain) * curlGain));
+    atomicAdd(&uField[uIndex(x + 1, y, z, p)], p.dt * (p.wind * (0.34f + v * 0.96f) + (-gradZ * 1.62f + curlNoiseA * 0.18f + curlX * vortexGain) * curlGain));
+    atomicAdd(&wField[wIndex(x, y, z, p)], p.dt * ((gradX * 1.62f + curlNoiseB * 0.18f + curlZ * vortexGain) * curlGain));
+    atomicAdd(&wField[wIndex(x, y, z + 1, p)], p.dt * ((gradX * 1.62f + curlNoiseB * 0.18f + curlZ * vortexGain) * curlGain));
+    atomicAdd(&vField[vIndex(x, y + 1, z, p)], p.dt * curlY * vortexGain * 0.22f);
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) divergenceKernel(float* divergence, float* pressure, const float* uField, const float* vField, const float* wField, SimParams p) {
@@ -1180,7 +1233,7 @@ __device__ float3 roomBackgroundRay(const CameraState& cam, float2 uv, float3 rd
         const float soot = expf(-(hit.x * hit.x * 0.82f + hit.z * hit.z * 1.12f)) * smoothstepf(0.36f, 1.92f, hit.y);
         color = lerp3(color, make_float3(0.012f, 0.010f, 0.009f), soot * 0.82f * p.smokeDarkness);
         const float wallGlow = expf(-(hit.x * hit.x * 1.1f + hit.z * hit.z * 1.3f + (hit.y - 0.70f) * (hit.y - 0.70f) * 1.0f)) * glow;
-        color = add3(color, mul3(make_float3(0.92f, 0.25f, 0.045f), wallGlow * 0.21f));
+        color = add3(color, mul3(make_float3(0.78f, 0.24f, 0.060f), wallGlow * 0.105f));
         if (surface == 3 && hit.x < 0.0f) {
             const float window = rectMask(make_float2(hit.z, hit.y), make_float2(-1.28f, 0.92f), make_float2(0.06f, 0.62f), 0.030f);
             const float glassNoise = fbm(make_float2(hit.y * 11.0f, hit.z * 8.0f));
@@ -1305,6 +1358,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     const float* progressField,
     const float* turbulenceEnergyField,
     const float* sootOpticsField,
+    const float* uField,
+    const float* vField,
+    const float* wField,
     SimParams p) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = p.launchFrameYStart + blockIdx.y * blockDim.y + threadIdx.y;
@@ -1324,7 +1380,13 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     float boxFar = 0.0f;
     float3 accum = make_float3(0.0f, 0.0f, 0.0f);
     float trans = 1.0f;
-    float maxHeat = 0.0f;
+    float flameGlow = 0.0f;
+    float smokeOcclusion = 0.0f;
+    float debugFlame = 0.0f;
+    float debugOpticalDepth = 0.0f;
+    float debugTemperature = 0.0f;
+    float debugFuel = 0.0f;
+    float debugVelocity = 0.0f;
 
     if (intersectBox(cam.eye, rd, make_float3(-1.05f, 0.02f, -0.82f), make_float3(1.05f, 2.05f, 0.82f), &boxNear, &boxFar)) {
         const int raySteps = min(max(p.raymarchSteps, 24), kMaxRaymarchSteps);
@@ -1338,6 +1400,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float fu = saturate((wp.x + 1.05f) / 2.10f);
             const float fv = saturate((wp.y - 0.02f) / 2.03f);
             const float fw = saturate((wp.z + 0.82f) / 1.64f);
+            const float domainFade = volumeDomainFade(fu, fv, fw);
+            if (domainFade <= 0.001f) {
+                continue;
+            }
 
             const float warpA = fbm(make_float2(fu * 7.0f + fv * 5.0f + p.time * 0.33f, fw * 9.0f - p.time * 0.21f)) - 0.5f;
             const float warpB = fbm(make_float2(fw * 8.0f - fv * 4.0f - p.time * 0.25f, fu * 8.0f + p.time * 0.18f)) - 0.5f;
@@ -1356,12 +1422,13 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float progress = sampleScalar(progressField, p, warpedFu, warpedFv, warpedFw);
             const float turbulenceEnergy = sampleScalar(turbulenceEnergyField, p, warpedFu, warpedFv, warpedFw);
             const float sootOptics = sampleScalar(sootOpticsField, p, warpedFu, warpedFv, warpedFw);
-            const float activeField = heat + fuel * 0.42f + soot * 0.34f + progress * 0.32f + pyrolysis * 0.18f;
+            const float3 velocity = sampleVelocity(uField, vField, wField, p, warpedFu, warpedFv, warpedFw);
+            const float activeField = (heat + fuel * 0.42f + soot * 0.34f + progress * 0.32f + pyrolysis * 0.18f) * domainFade;
             if (activeField <= 0.0025f) {
                 continue;
             }
-            maxHeat = fmaxf(maxHeat, heat);
-
+            debugFuel = fmaxf(debugFuel, domainFade * saturate(fuel * 0.18f + charMass * 0.22f + pyrolysis * 0.30f));
+            debugVelocity = fmaxf(debugVelocity, saturate(sqrtf(dot3(velocity, velocity)) * 0.22f));
             const float cellX = 1.0f / static_cast<float>(p.nx);
             const float cellY = 1.0f / static_cast<float>(p.ny);
             const float cellZ = 1.0f / static_cast<float>(p.nz);
@@ -1405,7 +1472,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                     (1.0f - sheetHole * (0.56f + lesBreakup * 0.28f)),
                 smoothstepf(0.30f, 0.035f, fv) * smoothstepf(0.55f, 1.9f, heat) * 0.12f);
             const float thinFront = smoothstepf(0.04f, 0.56f, frontGradient + progress * 0.10f) * smoothstepf(0.02f, 0.92f, reactionFront);
-            const float flameDensity =
+            const float flameDensity = domainFade *
                 combustion * reactionFront * flameSheet * (0.010f + fieldFilament * 2.05f + convectiveSheet * 1.45f + thinFront * 0.55f + progress * 0.10f) *
                 (0.055f + breakup * 1.20f + raggedEdge * 0.50f + lesBreakup * 0.44f) *
                 (0.62f + thinFront * 1.55f);
@@ -1413,43 +1480,76 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.14f, 0.48f, fv) *
                 smoothstepf(0.030f, 1.20f, sootOptics + soot * 0.42f) *
                 (0.12f + fineNoise * 0.12f + shearNoise * 0.10f + plumeNoise * 0.92f + raggedEdge * 0.28f + turbulenceEnergy * 0.09f);
-            const float sootDensity =
+            const float sootDensity = domainFade * (
                 smoothstepf(0.020f, 1.05f, sootOptics + soot * 0.32f) *
                     smoothstepf(0.16f, 0.42f, fv) *
-                    (0.055f + fineNoise * 0.10f + shearNoise * 0.10f + plumeNoise * 0.94f + raggedEdge * 0.34f + ash * 0.030f) +
-                upperPlume * (0.48f + plumeNoise * 0.58f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.040f + plumeNoise * 0.08f);
+                    (0.040f + fineNoise * 0.060f + shearNoise * 0.070f + plumeNoise * 0.58f + raggedEdge * 0.22f + ash * 0.020f) +
+                upperPlume * (0.26f + plumeNoise * 0.34f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.025f + plumeNoise * 0.045f));
 
-            const float particleRadius = saturate(0.10f + sootOptics * 0.040f + ash * 0.10f + saturate(1.0f - oxygen) * 0.16f);
-            const float sootExtinction = sootDensity * (7.20f + particleRadius * 8.60f + p.smokeGain * 2.10f) * p.smokeDarkness * (0.90f + sootOptics * 0.19f);
+            const float particleRadius = saturate(0.08f + sootOptics * 0.028f + ash * 0.085f + saturate(1.0f - oxygen) * 0.12f);
+            const float sootAbsorption = sootDensity * (1.85f + particleRadius * 3.10f + sootOptics * 0.42f) * p.smokeDarkness;
+            const float sootScattering = sootDensity * (0.14f + (1.0f - particleRadius) * 0.32f) * (0.55f + p.smokeGain * 0.34f);
+            const float sootExtinction = sootAbsorption + sootScattering;
             const float flameExtinction = flameDensity * 0.24f;
             const float extinction = (sootExtinction + flameExtinction) * stepT;
-            const float smokeAlpha = 1.0f - expf(-sootExtinction * stepT);
+            const float smokeAlpha = 1.0f - expf(-sootAbsorption * stepT);
+            const float scatterAlpha = 1.0f - expf(-sootScattering * stepT);
             const float shadow = volumeShadow(sootOpticsField, progressField, p, warpedFu, warpedFv, warpedFw);
-            const float whiteCore = smoothstepf(1760.0f, 2550.0f, tempK) * combustion * smoothstepf(0.08f, 0.72f, oxygen) * (0.38f + thinFront * 0.62f);
+            const float whiteCore = smoothstepf(1680.0f, 2380.0f, tempK) * combustion * smoothstepf(0.08f, 0.72f, oxygen) * (0.42f + thinFront * 0.58f);
             const float radiantPower = powf(saturate((tempK - 780.0f) / 1720.0f), 2.05f) * (2.20f + fieldFilament * 4.35f + convectiveSheet * 2.55f + progress * 0.62f + whiteCore * 3.40f);
-            float3 flameColor = lerp3(blackbodyColor(tempK), make_float3(1.0f, 0.96f, 0.78f), saturate(whiteCore * 0.88f));
+            const float whiteFilament = saturate(whiteCore * (0.22f + fieldFilament * 0.32f + thinFront * 0.24f));
+            float3 flameColor = lerp3(blackbodyColor(tempK), make_float3(1.0f, 0.72f, 0.34f), saturate(whiteFilament * 0.30f));
             float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.42f + shadow * 1.18f + whiteCore * 1.75f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.18f, 0.98f, 0.68f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * (0.82f + shadow * 0.52f)));
             flameEmission = add3(flameEmission, mul3(make_float3(1.08f, 0.14f, 0.018f), fieldFilament * heat * stepT * (0.085f + shadow * 0.075f) * (1.0f - whiteCore * 0.70f)));
-            const float smokeGray = saturate(ash * 0.20f + oxygen * 0.06f + 0.10f / fmaxf(0.18f, sootOptics + soot * 0.25f));
-            const float3 smokeBlack = make_float3(0.0045f, 0.0047f, 0.0052f);
-            const float3 smokeAsh = make_float3(0.115f, 0.112f, 0.106f);
-            float3 smokeColor = lerp3(smokeBlack, smokeAsh, smokeGray);
-            const float backScatter = smokeAlpha * shadow * baseGlow * (0.035f + flameDensity * 0.028f) * (0.30f + (1.0f - particleRadius) * 0.34f);
-            smokeColor = add3(smokeColor, mul3(make_float3(0.58f, 0.30f, 0.105f), backScatter));
-            const float scatterGain = smokeAlpha * (0.007f + shadow * 0.020f + flameDensity * 0.012f + turbulenceEnergy * 0.004f) * (0.22f + (1.0f - particleRadius) * 0.38f);
+            const float sootLoad = saturate(sootOptics * 0.74f + soot * 0.20f + upperPlume * 0.46f);
+            const float ashVeil = saturate(ash * 0.075f + smoothstepf(0.18f, 0.82f, fv) * (1.0f - sootLoad) * 0.035f);
+            const float3 smokeBlack = make_float3(0.0026f, 0.0027f, 0.0031f);
+            const float3 smokeCoal = make_float3(0.018f, 0.018f, 0.018f);
+            const float3 smokeAsh = make_float3(0.080f, 0.079f, 0.075f);
+            float3 smokeColor = lerp3(smokeCoal, smokeBlack, sootLoad);
+            smokeColor = lerp3(smokeColor, smokeAsh, ashVeil);
+            const float backScatter = scatterAlpha * shadow * baseGlow * (0.006f + flameDensity * 0.006f) * (0.06f + (1.0f - particleRadius) * 0.08f);
+            smokeColor = add3(smokeColor, mul3(make_float3(0.20f, 0.17f, 0.13f), backScatter));
+            const float scatterGain = scatterAlpha * (0.010f + shadow * 0.020f + flameDensity * 0.008f + turbulenceEnergy * 0.003f) * (0.20f + (1.0f - particleRadius) * 0.30f);
             const float coalGlow = smoothstepf(0.004f, 0.18f, charMass) * smoothstepf(0.64f, 0.02f, fv) * (0.13f + pyrolysis * 0.30f + heat * 0.018f);
 
+            debugFlame = fmaxf(debugFlame, saturate(flameDensity * radiantPower * 0.26f));
+            debugOpticalDepth = saturate(debugOpticalDepth + sootExtinction * stepT);
+            debugTemperature = fmaxf(debugTemperature, saturate((tempK - 520.0f) / 1900.0f));
             accum = add3(accum, mul3(flameEmission, trans));
             accum = add3(accum, mul3(make_float3(1.0f, 0.24f, 0.035f), trans * coalGlow * stepT));
             accum = add3(accum, mul3(smokeColor, trans * scatterGain));
+            flameGlow = fmaxf(flameGlow, flameDensity * radiantPower * (0.18f + fieldFilament * 0.25f + whiteFilament * 0.35f));
+            smokeOcclusion = saturate(smokeOcclusion + smokeAlpha * trans);
             trans *= expf(-extinction);
         }
     }
 
+    if (p.renderDebugMode != 0) {
+        float3 debugColor = make_float3(0.0f, 0.0f, 0.0f);
+        if (p.renderDebugMode == 1) {
+            debugColor = debugHeatColor(debugFlame);
+        } else if (p.renderDebugMode == 2) {
+            const float od = saturate(debugOpticalDepth);
+            debugColor = make_float3(od, od * 0.90f, od * 0.78f);
+        } else if (p.renderDebugMode == 3) {
+            debugColor = make_float3(trans, trans, trans);
+        } else if (p.renderDebugMode == 4) {
+            debugColor = debugHeatColor(debugTemperature);
+        } else if (p.renderDebugMode == 5) {
+            debugColor = make_float3(debugFuel * 0.82f, debugFuel * 0.48f, debugFuel * 0.18f);
+        } else {
+            debugColor = make_float3(debugVelocity * 0.20f, debugVelocity * 0.72f, debugVelocity);
+        }
+        out[y * p.frameW + x] = make_float4(debugColor.x, debugColor.y, debugColor.z, 1.0f);
+        return;
+    }
+
     color = add3(mul3(color, trans), accum);
 
-    const float bloom = saturate(maxHeat * 0.18f);
-    color = add3(color, mul3(make_float3(1.0f, 0.66f, 0.22f), bloom * bloom * 0.085f * p.reflectionGain));
+    const float bloom = saturate(flameGlow * 0.18f) * (1.0f - saturate(smokeOcclusion * 0.78f));
+    color = add3(color, mul3(make_float3(1.0f, 0.42f, 0.085f), bloom * bloom * 0.055f * p.reflectionGain));
     out[y * p.frameW + x] = make_float4(
         fmaxf(0.0f, color.x),
         fmaxf(0.0f, color.y),
@@ -1469,6 +1569,20 @@ __device__ float3 acesToneMap(float3 color) {
         saturate((color.z * (a * color.z + b)) / (color.z * (c * color.z + d) + e)));
 }
 
+__device__ float3 referenceFireDisplayLook(float3 color) {
+    const float luma = luminance3(color);
+    const float sat = saturation3(color);
+    const float warm = saturate((color.x - color.z) * 2.15f + (color.y - color.z) * 0.70f);
+    const float smoke = smoothstepf(0.05f, 0.42f, luma) * smoothstepf(0.44f, 0.05f, sat) * (1.0f - warm * 0.65f);
+    const float shadow = smoothstepf(0.40f, 0.02f, luma);
+    const float hot = warm * smoothstepf(0.50f, 0.84f, luma);
+
+    color = mul3(color, 1.0f - shadow * (0.16f + smoke * 0.24f));
+    color = saturateAroundLuma(color, 1.0f + warm * (0.22f - hot * 0.10f));
+    color = lerp3(color, make_float3(1.0f, fmaxf(color.y, 0.80f), fmaxf(color.z, 0.36f)), hot * 0.08f);
+    return make_float3(saturate(color.x), saturate(color.y), saturate(color.z));
+}
+
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
     std::uint32_t* out,
     const float4* hdr,
@@ -1482,8 +1596,11 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
     const int pixelIndex = y * p.frameW + x;
     const float4 radiance = hdr[pixelIndex];
     float3 color = make_float3(radiance.x, radiance.y, radiance.z);
-    const float exposure = (p.cinematicMode != 0 ? 1.10f : 1.0f) * p.exposure;
+    const float exposure = (p.cinematicMode != 0 && p.renderDebugMode == 0 ? 1.04f : 1.0f) * p.exposure;
     color = acesToneMap(mul3(color, exposure));
+    if (p.cinematicMode != 0 && p.renderDebugMode == 0) {
+        color = referenceFireDisplayLook(color);
+    }
     color = make_float3(
         powf(saturate(color.x), 1.0f / 2.2f),
         powf(saturate(color.y), 1.0f / 2.2f),
@@ -1518,6 +1635,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) overlayKernel(
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = p.launchFrameYStart + blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
+        return;
+    }
+    if (p.renderDebugMode != 0) {
         return;
     }
     if (p.showGizmos == 0 && p.emberCount <= 0) {
@@ -1660,6 +1780,7 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.cinematicMode = 1;
     params.raymarchSteps = 56;
     params.emberCount = 96;
+    params.renderDebugMode = 0;
     params.exposure = 1.0f;
     params.reflectionGain = 1.0f;
     params.smokeDarkness = 1.0f;
@@ -1883,6 +2004,7 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
     params.cinematicMode = settings.cinematicMode != 0 ? 1 : 0;
     params.raymarchSteps = std::max(24, std::min(kMaxRaymarchSteps, settings.raymarchSteps));
     params.emberCount = std::max(0, std::min(kMaxEmberCount, settings.emberCount));
+    params.renderDebugMode = std::max(0, std::min(6, settings.renderDebugMode));
     params.exposure = std::max(0.45f, std::min(2.40f, settings.exposure));
     params.reflectionGain = std::max(0.0f, std::min(2.2f, settings.reflectionGain));
     params.smokeDarkness = std::max(0.35f, std::min(2.4f, settings.smokeDarkness));
@@ -2035,6 +2157,9 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
             g_progress,
             g_turbulenceEnergy,
             g_sootOptics,
+            g_u,
+            g_v,
+            g_w,
             slice);
     }
     if (!check("renderKernel launch", cudaGetLastError())) {

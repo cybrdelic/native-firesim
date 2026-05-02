@@ -100,18 +100,27 @@ Run validation against an external target envelope:
 .\build\NativeFireSim.exe --validation --targets=benchmarks\reference-fire-room-envelope.csv --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
-Run validation against measured burn sidecars:
+Run the manifest-driven NIST FCD calibration runner. This verifies the real dataset first, launches the bounded CUDA validation path only with explicit risk acceptance, then writes experiment-scoped metrics, a sim-vs-measured CSV, JSON, PNG, and GIF:
 
 ```powershell
-.\build\NativeFireSim.exe --validation --calibration=benchmarks\real-burn-calibration-template.csv --geometry=benchmarks\geometry-template.json --allow-gpu-kernels --accept-bugcheck-risk
+.\scripts\run-nist-calibration.ps1 -RunGpuKernels -AcceptBugcheckRisk
 ```
 
 That writes:
 
-- `out/validation-metrics.csv`
-- `out/validation-report.json`
-- `out/validation-frame.bmp`
-- `out/validation-app-frame.bmp`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-metrics.csv`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/calibration-comparison.csv`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-report.json`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/sim-vs-nist-comparison.png`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/sim-vs-nist-hrr.gif`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-frame.bmp`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-app-frame.bmp`
+
+The lower-level native executable still accepts direct sidecars for custom runs:
+
+```powershell
+.\build\NativeFireSim.exe --validation --manifest=benchmarks\nist-fcd\methanol-1m-pool-r1\manifest.json --calibration=benchmarks\nist-fcd\methanol-1m-pool-r1\calibration.csv --geometry=benchmarks\nist-fcd\methanol-1m-pool-r1\geometry.json --targets=benchmarks\nist-fcd\methanol-1m-pool-r1\validation-targets.csv --output-dir=out\validation\NIST_FCD_Methanol_1m_Pool_R1 --pool-fire-calibration --allow-gpu-kernels --accept-bugcheck-risk
+```
 
 CUDA diagnostics only, without simulation kernels:
 
@@ -154,7 +163,7 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - native viewport UI with a tool rail, field controls, and viewport overlays
 - ballistic ember particles with wind coupling
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
-- optional benchmark target envelopes via `--targets=<csv>` and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, mass loss, thermocouples, IR, video-derived plume height, and geometry data
+- optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 
 The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 72 raymarch steps, 176 ember samples, darker soot, stronger floor reflection, and target-room shading. It uses 24 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and one final device-to-host display-frame copy. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
 

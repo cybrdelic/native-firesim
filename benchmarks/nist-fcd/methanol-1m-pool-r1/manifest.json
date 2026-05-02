@@ -14,6 +14,7 @@
     "files":  {
                   "geometry":  "geometry.json",
                   "calibrationCsv":  "calibration.csv",
+                  "targetEnvelopeCsv":  "validation-targets.csv",
                   "rawData":  [
                                   "raw/Methanol_1m_Pool_R1.csv"
                               ],
@@ -93,6 +94,8 @@
                       },
     "expectedValidationMetrics":  [
                                       "calibrationHrrShapeRmse",
-                                      "calibrationMassShapeRmse"
+                                      "calibrationMassShapeRmse",
+                                      "calibrationSmokeOpticalDepthShapeRmse",
+                                      "calibrationRadiantHeatFluxShapeRmse"
                                   ]
 }

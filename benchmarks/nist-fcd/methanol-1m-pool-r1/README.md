@@ -9,4 +9,6 @@ License/terms: https://www.nist.gov/open/license
 
 This benchmark includes direct CSV channels for HRR, natural-gas burner HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived massRemainingKg and smokeOpticalDepth columns.
 
+alidation-targets.csv declares the first bounded CUDA-vs-NIST comparison envelopes. They are deliberately broad until calibration work tightens the model.
+
 It intentionally does not claim thermocouple, IR-frame, or plume-height calibration because those are not present as numeric columns in this FCD CSV export.

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -23,17 +24,17 @@ constexpr int kFrameWidth = 960;
 constexpr int kFrameHeight = 540;
 constexpr int kSimulationGridWidth = 384;
 constexpr int kSimulationGridHeight = 240;
-constexpr int kRaymarchSteps = 72;
+constexpr int kRaymarchSteps = 88;
 constexpr int kEmberCount = 176;
 constexpr float kExposure = 0.92f;
-constexpr float kReflectionGain = 1.65f;
-constexpr float kSmokeDarkness = 1.85f;
+constexpr float kReflectionGain = 1.20f;
+constexpr float kSmokeDarkness = 1.08f;
 constexpr float kFireIntensity = 1.42f;
-constexpr float kSmokeGain = 1.35f;
+constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
 constexpr float kTargetFrameSeconds = 1.0f / 30.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 2u;
+constexpr DWORD kSharedViewportVersion = 3u;
 constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV1";
 constexpr unsigned long long kWorkerFrameStaleMs = 2200ull;
 constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
@@ -100,6 +101,7 @@ bool g_rightDown = false;
 bool g_orbiting = false;
 bool g_needsReset = false;
 bool g_showGizmos = true;
+bool g_cleanViewportMode = false;
 bool g_useCudaBackend = false;
 float g_mouseX = 0.5f;
 float g_mouseY = 0.10f;
@@ -115,6 +117,7 @@ float g_cameraYaw = 0.0f;
 float g_cameraPitch = 0.08f;
 float g_cameraDistance = 2.62f;
 int g_activeGizmo = 1;
+int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
 float g_safePreviewTime = 0.0f;
@@ -385,6 +388,18 @@ const char* toolName(int tool) {
     }
 }
 
+const char* renderDebugName(int mode) {
+    switch (mode) {
+    case 1: return "FLAME";
+    case 2: return "SOOT";
+    case 3: return "TRANS";
+    case 4: return "TEMP";
+    case 5: return "FUEL";
+    case 6: return "VEL";
+    default: return "FINAL";
+    }
+}
+
 void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
     const bool active = activeTool == tool;
     fillRect(pixels, rect, active ? 0.105f : 0.048f, active ? 0.059f : 0.050f, active ? 0.037f : 0.052f, 1.0f);
@@ -459,10 +474,13 @@ void drawViewportOverlays(std::vector<std::uint32_t>& pixels, const FireSettings
     drawLinePx(pixels, ax, ay, ax - 30, ay + 20, 0.20f, 0.42f, 1.0f, 0.86f);
 }
 
-void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend) {
+void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
     std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
 
     blitViewport(pixels, simPixels);
+    if (cleanViewport) {
+        return;
+    }
 
     fillRect(pixels, kRailRect, 0.020f, 0.022f, 0.022f, 0.74f);
     fillRect(pixels, kTopBarRect, 0.018f, 0.019f, 0.019f, 0.70f);
@@ -509,13 +527,14 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   ARROWS WIND/TURB   G OVERLAY   R RESET   ESC QUIT" : "SAFE FALLBACK PREVIEW   WORKER STARTING/STALE   ARROWS WIND/TURB   ESC QUIT",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "SAFE FALLBACK PREVIEW   WORKER STARTING/STALE   D DEBUG   C CLEAN",
         1,
         0.76f,
         0.78f,
         0.72f,
         0.88f);
-    drawClippedText(pixels, 276, 506, g_workerUiStatus, 82, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
+    drawText(pixels, 276, 506, renderDebugName(settings.renderDebugMode), 1, 0.86f, 0.84f, 0.62f, 0.88f);
+    drawClippedText(pixels, 330, 506, g_workerUiStatus, 74, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
 }
 
 int hitTestToolButton(int frameX, int frameY) {
@@ -576,12 +595,14 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | %.0f fps | %s | wind %.2f | turbulence %.2f | full viewport",
+        "Native FireSim %s | %.0f fps | %s | debug %s | wind %.2f | turbulence %.2f | %s",
         g_useCudaBackend ? "CUDA 3D volume" : "safe animated preview",
         fps,
         toolName(g_activeGizmo),
+        renderDebugName(g_renderDebugMode),
         g_wind,
-        g_turbulence);
+        g_turbulence,
+        g_cleanViewportMode ? "clean viewport" : "operator UI");
     SetWindowTextA(g_window, title);
 }
 
@@ -672,6 +693,14 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == 'G') {
             g_showGizmos = !g_showGizmos;
+            return 0;
+        }
+        if (wParam == 'C') {
+            g_cleanViewportMode = !g_cleanViewportMode;
+            return 0;
+        }
+        if (wParam == 'D') {
+            g_renderDebugMode = (g_renderDebugMode + 1) % 7;
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
@@ -791,6 +820,64 @@ bool writeBmp(const char* path, const std::vector<std::uint32_t>& pixels, int wi
     out.write(reinterpret_cast<const char*>(&infoHeader), sizeof(infoHeader));
     out.write(reinterpret_cast<const char*>(pixels.data()), pixelBytes);
     return out.good();
+}
+
+std::string normalizePathSeparators(std::string path) {
+    for (char& c : path) {
+        if (c == '/') {
+            c = '\\';
+        }
+    }
+    while (path.size() > 1 && (path.back() == '\\' || path.back() == '/')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+bool ensureDirectoryTree(const std::string& directory) {
+    if (directory.empty()) {
+        return false;
+    }
+    const std::string path = normalizePathSeparators(directory);
+    std::string partial;
+    std::size_t start = 0;
+    if (path.size() >= 3 && path[1] == ':' && path[2] == '\\') {
+        partial = path.substr(0, 3);
+        start = 3;
+    }
+    while (start < path.size()) {
+        const std::size_t slash = path.find('\\', start);
+        const std::size_t end = slash == std::string::npos ? path.size() : slash;
+        if (end > start) {
+            if (!partial.empty() && partial.back() != '\\') {
+                partial += '\\';
+            }
+            partial += path.substr(start, end - start);
+            if (!CreateDirectoryA(partial.c_str(), nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_ALREADY_EXISTS) {
+                    return false;
+                }
+            }
+        }
+        if (slash == std::string::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    return true;
+}
+
+std::string joinPath(const std::string& directory, const char* filename) {
+    if (directory.empty()) {
+        return filename;
+    }
+    std::string path = normalizePathSeparators(directory);
+    if (!path.empty() && path.back() != '\\') {
+        path += '\\';
+    }
+    path += filename;
+    return path;
 }
 
 bool loadBmp(const char* path, std::vector<std::uint32_t>& pixels, int width, int height) {
@@ -982,6 +1069,11 @@ int writeGpuSafetyStop(const char* requestedMode) {
 struct ImageStats {
     float meanLuma = 0.0f;
     float maxLuma = 0.0f;
+    float meanSaturation = 0.0f;
+    float warmFireFraction = 0.0f;
+    float tanSmokeFraction = 0.0f;
+    float blackSmokeFraction = 0.0f;
+    float whiteCoreFraction = 0.0f;
     float brightFraction = 0.0f;
     int brightPixels = 0;
 };
@@ -992,19 +1084,47 @@ ImageStats computeImageStats(const std::vector<std::uint32_t>& pixels) {
         return stats;
     }
     double total = 0.0;
+    double totalSaturation = 0.0;
+    int warmFirePixels = 0;
+    int tanSmokePixels = 0;
+    int blackSmokePixels = 0;
+    int whiteCorePixels = 0;
     for (const std::uint32_t pixel : pixels) {
         const float r = static_cast<float>((pixel >> 16) & 0xff) / 255.0f;
         const float g = static_cast<float>((pixel >> 8) & 0xff) / 255.0f;
         const float b = static_cast<float>(pixel & 0xff) / 255.0f;
         const float luma = r * 0.2126f + g * 0.7152f + b * 0.0722f;
+        const float maxChannel = std::max(r, std::max(g, b));
+        const float minChannel = std::min(r, std::min(g, b));
+        const float saturation = maxChannel > 0.0001f ? (maxChannel - minChannel) / maxChannel : 0.0f;
+        const bool warm = r > g * 1.05f && r > b * 1.55f && luma > 0.20f;
         total += luma;
+        totalSaturation += saturation;
         stats.maxLuma = std::max(stats.maxLuma, luma);
         if (luma > 0.68f) {
             ++stats.brightPixels;
         }
+        if (warm) {
+            ++warmFirePixels;
+        }
+        if (r > g * 1.03f && g > b * 1.35f && saturation < 0.58f && luma > 0.20f && luma < 0.68f) {
+            ++tanSmokePixels;
+        }
+        if (luma < 0.16f && saturation < 0.42f) {
+            ++blackSmokePixels;
+        }
+        if (warm && luma > 0.82f && saturation < 0.40f) {
+            ++whiteCorePixels;
+        }
     }
-    stats.meanLuma = static_cast<float>(total / static_cast<double>(pixels.size()));
-    stats.brightFraction = static_cast<float>(static_cast<double>(stats.brightPixels) / static_cast<double>(pixels.size()));
+    const double pixelCount = static_cast<double>(pixels.size());
+    stats.meanLuma = static_cast<float>(total / pixelCount);
+    stats.meanSaturation = static_cast<float>(totalSaturation / pixelCount);
+    stats.warmFireFraction = static_cast<float>(static_cast<double>(warmFirePixels) / pixelCount);
+    stats.tanSmokeFraction = static_cast<float>(static_cast<double>(tanSmokePixels) / pixelCount);
+    stats.blackSmokeFraction = static_cast<float>(static_cast<double>(blackSmokePixels) / pixelCount);
+    stats.whiteCoreFraction = static_cast<float>(static_cast<double>(whiteCorePixels) / pixelCount);
+    stats.brightFraction = static_cast<float>(static_cast<double>(stats.brightPixels) / pixelCount);
     return stats;
 }
 
@@ -1053,12 +1173,32 @@ std::string argumentValue(const std::string& args, const char* prefix) {
         return {};
     }
     const std::size_t valueStart = pos + std::strlen(prefix);
+    if (valueStart >= args.size()) {
+        return {};
+    }
+    if (args[valueStart] == '"') {
+        const std::size_t valueEnd = args.find('"', valueStart + 1);
+        if (valueEnd == std::string::npos) {
+            return args.substr(valueStart + 1);
+        }
+        return args.substr(valueStart + 1, valueEnd - valueStart - 1);
+    }
     const std::size_t valueEnd = args.find(' ', valueStart);
     std::string value = args.substr(valueStart, valueEnd == std::string::npos ? std::string::npos : valueEnd - valueStart);
-    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-        value = value.substr(1, value.size() - 2);
-    }
     return value;
+}
+
+int argumentIntValue(const std::string& args, const char* prefix, int fallback, int minimum, int maximum) {
+    const std::string value = argumentValue(args, prefix);
+    if (value.empty()) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str()) {
+        return fallback;
+    }
+    return static_cast<int>(std::max<long>(minimum, std::min<long>(maximum, parsed)));
 }
 
 void applyCanonicalFireSettings(FireSettings& settings) {
@@ -1071,6 +1211,7 @@ void applyCanonicalFireSettings(FireSettings& settings) {
     settings.intensity = kFireIntensity;
     settings.smoke = kSmokeGain;
     settings.turbulence = kTurbulence;
+    settings.renderDebugMode = 0;
 }
 
 unsigned long long tickMs() {
@@ -1462,12 +1603,18 @@ struct CalibrationSample {
     float timeSeconds = 0.0f;
     float hrrKw = 0.0f;
     float massRemainingKg = 0.0f;
+    float smokeOpticalDepth = 0.0f;
+    float smokeExtinctionCoefficientPerM = 0.0f;
+    float radiantHeatFluxKwPerM2 = 0.0f;
     float thermocoupleMeanC = 0.0f;
     float irMeanC = 0.0f;
     float irMaxC = 0.0f;
     float plumeHeightMeters = 0.0f;
     bool hasHrr = false;
     bool hasMass = false;
+    bool hasSmokeOpticalDepth = false;
+    bool hasSmokeExtinctionCoefficient = false;
+    bool hasRadiantHeatFlux = false;
     bool hasThermocouple = false;
     bool hasIrMean = false;
     bool hasIrMax = false;
@@ -1486,6 +1633,14 @@ struct CalibrationReport {
     float irMeanShapeRmse = -1.0f;
     float irMaxShapeRmse = -1.0f;
     float plumeHeightRmseMeters = -1.0f;
+    float smokeOpticalDepthShapeRmse = -1.0f;
+    float smokeExtinctionShapeRmse = -1.0f;
+    float radiantHeatFluxShapeRmse = -1.0f;
+    int hrrSamplesCompared = 0;
+    int massSamplesCompared = 0;
+    int smokeOpticalDepthSamplesCompared = 0;
+    int smokeExtinctionSamplesCompared = 0;
+    int radiantHeatFluxSamplesCompared = 0;
 };
 
 std::vector<std::string> splitCsvLine(const std::string& line) {
@@ -1568,6 +1723,15 @@ std::vector<CalibrationSample> loadCalibrationSamples(const std::string& path) {
             } else if (header == "massRemainingKg") {
                 sample.massRemainingKg = parsed;
                 sample.hasMass = true;
+            } else if (header == "smokeOpticalDepth") {
+                sample.smokeOpticalDepth = parsed;
+                sample.hasSmokeOpticalDepth = true;
+            } else if (header == "smokeExtinctionCoefficientPerM") {
+                sample.smokeExtinctionCoefficientPerM = parsed;
+                sample.hasSmokeExtinctionCoefficient = true;
+            } else if (header == "radiantHeatFluxKWPerM2") {
+                sample.radiantHeatFluxKwPerM2 = parsed;
+                sample.hasRadiantHeatFlux = true;
             } else if (header == "irMeanC") {
                 sample.irMeanC = parsed;
                 sample.hasIrMean = true;
@@ -1597,6 +1761,15 @@ float normalizedValue(float value, float minValue, float maxValue) {
         return 0.0f;
     }
     return (value - minValue) / span;
+}
+
+float simMassProxy(const FireCudaFrameMetrics& frame) {
+    return frame.fuelSum + frame.charSum;
+}
+
+float simRadiantEnergyProxy(const FireCudaFrameMetrics& frame) {
+    const float cellCount = static_cast<float>(std::max(1, frame.gridX * frame.gridY * frame.gridZ));
+    return frame.heatSum / cellCount;
 }
 
 CalibrationReport compareCalibrationSeries(
@@ -1638,6 +1811,18 @@ CalibrationReport compareCalibrationSeries(
     float irMaxMax = -FLT_MAX;
     float simIrMaxMin = FLT_MAX;
     float simIrMaxMax = -FLT_MAX;
+    float smokeOpticalDepthMin = FLT_MAX;
+    float smokeOpticalDepthMax = -FLT_MAX;
+    float simSmokeOpticalDepthMin = FLT_MAX;
+    float simSmokeOpticalDepthMax = -FLT_MAX;
+    float smokeExtinctionMin = FLT_MAX;
+    float smokeExtinctionMax = -FLT_MAX;
+    float simSmokeExtinctionMin = FLT_MAX;
+    float simSmokeExtinctionMax = -FLT_MAX;
+    float radiantHeatFluxMin = FLT_MAX;
+    float radiantHeatFluxMax = -FLT_MAX;
+    float simRadiantHeatFluxMin = FLT_MAX;
+    float simRadiantHeatFluxMax = -FLT_MAX;
 
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
@@ -1652,8 +1837,8 @@ CalibrationReport compareCalibrationSeries(
         if (samples[i].hasMass) {
             massMin = std::min(massMin, samples[i].massRemainingKg);
             massMax = std::max(massMax, samples[i].massRemainingKg);
-            simMassMin = std::min(simMassMin, frame.charSum);
-            simMassMax = std::max(simMassMax, frame.charSum);
+            simMassMin = std::min(simMassMin, simMassProxy(frame));
+            simMassMax = std::max(simMassMax, simMassProxy(frame));
         }
         if (samples[i].hasThermocouple) {
             tcMin = std::min(tcMin, samples[i].thermocoupleMeanC);
@@ -1673,6 +1858,24 @@ CalibrationReport compareCalibrationSeries(
             simIrMaxMin = std::min(simIrMaxMin, frame.maxHeat);
             simIrMaxMax = std::max(simIrMaxMax, frame.maxHeat);
         }
+        if (samples[i].hasSmokeOpticalDepth) {
+            smokeOpticalDepthMin = std::min(smokeOpticalDepthMin, samples[i].smokeOpticalDepth);
+            smokeOpticalDepthMax = std::max(smokeOpticalDepthMax, samples[i].smokeOpticalDepth);
+            simSmokeOpticalDepthMin = std::min(simSmokeOpticalDepthMin, frame.meanOpticalDepth);
+            simSmokeOpticalDepthMax = std::max(simSmokeOpticalDepthMax, frame.meanOpticalDepth);
+        }
+        if (samples[i].hasSmokeExtinctionCoefficient) {
+            smokeExtinctionMin = std::min(smokeExtinctionMin, samples[i].smokeExtinctionCoefficientPerM);
+            smokeExtinctionMax = std::max(smokeExtinctionMax, samples[i].smokeExtinctionCoefficientPerM);
+            simSmokeExtinctionMin = std::min(simSmokeExtinctionMin, frame.meanOpticalDepth);
+            simSmokeExtinctionMax = std::max(simSmokeExtinctionMax, frame.meanOpticalDepth);
+        }
+        if (samples[i].hasRadiantHeatFlux) {
+            radiantHeatFluxMin = std::min(radiantHeatFluxMin, samples[i].radiantHeatFluxKwPerM2);
+            radiantHeatFluxMax = std::max(radiantHeatFluxMax, samples[i].radiantHeatFluxKwPerM2);
+            simRadiantHeatFluxMin = std::min(simRadiantHeatFluxMin, simRadiantEnergyProxy(frame));
+            simRadiantHeatFluxMax = std::max(simRadiantHeatFluxMax, simRadiantEnergyProxy(frame));
+        }
     }
 
     double hrrError = 0.0;
@@ -1681,12 +1884,18 @@ CalibrationReport compareCalibrationSeries(
     double irMeanError = 0.0;
     double irMaxError = 0.0;
     double plumeError = 0.0;
+    double smokeOpticalDepthError = 0.0;
+    double smokeExtinctionError = 0.0;
+    double radiantHeatFluxError = 0.0;
     int hrrCount = 0;
     int massCount = 0;
     int tcCount = 0;
     int irMeanCount = 0;
     int irMaxCount = 0;
     int plumeCount = 0;
+    int smokeOpticalDepthCount = 0;
+    int smokeExtinctionCount = 0;
+    int radiantHeatFluxCount = 0;
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
         const FireCudaFrameMetrics& frame = frames[frameIndex];
@@ -1697,7 +1906,7 @@ CalibrationReport compareCalibrationSeries(
             ++hrrCount;
         }
         if (samples[i].hasMass && massMax > massMin && simMassMax > simMassMin) {
-            const float d = normalizedValue(frame.charSum, simMassMin, simMassMax) - normalizedValue(samples[i].massRemainingKg, massMin, massMax);
+            const float d = normalizedValue(simMassProxy(frame), simMassMin, simMassMax) - normalizedValue(samples[i].massRemainingKg, massMin, massMax);
             massError += static_cast<double>(d * d);
             ++massCount;
         }
@@ -1723,6 +1932,27 @@ CalibrationReport compareCalibrationSeries(
             plumeError += static_cast<double>(d * d);
             ++plumeCount;
         }
+        if (samples[i].hasSmokeOpticalDepth && smokeOpticalDepthMax > smokeOpticalDepthMin && simSmokeOpticalDepthMax > simSmokeOpticalDepthMin) {
+            const float d =
+                normalizedValue(frame.meanOpticalDepth, simSmokeOpticalDepthMin, simSmokeOpticalDepthMax) -
+                normalizedValue(samples[i].smokeOpticalDepth, smokeOpticalDepthMin, smokeOpticalDepthMax);
+            smokeOpticalDepthError += static_cast<double>(d * d);
+            ++smokeOpticalDepthCount;
+        }
+        if (samples[i].hasSmokeExtinctionCoefficient && smokeExtinctionMax > smokeExtinctionMin && simSmokeExtinctionMax > simSmokeExtinctionMin) {
+            const float d =
+                normalizedValue(frame.meanOpticalDepth, simSmokeExtinctionMin, simSmokeExtinctionMax) -
+                normalizedValue(samples[i].smokeExtinctionCoefficientPerM, smokeExtinctionMin, smokeExtinctionMax);
+            smokeExtinctionError += static_cast<double>(d * d);
+            ++smokeExtinctionCount;
+        }
+        if (samples[i].hasRadiantHeatFlux && radiantHeatFluxMax > radiantHeatFluxMin && simRadiantHeatFluxMax > simRadiantHeatFluxMin) {
+            const float d =
+                normalizedValue(simRadiantEnergyProxy(frame), simRadiantHeatFluxMin, simRadiantHeatFluxMax) -
+                normalizedValue(samples[i].radiantHeatFluxKwPerM2, radiantHeatFluxMin, radiantHeatFluxMax);
+            radiantHeatFluxError += static_cast<double>(d * d);
+            ++radiantHeatFluxCount;
+        }
     }
 
     if (hrrCount > 0) {
@@ -1743,7 +1973,68 @@ CalibrationReport compareCalibrationSeries(
     if (plumeCount > 0) {
         report.plumeHeightRmseMeters = static_cast<float>(std::sqrt(plumeError / static_cast<double>(plumeCount)));
     }
+    if (smokeOpticalDepthCount > 0) {
+        report.smokeOpticalDepthShapeRmse = static_cast<float>(std::sqrt(smokeOpticalDepthError / static_cast<double>(smokeOpticalDepthCount)));
+    }
+    if (smokeExtinctionCount > 0) {
+        report.smokeExtinctionShapeRmse = static_cast<float>(std::sqrt(smokeExtinctionError / static_cast<double>(smokeExtinctionCount)));
+    }
+    if (radiantHeatFluxCount > 0) {
+        report.radiantHeatFluxShapeRmse = static_cast<float>(std::sqrt(radiantHeatFluxError / static_cast<double>(radiantHeatFluxCount)));
+    }
+    report.hrrSamplesCompared = hrrCount;
+    report.massSamplesCompared = massCount;
+    report.smokeOpticalDepthSamplesCompared = smokeOpticalDepthCount;
+    report.smokeExtinctionSamplesCompared = smokeExtinctionCount;
+    report.radiantHeatFluxSamplesCompared = radiantHeatFluxCount;
     return report;
+}
+
+void writeOptionalCsvFloat(std::ofstream& out, bool hasValue, float value) {
+    if (hasValue) {
+        out << value;
+    }
+}
+
+bool writeCalibrationComparisonCsv(
+    const std::string& outputPath,
+    const std::string& calibrationPath,
+    const std::vector<FireCudaFrameMetrics>& frames) {
+    if (calibrationPath.empty()) {
+        return true;
+    }
+    const std::vector<CalibrationSample> samples = loadCalibrationSamples(calibrationPath);
+    if (samples.empty() || frames.empty()) {
+        return false;
+    }
+    std::ofstream out(outputPath, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << std::fixed << std::setprecision(6);
+    out << "sampleIndex,measuredTimeSeconds,simFrameIndex,simTimeSeconds,"
+           "measuredHrrKW,simHrrProxy,"
+           "measuredMassRemainingKg,simMassProxy,"
+           "measuredSmokeOpticalDepth,simSmokeOpticalDepthProxy,"
+           "measuredSmokeExtinctionCoefficientPerM,simSmokeExtinctionProxy,"
+           "measuredRadiantHeatFluxKWPerM2,simRadiantEnergyProxy\n";
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
+        const CalibrationSample& sample = samples[i];
+        const FireCudaFrameMetrics& frame = frames[frameIndex];
+        out << i << "," << sample.timeSeconds << "," << frame.frameIndex << "," << frame.timeSeconds << ",";
+        writeOptionalCsvFloat(out, sample.hasHrr, sample.hrrKw);
+        out << "," << frame.heatReleaseProxy << ",";
+        writeOptionalCsvFloat(out, sample.hasMass, sample.massRemainingKg);
+        out << "," << simMassProxy(frame) << ",";
+        writeOptionalCsvFloat(out, sample.hasSmokeOpticalDepth, sample.smokeOpticalDepth);
+        out << "," << frame.meanOpticalDepth << ",";
+        writeOptionalCsvFloat(out, sample.hasSmokeExtinctionCoefficient, sample.smokeExtinctionCoefficientPerM);
+        out << "," << frame.meanOpticalDepth << ",";
+        writeOptionalCsvFloat(out, sample.hasRadiantHeatFlux, sample.radiantHeatFluxKwPerM2);
+        out << "," << simRadiantEnergyProxy(frame) << "\n";
+    }
+    return out.good();
 }
 
 int runInputStressTest() {
@@ -1813,10 +2104,24 @@ int runCudaSmokeTest() {
 }
 
 int runValidation(const std::string& args) {
-    CreateDirectoryA("out", nullptr);
+    ensureDirectoryTree("out");
     const std::string targetPath = argumentValue(args, "--targets=");
     const std::string calibrationPath = argumentValue(args, "--calibration=");
     const std::string geometryPath = argumentValue(args, "--geometry=");
+    const std::string manifestPath = argumentValue(args, "--manifest=");
+    const std::string datasetId = argumentValue(args, "--dataset-id=");
+    const std::string outputDirArg = argumentValue(args, "--output-dir=");
+    const std::string outputDir = outputDirArg.empty() ? "out" : outputDirArg;
+    const int validationFrames = argumentIntValue(args, "--validation-frames=", 96, 8, 240);
+    const bool poolFireCalibration = args.find("--pool-fire-calibration") != std::string::npos;
+    if (!ensureDirectoryTree(outputDir)) {
+        return 3;
+    }
+    const std::string metricsPath = joinPath(outputDir, "validation-metrics.csv");
+    const std::string comparisonPath = joinPath(outputDir, "calibration-comparison.csv");
+    const std::string reportPath = joinPath(outputDir, "validation-report.json");
+    const std::string rawFramePath = joinPath(outputDir, "validation-frame.bmp");
+    const std::string appFramePath = joinPath(outputDir, "validation-app-frame.bmp");
     std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, 0xff000000u);
     std::vector<std::uint32_t> appFrame(kFrameWidth * kFrameHeight, 0xff000000u);
 
@@ -1824,7 +2129,7 @@ int runValidation(const std::string& args) {
         return 2;
     }
 
-    std::ofstream csv("out\\validation-metrics.csv", std::ios::binary);
+    std::ofstream csv(metricsPath, std::ios::binary);
     if (!csv) {
         fireCudaShutdown();
         return 3;
@@ -1838,7 +2143,6 @@ int runValidation(const std::string& args) {
            "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,invalidCells\n";
     csv << std::fixed << std::setprecision(6);
 
-    constexpr int kValidationFrames = 96;
     FireCudaFrameMetrics finalMetrics = {};
     FireSettings finalSettings = {};
     bool stable = true;
@@ -1851,20 +2155,25 @@ int runValidation(const std::string& args) {
     float maxHeat = 0.0f;
     float maxFlameHeight = 0.0f;
     std::vector<FireCudaFrameMetrics> metricFrames;
-    metricFrames.reserve(kValidationFrames);
+    metricFrames.reserve(static_cast<std::size_t>(validationFrames));
 
-    for (int i = 0; i < kValidationFrames; ++i) {
+    for (int i = 0; i < validationFrames; ++i) {
         FireSettings settings;
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
-        settings.mouseX = 0.50f + 0.07f * std::sin(static_cast<float>(i) * 0.071f);
-        settings.mouseY = 0.12f + 0.035f * std::sin(static_cast<float>(i) * 0.053f);
+        if (poolFireCalibration) {
+            settings.mouseX = 0.50f;
+            settings.mouseY = 0.12f;
+        } else {
+            settings.mouseX = 0.50f + 0.07f * std::sin(static_cast<float>(i) * 0.071f);
+            settings.mouseY = 0.12f + 0.035f * std::sin(static_cast<float>(i) * 0.053f);
+        }
         settings.leftDown = 0;
         settings.rightDown = 0;
         settings.showGizmos = 0;
         settings.activeGizmo = 1;
-        settings.wind = 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
+        settings.wind = poolFireCalibration ? 0.0f : 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
         settings.detail = 0.98f;
         applyCanonicalFireSettings(settings);
         settings.turbulence = std::max(settings.turbulence, 1.08f);
@@ -1956,6 +2265,16 @@ int runValidation(const std::string& args) {
             target.observed = imageStats.meanLuma;
         } else if (target.metric == "imageMaxLuma") {
             target.observed = imageStats.maxLuma;
+        } else if (target.metric == "imageMeanSaturation") {
+            target.observed = imageStats.meanSaturation;
+        } else if (target.metric == "imageWarmFireFraction") {
+            target.observed = imageStats.warmFireFraction;
+        } else if (target.metric == "imageTanSmokeFraction") {
+            target.observed = imageStats.tanSmokeFraction;
+        } else if (target.metric == "imageBlackSmokeFraction") {
+            target.observed = imageStats.blackSmokeFraction;
+        } else if (target.metric == "imageWhiteCoreFraction") {
+            target.observed = imageStats.whiteCoreFraction;
         } else if (target.metric == "imageBrightPixels") {
             target.observed = static_cast<float>(imageStats.brightPixels);
         } else if (target.metric == "imageBrightFraction") {
@@ -1976,6 +2295,12 @@ int runValidation(const std::string& args) {
             target.observed = calibration.irMaxShapeRmse;
         } else if (target.metric == "calibrationPlumeHeightRmseMeters") {
             target.observed = calibration.plumeHeightRmseMeters;
+        } else if (target.metric == "calibrationSmokeOpticalDepthShapeRmse") {
+            target.observed = calibration.smokeOpticalDepthShapeRmse;
+        } else if (target.metric == "calibrationSmokeExtinctionShapeRmse") {
+            target.observed = calibration.smokeExtinctionShapeRmse;
+        } else if (target.metric == "calibrationRadiantHeatFluxShapeRmse") {
+            target.observed = calibration.radiantHeatFluxShapeRmse;
         } else {
             target.matched = false;
         }
@@ -1983,7 +2308,9 @@ int runValidation(const std::string& args) {
         stable = stable && target.passed;
     }
 
-    stable = stable && finalMetrics.frameIndex >= kValidationFrames - 1;
+    const bool wroteComparison = writeCalibrationComparisonCsv(comparisonPath, calibrationPath, metricFrames);
+
+    stable = stable && finalMetrics.frameIndex >= validationFrames - 1;
     stable = stable && maxHeat > 0.50f;
     stable = stable && maxFlameHeight > 0.20f;
     stable = stable && imageStats.maxLuma > 0.12f;
@@ -1991,10 +2318,10 @@ int runValidation(const std::string& args) {
     stable = stable && (averageReduction > 0.02 || worstAfterL2 < 0.02f);
 
     composeAppFrame(appFrame, simFrame, finalSettings, true);
-    const bool wroteRaw = writeBmp("out\\validation-frame.bmp", simFrame, kFrameWidth, kFrameHeight);
-    const bool wroteApp = writeBmp("out\\validation-app-frame.bmp", appFrame, kFrameWidth, kFrameHeight);
+    const bool wroteRaw = writeBmp(rawFramePath.c_str(), simFrame, kFrameWidth, kFrameHeight);
+    const bool wroteApp = writeBmp(appFramePath.c_str(), appFrame, kFrameWidth, kFrameHeight);
 
-    std::ofstream json("out\\validation-report.json", std::ios::binary);
+    std::ofstream json(reportPath, std::ios::binary);
     if (!json) {
         fireCudaShutdown();
         return 3;
@@ -2012,11 +2339,14 @@ int runValidation(const std::string& args) {
     json << "    \"soot\": \"soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\",\n";
     json << "    \"renderer\": \"linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\"\n";
     json << "  },\n";
-    json << "  \"runtimeConfig\": \"canonical\",\n";
+    json << "  \"runtimeConfig\": \"" << (poolFireCalibration ? "nist-pool-fire-calibration" : "canonical") << "\",\n";
+    json << "  \"datasetId\": \"" << jsonEscape(datasetId) << "\",\n";
+    json << "  \"manifestPath\": \"" << jsonEscape(manifestPath) << "\",\n";
+    json << "  \"outputDir\": \"" << jsonEscape(outputDir) << "\",\n";
     json << "  \"requestedGrid\": [" << kSimulationGridWidth << ", " << kSimulationGridHeight << "],\n";
     json << "  \"raymarchSteps\": " << kRaymarchSteps << ",\n";
     json << "  \"emberCount\": " << kEmberCount << ",\n";
-    json << "  \"frames\": " << kValidationFrames << ",\n";
+    json << "  \"frames\": " << validationFrames << ",\n";
     json << "  \"grid\": [" << finalMetrics.gridX << ", " << finalMetrics.gridY << ", " << finalMetrics.gridZ << "],\n";
     json << "  \"pressureIterations\": " << finalMetrics.pressureIterations << ",\n";
     json << "  \"targetEnvelopePath\": \"" << jsonEscape(targetPath) << "\",\n";
@@ -2033,7 +2363,15 @@ int runValidation(const std::string& args) {
     json << "    \"thermocoupleShapeRmse\": " << calibration.thermocoupleShapeRmse << ",\n";
     json << "    \"irMeanShapeRmse\": " << calibration.irMeanShapeRmse << ",\n";
     json << "    \"irMaxShapeRmse\": " << calibration.irMaxShapeRmse << ",\n";
-    json << "    \"plumeHeightRmseMeters\": " << calibration.plumeHeightRmseMeters << "\n";
+    json << "    \"plumeHeightRmseMeters\": " << calibration.plumeHeightRmseMeters << ",\n";
+    json << "    \"smokeOpticalDepthShapeRmse\": " << calibration.smokeOpticalDepthShapeRmse << ",\n";
+    json << "    \"smokeExtinctionShapeRmse\": " << calibration.smokeExtinctionShapeRmse << ",\n";
+    json << "    \"radiantHeatFluxShapeRmse\": " << calibration.radiantHeatFluxShapeRmse << ",\n";
+    json << "    \"hrrSamplesCompared\": " << calibration.hrrSamplesCompared << ",\n";
+    json << "    \"massSamplesCompared\": " << calibration.massSamplesCompared << ",\n";
+    json << "    \"smokeOpticalDepthSamplesCompared\": " << calibration.smokeOpticalDepthSamplesCompared << ",\n";
+    json << "    \"smokeExtinctionSamplesCompared\": " << calibration.smokeExtinctionSamplesCompared << ",\n";
+    json << "    \"radiantHeatFluxSamplesCompared\": " << calibration.radiantHeatFluxSamplesCompared << "\n";
     json << "  },\n";
     json << "  \"averageGpuSolveMs\": " << averageSolveMs << ",\n";
     json << "  \"averageGpuRenderMs\": " << averageRenderMs << ",\n";
@@ -2056,6 +2394,11 @@ int runValidation(const std::string& args) {
     json << "  \"maxFlameHeightMeters\": " << maxFlameHeight << ",\n";
     json << "  \"imageMeanLuma\": " << imageStats.meanLuma << ",\n";
     json << "  \"imageMaxLuma\": " << imageStats.maxLuma << ",\n";
+    json << "  \"imageMeanSaturation\": " << imageStats.meanSaturation << ",\n";
+    json << "  \"imageWarmFireFraction\": " << imageStats.warmFireFraction << ",\n";
+    json << "  \"imageTanSmokeFraction\": " << imageStats.tanSmokeFraction << ",\n";
+    json << "  \"imageBlackSmokeFraction\": " << imageStats.blackSmokeFraction << ",\n";
+    json << "  \"imageWhiteCoreFraction\": " << imageStats.whiteCoreFraction << ",\n";
     json << "  \"imageBrightPixels\": " << imageStats.brightPixels << ",\n";
     json << "  \"imageBrightFraction\": " << imageStats.brightFraction << ",\n";
     json << "  \"targetEnvelopes\": [\n";
@@ -2068,10 +2411,11 @@ int runValidation(const std::string& args) {
         json << (i + 1 == targets.size() ? "\n" : ",\n");
     }
     json << "  ],\n";
-    json << "  \"outputs\": [\"out/validation-metrics.csv\", \"out/validation-report.json\", \"out/validation-frame.bmp\", \"out/validation-app-frame.bmp\"]\n";
+    json << "  \"outputs\": [\"" << jsonEscape(metricsPath) << "\", \"" << jsonEscape(comparisonPath) << "\", \"" << jsonEscape(reportPath)
+         << "\", \"" << jsonEscape(rawFramePath) << "\", \"" << jsonEscape(appFramePath) << "\"]\n";
     json << "}\n";
 
-    const bool ok = stable && wroteRaw && wroteApp && json.good() && csv.good();
+    const bool ok = stable && wroteComparison && wroteRaw && wroteApp && json.good() && csv.good();
     fireCudaShutdown();
     return ok ? 0 : 4;
 }
@@ -2114,12 +2458,14 @@ int runDiagnostics() {
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
-    out << "pressureIterations=24\n";
+    out << "pressureIterations=40\n";
     out << "combustionModel=fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable\n";
     out << "turbulenceModel=LES-style scalar turbulence-energy closure\n";
     out << "sootModel=soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\n";
     out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\n";
     out << "rendererStorage=CUDA float4 HDR radiance before final BGRA display pack\n";
+    out << "renderDebugModes=final,flame,soot,transmittance,temperature,fuel-char,velocity\n";
+    out << "cleanViewportMode=C key hides app chrome and CUDA gizmos for visual judging\n";
     out << "scalarTransport=clamped MacCormack/BFECC correction for transported scalar fields\n";
     out << "calibrationInputs=HRR,mass loss,thermocouple,IR,video-derived plume height,geometry sidecar\n";
     out << "runtimeConfig=canonical\n";
@@ -2201,10 +2547,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.leftDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 1) ? 1 : 0;
         settings.rightDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 2) ? 1 : 0;
         settings.reset = g_needsReset ? 1 : 0;
-        settings.showGizmos = g_showGizmos ? 1 : 0;
+        settings.showGizmos = (g_showGizmos && !g_cleanViewportMode) ? 1 : 0;
         settings.activeGizmo = g_activeGizmo;
         settings.wind = g_wind;
         applyCanonicalFireSettings(settings);
+        settings.renderDebugMode = g_renderDebugMode;
         settings.turbulence = std::max(g_turbulence, kTurbulence);
         settings.detail = 0.92f;
         settings.cameraYaw = g_cameraYaw;
@@ -2224,7 +2571,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             g_safePreviewTime += dt;
             renderSafeAnimatedViewport(g_simFrame, g_safeBaseFrame, settings, g_safePreviewTime);
         }
-        composeAppFrame(g_frame, g_simFrame, settings, g_useCudaBackend);
+        composeAppFrame(g_frame, g_simFrame, settings, g_useCudaBackend, g_cleanViewportMode);
 
         InvalidateRect(g_window, nullptr, FALSE);
         UpdateWindow(g_window);

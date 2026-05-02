@@ -71,6 +71,7 @@ struct FireSettings {
     int cinematicMode = 0;
     int raymarchSteps = 56;
     int emberCount = 96;
+    int renderDebugMode = 0;
     float exposure = 1.0f;
     float reflectionGain = 1.0f;
     float smokeDarkness = 1.0f;

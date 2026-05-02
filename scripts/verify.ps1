@@ -52,7 +52,8 @@ try {
             throw "GPU kernel verification is blocked because recent runs caused Windows bugchecks. Re-run with -AcceptBugcheckRisk only if you intentionally want to test that driver path."
         }
         $smokeCode = Invoke-NativeFireSimCheck -Arguments @("--smoke-test", "--allow-gpu-kernels", "--accept-bugcheck-risk") -TimeoutMs 300000
-        $validationCode = Invoke-NativeFireSimCheck -Arguments @("--validation", "--allow-gpu-kernels", "--accept-bugcheck-risk") -TimeoutMs 300000
+        & (Join-Path $PSScriptRoot "run-nist-calibration.ps1") -RunGpuKernels -AcceptBugcheckRisk -SkipBuild
+        $validationCode = $LASTEXITCODE
     }
 } finally {
     Pop-Location
