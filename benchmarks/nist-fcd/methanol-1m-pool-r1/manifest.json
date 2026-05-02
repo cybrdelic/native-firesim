@@ -1,0 +1,98 @@
+﻿{
+    "schemaVersion":  1,
+    "experimentId":  "NIST_FCD_Methanol_1m_Pool_R1",
+    "claimScope":  "Controlled 1 m methanol pool-fire calibration for HRR, derived fuel mass, gas concentrations, radiant heat flux, and smoke extinction. This dataset does not claim IR-frame or plume-height calibration.",
+    "source":  {
+                   "datasetName":  "NIST Fire Calorimetry Database: Methanol_1m_Pool_R1",
+                   "organization":  "National Institute of Standards and Technology",
+                   "url":  "https://www.nist.gov/el/fcd/characteristics-1-m-methanol-pool-fire/methanol1mpoolr1",
+                   "downloadUrl":  "https://www.nist.gov/fcd-s3?path=%2FHRR%2FASSET_FILES%2FMethanolPoolFire%2Fdata%2F1539886448_Methanol_1m_Pool_R1.csv",
+                   "doi":  "https://doi.org/10.18434/mds2-2314",
+                   "license":  "NIST data/work terms; see https://www.nist.gov/open/license",
+                   "accessedDate":  "2026-05-02"
+               },
+    "files":  {
+                  "geometry":  "geometry.json",
+                  "calibrationCsv":  "calibration.csv",
+                  "rawData":  [
+                                  "raw/Methanol_1m_Pool_R1.csv"
+                              ],
+                  "processedData":  [
+                                        "calibration.csv"
+                                    ],
+                  "videoFrames":  [
+
+                                  ],
+                  "irFrames":  [
+
+                               ]
+              },
+    "hashes":  {
+                   "geometrySha256":  "5e4e6a01450c12ec4f4e31283abf4711672d08969b832a919229a13c1a9ea09e",
+                   "calibrationCsvSha256":  "9172b1947940bb050805cc829d50488d5e8dac8838afcaec91504f454a75a5f6",
+                   "rawDataSha256":  {
+                                         "raw/Methanol_1m_Pool_R1.csv":  "9b3d0c8831c2ea0e112afa8afcae11c5c64927a57c56fe0982e76b51b00f5684"
+                                     }
+               },
+    "measurementChannels":  {
+                                "hrrKW":  {
+                                              "units":  "kW",
+                                              "uncertainty":  "Peak HRR combined expanded uncertainty Uc=14 kW; THR Uc=38 MJ."
+                                          },
+                                "ngBurnerHrrKW":  {
+                                                      "units":  "kW",
+                                                      "uncertainty":  "CSV channel; per-row uncertainty is not provided in the FCD export."
+                                                  },
+                                "exhaustMassFlowKgPerS":  {
+                                                              "units":  "kg/s",
+                                                              "uncertainty":  "Baseline hood exhaust flow Uc=0.058 kg/s."
+                                                          },
+                                "oxygenVolumeFraction":  {
+                                                             "units":  "volume fraction",
+                                                             "uncertainty":  "O2 yield Uc=0.10 kg/kg; per-row analyzer uncertainty is not provided in the FCD export."
+                                                         },
+                                "co2VolumeFraction":  {
+                                                          "units":  "volume fraction",
+                                                          "uncertainty":  "CO2 yield Uc=0.10 kg/kg; per-row analyzer uncertainty is not provided in the FCD export."
+                                                      },
+                                "coVolumeFraction":  {
+                                                         "units":  "volume fraction",
+                                                         "uncertainty":  "CO yield Uc=0.000088 kg/kg; per-row analyzer uncertainty is not provided in the FCD export."
+                                                     },
+                                "radiantHeatFluxKWPerM2":  {
+                                                               "units":  "kW/m^2",
+                                                               "uncertainty":  "CSV channel; per-row uncertainty is not provided in the FCD export."
+                                                           },
+                                "smokeExtinctionCoefficientPerM":  {
+                                                                       "units":  "1/m",
+                                                                       "uncertainty":  "Soot yield below detection limit; Uc=0.0000075 kg/kg."
+                                                                   }
+                            },
+    "derivedChannels":  {
+                            "massRemainingKg":  {
+                                                    "units":  "kg",
+                                                    "uncertainty":  "Derived from THR=753 MJ, HOCf=19.92 MJ/kg, and TFM Uc=2.4 kg.",
+                                                    "derivation":  "Integrate positive HRR over time and scale cumulative heat by total heat released to estimate remaining burned fuel mass.",
+                                                    "sourceChannels":  [
+                                                                           "hrrKW"
+                                                                       ]
+                                                },
+                            "smokeOpticalDepth":  {
+                                                      "units":  "dimensionless",
+                                                      "uncertainty":  "1 m path-length proxy derived directly from smokeExtinctionCoefficientPerM.",
+                                                      "derivation":  "Clamp Ksmoke to non-negative values and multiply by a 1 m path length.",
+                                                      "sourceChannels":  [
+                                                                             "smokeExtinctionCoefficientPerM"
+                                                                         ]
+                                                  }
+                        },
+    "preprocessing":  {
+                          "command":  ".\\scripts\\import-nist-fcd-methanol-r1.ps1",
+                          "script":  "scripts/import-nist-fcd-methanol-r1.ps1",
+                          "notes":  "Keeps post-ignition rows from t=0 through the reported 48.82 min duration. Negative baseline times stay in raw data only. HRR and smoke extinction are clamped non-negative for calibration targets."
+                      },
+    "expectedValidationMetrics":  [
+                                      "calibrationHrrShapeRmse",
+                                      "calibrationMassShapeRmse"
+                                  ]
+}

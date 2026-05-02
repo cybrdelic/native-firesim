@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "replace-with-real-burn-id",
+  "claimScope": "replace-with-specific-validated-use-case",
+  "source": {
+    "datasetName": "",
+    "organization": "",
+    "url": "",
+    "doi": "",
+    "license": "",
+    "accessedDate": ""
+  },
+  "files": {
+    "geometry": "geometry-template.json",
+    "calibrationCsv": "real-burn-calibration-template.csv",
+    "rawData": [],
+    "processedData": [],
+    "videoFrames": [],
+    "irFrames": []
+  },
+  "hashes": {
+    "geometrySha256": "",
+    "calibrationCsvSha256": "",
+    "rawDataSha256": {}
+  },
+  "measurementChannels": {
+    "hrrKW": {"units": "kW", "uncertainty": ""},
+    "massRemainingKg": {"units": "kg", "uncertainty": ""},
+    "thermocouplesC": {"units": "C", "uncertainty": ""},
+    "irMeanC": {"units": "C", "uncertainty": ""},
+    "irMaxC": {"units": "C", "uncertainty": ""},
+    "plumeHeightM": {"units": "m", "uncertainty": ""},
+    "smokeOpticalDepth": {"units": "dimensionless", "uncertainty": ""}
+  },
+  "preprocessing": {
+    "command": "",
+    "script": "",
+    "notes": ""
+  },
+  "expectedValidationMetrics": [
+    "calibrationHrrShapeRmse",
+    "calibrationMassShapeRmse",
+    "calibrationThermocoupleShapeRmse",
+    "calibrationIrMeanShapeRmse",
+    "calibrationIrMaxShapeRmse",
+    "calibrationPlumeHeightRmseMeters"
+  ]
+}

@@ -1,0 +1,55 @@
+﻿{
+  "schemaVersion": 1,
+  "experimentId": "NIST_FCD_Methanol_1m_Pool_R1",
+  "units": "meters",
+  "room": {
+    "width": 3.0,
+    "height": 3.0,
+    "depth": 3.0,
+    "ventilation": {
+      "type": "open-oxygen-consumption-calorimeter",
+      "hoodDiameterM": 3.0,
+      "effectiveDuctDiameterM": 0.485,
+      "notes": "NIST FCD reports a 3 m oxygen-consumption calorimeter hood. Detailed enclosure walls are not part of the CSV time series."
+    }
+  },
+  "fuelBed": {
+    "type": "liquid-pool",
+    "material": "methanol",
+    "initialMassKg": 37.8,
+    "moistureFraction": 0.0,
+    "lowerHeatingValueKJPerKg": 19920.0,
+    "tray": {
+      "center": [0.0, 0.445, 0.0],
+      "diameterM": 1.0,
+      "depthM": 0.10,
+      "lipHeightAboveFloorM": 0.445
+    },
+    "geometryMesh": ""
+  },
+  "sensors": {
+    "calorimeter": {
+      "type": "oxygen-consumption",
+      "hoodDiameterM": 3.0,
+      "effectiveDuctDiameterM": 0.485
+    },
+    "gasAnalyzers": [
+      {"species": "O2", "location": "hood exhaust stream"},
+      {"species": "CO2", "location": "hood exhaust stream"},
+      {"species": "CO", "location": "hood exhaust stream"}
+    ],
+    "radiometers": [
+      {"id": "hf_0", "location": "reported by NIST FCD CSV"}
+    ],
+    "smokeMeters": [
+      {"id": "ksmoke_0", "type": "laser-extinction", "location": "hood exhaust stream"}
+    ],
+    "thermocouples": [],
+    "cameras": []
+  },
+  "provenance": {
+    "dataset": "NIST Fire Calorimetry Database Methanol_1m_Pool_R1",
+    "license": "NIST data/work terms at https://www.nist.gov/open/license",
+    "notes": "Fuel mass curve is derived from THR and HOCf because gravimetric Mi/Mf were not measured in this FCD record."
+  }
+}

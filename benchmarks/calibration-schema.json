@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "native-firesim-calibration-schema.json",
+  "title": "Native FireSim calibration dataset",
+  "type": "object",
+  "required": ["experimentId", "geometry", "timeSeries"],
+  "properties": {
+    "experimentId": {"type": "string"},
+    "geometry": {
+      "type": "object",
+      "required": ["units", "room", "fuelBed"],
+      "properties": {
+        "units": {"const": "meters"},
+        "room": {
+          "type": "object",
+          "required": ["width", "height", "depth"],
+          "properties": {
+            "width": {"type": "number"},
+            "height": {"type": "number"},
+            "depth": {"type": "number"},
+            "ventilation": {"type": "object"}
+          }
+        },
+        "fuelBed": {
+          "type": "object",
+          "required": ["material", "initialMassKg"],
+          "properties": {
+            "material": {"type": "string"},
+            "initialMassKg": {"type": "number"},
+            "moistureFraction": {"type": "number"},
+            "lowerHeatingValueKJPerKg": {"type": "number"},
+            "geometryMesh": {"type": "string"}
+          }
+        },
+        "sensors": {"type": "object"}
+      }
+    },
+    "timeSeries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timeSeconds"],
+        "properties": {
+          "timeSeconds": {"type": "number"},
+          "hrrKW": {"type": "number"},
+          "massRemainingKg": {"type": "number"},
+          "thermocouplesC": {
+            "type": "object",
+            "additionalProperties": {"type": "number"}
+          },
+          "irMeanC": {"type": "number"},
+          "irMaxC": {"type": "number"},
+          "plumeHeightM": {"type": "number"},
+          "smokeOpticalDepth": {"type": "number"},
+          "ngBurnerHrrKW": {"type": "number"},
+          "exhaustMassFlowKgPerS": {"type": "number"},
+          "oxygenVolumeFraction": {"type": "number"},
+          "co2VolumeFraction": {"type": "number"},
+          "coVolumeFraction": {"type": "number"},
+          "radiantHeatFluxKWPerM2": {"type": "number"},
+          "smokeExtinctionCoefficientPerM": {"type": "number"},
+          "rgbFramePath": {"type": "string"},
+          "irFramePath": {"type": "string"}
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "dataset": {"type": "string"},
+        "license": {"type": "string"},
+        "notes": {"type": "string"}
+      }
+    }
+  }
+}
