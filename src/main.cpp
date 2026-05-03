@@ -38,10 +38,10 @@ constexpr float kSmokeDarkness = 1.26f;
 constexpr float kFireIntensity = 1.42f;
 constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
-constexpr float kTargetFrameSeconds = 1.0f / 30.0f;
+constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 4u;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV4";
+constexpr DWORD kSharedViewportVersion = 5u;
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV5";
 constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
@@ -96,6 +96,9 @@ struct SharedViewportBuffer {
     unsigned long long workerStartTickMs;
     unsigned long long workerStopTickMs;
     unsigned long long sharedTextureHandleValue;
+    unsigned long long workerFrameMicros;
+    unsigned long long workerCudaMicros;
+    unsigned long long workerPublishMicros;
     FireSettings settings;
     char statusText[192];
 };
@@ -826,7 +829,7 @@ bool initializeD3D(HWND hwnd) {
     swapDesc.BufferDesc.RefreshRate.Denominator = 1;
     swapDesc.SampleDesc.Count = 1;
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapDesc.BufferCount = 1;
+    swapDesc.BufferCount = 2;
     swapDesc.OutputWindow = hwnd;
     swapDesc.Windowed = TRUE;
     swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
@@ -1019,7 +1022,7 @@ bool renderD3DFrame(bool drawSim, float exposure) {
     g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
 
-    return SUCCEEDED(g_d3d.swapChain->Present(1, 0));
+    return SUCCEEDED(g_d3d.swapChain->Present(0, 0));
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1707,7 +1710,15 @@ void serviceCudaWorkerWatchdog() {
     if (status < 0) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker error: %.120s", g_sharedViewport->statusText);
     } else if (g_sharedViewport->lastFrameTickMs != 0 && frameAge <= kWorkerFrameStaleMs) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker live pid %lu frame age %llums", static_cast<unsigned long>(g_sharedViewport->workerPid), frameAge);
+        const double frameMs = static_cast<double>(g_sharedViewport->workerFrameMicros) / 1000.0;
+        const double workerFps = g_sharedViewport->workerFrameMicros == 0 ? 0.0 : 1000000.0 / static_cast<double>(g_sharedViewport->workerFrameMicros);
+        std::snprintf(
+            g_workerUiStatus,
+            sizeof(g_workerUiStatus),
+            "CUDA worker live %.0ffps %.1fms frame age %llums",
+            workerFps,
+            frameMs,
+            frameAge);
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker running; waiting for fresh frame");
     } else {
@@ -1896,6 +1907,7 @@ int runCudaWorker(const std::string& args) {
         settings.dt = dt;
         applyCanonicalFireSettings(settings);
 
+        const auto frameStart = Clock::now();
         if (!fireCudaStepAndRenderD3D11(settings)) {
             g_sharedViewport->workerStatus = -2;
             InterlockedIncrement(&g_sharedViewport->workerErrorCount);
@@ -1904,10 +1916,11 @@ int runCudaWorker(const std::string& args) {
             appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
             break;
         }
+        const auto cudaDone = Clock::now();
 
         const HRESULT acquire = d3dTarget.sharedMutex->AcquireSync(0, 8);
         if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
-            Sleep(1);
+            Sleep(0);
             continue;
         }
         if (FAILED(acquire)) {
@@ -1929,13 +1942,17 @@ int runCudaWorker(const std::string& args) {
             appendRuntimeEvent("worker-d3d-release-failed", g_sharedViewport->statusText);
             break;
         }
+        const auto published = Clock::now();
 
         InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->lastFrameTickMs = tickMs();
+        g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
+        g_sharedViewport->workerFrameMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(published - frameStart).count());
+        g_sharedViewport->workerPublishMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(published - cudaDone).count());
         g_sharedViewport->workerStatus = 2;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming FP16 D3D11 interop");
 
-        Sleep(1);
+        Sleep(0);
     }
 
     fireCudaUnregisterD3D11Texture();
@@ -2844,6 +2861,8 @@ int runDiagnostics() {
     out << "workerHeartbeatStaleMs=" << kWorkerHeartbeatStaleMs << "\n";
     out << "workerKillStaleMs=" << kWorkerKillStaleMs << "\n";
     out << "workerRestartLimitPerMinute=" << kWorkerRestartLimit << "\n";
+    out << "presentationTargetFps=300\n";
+    out << "presentVsync=false\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
@@ -2988,7 +3007,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 Sleep(sleepMs);
             }
         } else {
-            Sleep(1);
+            Sleep(0);
         }
     }
 

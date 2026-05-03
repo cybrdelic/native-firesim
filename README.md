@@ -143,7 +143,7 @@ CUDA diagnostics only, without simulation kernels:
 
 ## Current Scope
 
-The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps into an FP16 D3D11 texture, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV4`, and is stopped when the UI exits. The CUDA solver architecture is:
+The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps into an FP16 D3D11 texture, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV5`, and is stopped when the UI exits. The CUDA solver architecture is:
 
 - CUDA 3D MAC-style simulation step with staggered velocity, weighted red/black pressure projection, heat, fuel vapor, oxygen, and soot channels
 - GPU fuel-bed state seeded as broken material chunks with char, ash, pyrolysis release, oxygen-limited heat release, soot formation, soot oxidation, and radiative cooling terms
@@ -156,6 +156,9 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - interactive input
 - native viewport UI with a tool rail, field controls, and viewport overlays
 - ballistic ember particles with wind coupling
+- 300 FPS presentation target with immediate D3D present and no quality-mode downgrade
+- sparse HDR ember splats instead of full-screen per-pixel ember loops
+- cached per-frame camera basis for CUDA ray generation instead of per-pixel trigonometry
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
 - optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 

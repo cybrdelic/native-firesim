@@ -34,6 +34,12 @@ struct SimParams {
     float cameraYaw;
     float cameraPitch;
     float cameraDistance;
+    float3 cameraEye;
+    float3 cameraForward;
+    float3 cameraRight;
+    float3 cameraUp;
+    float cameraTanHalfFov;
+    float cameraAspect;
     int cinematicMode;
     int raymarchSteps;
     int emberCount;
@@ -81,8 +87,8 @@ constexpr float kAdvectionScale = 0.62f;
 constexpr int kCudaBlockThreads = 256;
 constexpr int kMaxRaymarchSteps = 120;
 constexpr int kMaxEmberCount = 192;
-constexpr int kVolumeLaunchDepth = 12;
-constexpr int kRenderLaunchRows = 36;
+constexpr int kVolumeLaunchDepth = 32;
+constexpr int kRenderLaunchRows = 180;
 
 float* g_heat = nullptr;
 float* g_heatNext = nullptr;
@@ -181,38 +187,38 @@ __device__ void atomicMaxPositiveFloat(int* address, float value) {
     }
 }
 
-__device__ float3 add3(float3 a, float3 b) {
+__host__ __device__ float3 add3(float3 a, float3 b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-__device__ float3 sub3(float3 a, float3 b) {
+__host__ __device__ float3 sub3(float3 a, float3 b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-__device__ float3 mul3(float3 a, float b) {
+__host__ __device__ float3 mul3(float3 a, float b) {
     return make_float3(a.x * b, a.y * b, a.z * b);
 }
 
-__device__ float3 lerp3(float3 a, float3 b, float t) {
+__host__ __device__ float3 lerp3(float3 a, float3 b, float t) {
     return add3(a, mul3(sub3(b, a), t));
 }
 
-__device__ float dot3(float3 a, float3 b) {
+__host__ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-__device__ float luminance3(float3 color) {
+__host__ __device__ float luminance3(float3 color) {
     return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
 }
 
-__device__ float3 cross3(float3 a, float3 b) {
+__host__ __device__ float3 cross3(float3 a, float3 b) {
     return make_float3(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
         a.x * b.y - a.y * b.x);
 }
 
-__device__ float3 normalize3(float3 v) {
+__host__ __device__ float3 normalize3(float3 v) {
     const float len = sqrtf(fmaxf(0.000001f, dot3(v, v)));
     return make_float3(v.x / len, v.y / len, v.z / len);
 }
@@ -242,7 +248,7 @@ struct CameraState {
     float aspect;
 };
 
-__device__ CameraState makeCamera(const SimParams& p) {
+__host__ __device__ CameraState computeCameraFromSettings(const SimParams& p) {
     CameraState cam = {};
     const float3 target = make_float3(0.0f, 0.72f, 0.0f);
     const float cp = cosf(p.cameraPitch);
@@ -255,6 +261,17 @@ __device__ CameraState makeCamera(const SimParams& p) {
     cam.up = normalize3(cross3(cam.right, cam.forward));
     cam.tanHalfFov = 0.50f;
     cam.aspect = static_cast<float>(p.frameW) / static_cast<float>(p.frameH);
+    return cam;
+}
+
+__device__ CameraState makeCamera(const SimParams& p) {
+    CameraState cam = {};
+    cam.eye = p.cameraEye;
+    cam.forward = p.cameraForward;
+    cam.right = p.cameraRight;
+    cam.up = p.cameraUp;
+    cam.tanHalfFov = p.cameraTanHalfFov;
+    cam.aspect = p.cameraAspect;
     return cam;
 }
 
@@ -368,10 +385,18 @@ __device__ int scalarIndex(int x, int y, int z, const SimParams& p) {
     return (z * p.ny + y) * p.nx + x;
 }
 
+__device__ int scalarIndexUnchecked(int x, int y, int z, const SimParams& p) {
+    return (z * p.ny + y) * p.nx + x;
+}
+
 __device__ int uIndex(int x, int y, int z, const SimParams& p) {
     x = min(max(x, 0), p.nx);
     y = min(max(y, 0), p.ny - 1);
     z = min(max(z, 0), p.nz - 1);
+    return (z * p.ny + y) * (p.nx + 1) + x;
+}
+
+__device__ int uIndexUnchecked(int x, int y, int z, const SimParams& p) {
     return (z * p.ny + y) * (p.nx + 1) + x;
 }
 
@@ -382,10 +407,18 @@ __device__ int vIndex(int x, int y, int z, const SimParams& p) {
     return (z * (p.ny + 1) + y) * p.nx + x;
 }
 
+__device__ int vIndexUnchecked(int x, int y, int z, const SimParams& p) {
+    return (z * (p.ny + 1) + y) * p.nx + x;
+}
+
 __device__ int wIndex(int x, int y, int z, const SimParams& p) {
     x = min(max(x, 0), p.nx - 1);
     y = min(max(y, 0), p.ny - 1);
     z = min(max(z, 0), p.nz);
+    return (z * p.ny + y) * p.nx + x;
+}
+
+__device__ int wIndexUnchecked(int x, int y, int z, const SimParams& p) {
     return (z * p.ny + y) * p.nx + x;
 }
 
@@ -406,14 +439,14 @@ __device__ float sampleScalar(const float* field, const SimParams& p, float u, f
     const float ty = fy - static_cast<float>(y0);
     const float tz = fz - static_cast<float>(z0);
 
-    const float c000 = field[scalarIndex(x0, y0, z0, p)];
-    const float c100 = field[scalarIndex(x1, y0, z0, p)];
-    const float c010 = field[scalarIndex(x0, y1, z0, p)];
-    const float c110 = field[scalarIndex(x1, y1, z0, p)];
-    const float c001 = field[scalarIndex(x0, y0, z1, p)];
-    const float c101 = field[scalarIndex(x1, y0, z1, p)];
-    const float c011 = field[scalarIndex(x0, y1, z1, p)];
-    const float c111 = field[scalarIndex(x1, y1, z1, p)];
+    const float c000 = field[scalarIndexUnchecked(x0, y0, z0, p)];
+    const float c100 = field[scalarIndexUnchecked(x1, y0, z0, p)];
+    const float c010 = field[scalarIndexUnchecked(x0, y1, z0, p)];
+    const float c110 = field[scalarIndexUnchecked(x1, y1, z0, p)];
+    const float c001 = field[scalarIndexUnchecked(x0, y0, z1, p)];
+    const float c101 = field[scalarIndexUnchecked(x1, y0, z1, p)];
+    const float c011 = field[scalarIndexUnchecked(x0, y1, z1, p)];
+    const float c111 = field[scalarIndexUnchecked(x1, y1, z1, p)];
     const float c00 = lerpf(c000, c100, tx);
     const float c10 = lerpf(c010, c110, tx);
     const float c01 = lerpf(c001, c101, tx);
@@ -437,14 +470,14 @@ __device__ float sampleU(const float* field, const SimParams& p, float u, float 
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
     const float tz = fz - static_cast<float>(z0);
-    const float c000 = field[uIndex(x0, y0, z0, p)];
-    const float c100 = field[uIndex(x1, y0, z0, p)];
-    const float c010 = field[uIndex(x0, y1, z0, p)];
-    const float c110 = field[uIndex(x1, y1, z0, p)];
-    const float c001 = field[uIndex(x0, y0, z1, p)];
-    const float c101 = field[uIndex(x1, y0, z1, p)];
-    const float c011 = field[uIndex(x0, y1, z1, p)];
-    const float c111 = field[uIndex(x1, y1, z1, p)];
+    const float c000 = field[uIndexUnchecked(x0, y0, z0, p)];
+    const float c100 = field[uIndexUnchecked(x1, y0, z0, p)];
+    const float c010 = field[uIndexUnchecked(x0, y1, z0, p)];
+    const float c110 = field[uIndexUnchecked(x1, y1, z0, p)];
+    const float c001 = field[uIndexUnchecked(x0, y0, z1, p)];
+    const float c101 = field[uIndexUnchecked(x1, y0, z1, p)];
+    const float c011 = field[uIndexUnchecked(x0, y1, z1, p)];
+    const float c111 = field[uIndexUnchecked(x1, y1, z1, p)];
     return lerpf(lerpf(lerpf(c000, c100, tx), lerpf(c010, c110, tx), ty), lerpf(lerpf(c001, c101, tx), lerpf(c011, c111, tx), ty), tz);
 }
 
@@ -464,14 +497,14 @@ __device__ float sampleV(const float* field, const SimParams& p, float u, float 
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
     const float tz = fz - static_cast<float>(z0);
-    const float c000 = field[vIndex(x0, y0, z0, p)];
-    const float c100 = field[vIndex(x1, y0, z0, p)];
-    const float c010 = field[vIndex(x0, y1, z0, p)];
-    const float c110 = field[vIndex(x1, y1, z0, p)];
-    const float c001 = field[vIndex(x0, y0, z1, p)];
-    const float c101 = field[vIndex(x1, y0, z1, p)];
-    const float c011 = field[vIndex(x0, y1, z1, p)];
-    const float c111 = field[vIndex(x1, y1, z1, p)];
+    const float c000 = field[vIndexUnchecked(x0, y0, z0, p)];
+    const float c100 = field[vIndexUnchecked(x1, y0, z0, p)];
+    const float c010 = field[vIndexUnchecked(x0, y1, z0, p)];
+    const float c110 = field[vIndexUnchecked(x1, y1, z0, p)];
+    const float c001 = field[vIndexUnchecked(x0, y0, z1, p)];
+    const float c101 = field[vIndexUnchecked(x1, y0, z1, p)];
+    const float c011 = field[vIndexUnchecked(x0, y1, z1, p)];
+    const float c111 = field[vIndexUnchecked(x1, y1, z1, p)];
     return lerpf(lerpf(lerpf(c000, c100, tx), lerpf(c010, c110, tx), ty), lerpf(lerpf(c001, c101, tx), lerpf(c011, c111, tx), ty), tz);
 }
 
@@ -491,14 +524,14 @@ __device__ float sampleW(const float* field, const SimParams& p, float u, float 
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
     const float tz = fz - static_cast<float>(z0);
-    const float c000 = field[wIndex(x0, y0, z0, p)];
-    const float c100 = field[wIndex(x1, y0, z0, p)];
-    const float c010 = field[wIndex(x0, y1, z0, p)];
-    const float c110 = field[wIndex(x1, y1, z0, p)];
-    const float c001 = field[wIndex(x0, y0, z1, p)];
-    const float c101 = field[wIndex(x1, y0, z1, p)];
-    const float c011 = field[wIndex(x0, y1, z1, p)];
-    const float c111 = field[wIndex(x1, y1, z1, p)];
+    const float c000 = field[wIndexUnchecked(x0, y0, z0, p)];
+    const float c100 = field[wIndexUnchecked(x1, y0, z0, p)];
+    const float c010 = field[wIndexUnchecked(x0, y1, z0, p)];
+    const float c110 = field[wIndexUnchecked(x1, y1, z0, p)];
+    const float c001 = field[wIndexUnchecked(x0, y0, z1, p)];
+    const float c101 = field[wIndexUnchecked(x1, y0, z1, p)];
+    const float c011 = field[wIndexUnchecked(x0, y1, z1, p)];
+    const float c111 = field[wIndexUnchecked(x1, y1, z1, p)];
     return lerpf(lerpf(lerpf(c000, c100, tx), lerpf(c010, c110, tx), ty), lerpf(lerpf(c001, c101, tx), lerpf(c011, c111, tx), ty), tz);
 }
 
@@ -526,15 +559,15 @@ __device__ void scalarNeighborhoodBounds(
     const int x1 = min(x0 + 1, p.nx - 1);
     const int y1 = min(y0 + 1, p.ny - 1);
     const int z1 = min(z0 + 1, p.nz - 1);
-    float lo = field[scalarIndex(x0, y0, z0, p)];
+    float lo = field[scalarIndexUnchecked(x0, y0, z0, p)];
     float hi = lo;
-    const float c100 = field[scalarIndex(x1, y0, z0, p)];
-    const float c010 = field[scalarIndex(x0, y1, z0, p)];
-    const float c110 = field[scalarIndex(x1, y1, z0, p)];
-    const float c001 = field[scalarIndex(x0, y0, z1, p)];
-    const float c101 = field[scalarIndex(x1, y0, z1, p)];
-    const float c011 = field[scalarIndex(x0, y1, z1, p)];
-    const float c111 = field[scalarIndex(x1, y1, z1, p)];
+    const float c100 = field[scalarIndexUnchecked(x1, y0, z0, p)];
+    const float c010 = field[scalarIndexUnchecked(x0, y1, z0, p)];
+    const float c110 = field[scalarIndexUnchecked(x1, y1, z0, p)];
+    const float c001 = field[scalarIndexUnchecked(x0, y0, z1, p)];
+    const float c101 = field[scalarIndexUnchecked(x1, y0, z1, p)];
+    const float c011 = field[scalarIndexUnchecked(x0, y1, z1, p)];
+    const float c111 = field[scalarIndexUnchecked(x1, y1, z1, p)];
     lo = fminf(lo, c100);
     lo = fminf(lo, c010);
     lo = fminf(lo, c110);
@@ -1678,49 +1711,60 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     float4* hdr,
     const float* heatField,
     SimParams p) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = p.launchFrameYStart + blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH || p.renderDebugMode != 0) {
-        return;
-    }
-
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int emberCount = min(max(p.emberCount, 0), kMaxEmberCount);
-    if (emberCount <= 0) {
+    if (i >= emberCount || p.renderDebugMode != 0) {
         return;
     }
 
-    const int pixelIndex = y * p.frameW + x;
-    float4 radiance = hdr[pixelIndex];
-    float3 color = make_float3(radiance.x, radiance.y, radiance.z);
-    const float2 uv = make_float2(
-        (static_cast<float>(x) + 0.5f) / static_cast<float>(p.frameW),
-        (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH));
     const CameraState cam = makeCamera(p);
     const float baseGlow = saturate(sampleScalar(heatField, p, 0.50f, 0.06f, 0.50f) * 0.42f);
     const float sparkGate = smoothstepf(0.02f, 0.30f, baseGlow);
-
-    for (int i = 0; i < kMaxEmberCount && i < emberCount; ++i) {
-        const float seed = static_cast<float>(i);
-        const float h0 = hash21(make_float2(seed, 3.7f));
-        const float h1 = hash21(make_float2(seed, 9.1f));
-        const float h2 = hash21(make_float2(seed, 19.4f));
-        const float h3 = hash21(make_float2(seed, 31.6f));
-        const float life = fracf(p.time * (0.42f + h2 * 0.34f) + h0);
-        const float t = life * 1.42f;
-        const float3 sparkWorld = make_float3(
-            (h0 - 0.5f) * 1.10f + ((h1 - 0.5f) * 0.38f + p.wind * 0.58f) * t,
-            0.04f + (0.92f + h3 * 1.42f) * t - 0.30f * t * t,
-            (h1 - 0.5f) * 0.72f + (h2 - 0.5f) * 0.34f * t);
-        const float3 sparkScreen = projectPoint(cam, sparkWorld);
-        if (sparkScreen.z > 0.0f && sparkScreen.x > -0.05f && sparkScreen.x < 1.05f && sparkScreen.y > -0.05f && sparkScreen.y < 1.05f) {
-            const float2 d = sub2(uv, make_float2(sparkScreen.x, sparkScreen.y));
-            const float radius = (0.0015f + h3 * 0.0021f) / fmaxf(0.55f, sparkScreen.z);
-            const float spark = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius)) * smoothstepf(1.0f, 0.10f, life) * sparkGate;
-            color = add3(color, mul3(lerp3(make_float3(1.0f, 0.42f, 0.08f), make_float3(0.62f, 0.10f, 0.025f), life), spark * 1.20f));
-        }
+    if (sparkGate <= 0.0001f) {
+        return;
     }
 
-    hdr[pixelIndex] = make_float4(color.x, color.y, color.z, radiance.w);
+    const float seed = static_cast<float>(i);
+    const float h0 = hash21(make_float2(seed, 3.7f));
+    const float h1 = hash21(make_float2(seed, 9.1f));
+    const float h2 = hash21(make_float2(seed, 19.4f));
+    const float h3 = hash21(make_float2(seed, 31.6f));
+    const float life = fracf(p.time * (0.42f + h2 * 0.34f) + h0);
+    const float t = life * 1.42f;
+    const float3 sparkWorld = make_float3(
+        (h0 - 0.5f) * 1.10f + ((h1 - 0.5f) * 0.38f + p.wind * 0.58f) * t,
+        0.04f + (0.92f + h3 * 1.42f) * t - 0.30f * t * t,
+        (h1 - 0.5f) * 0.72f + (h2 - 0.5f) * 0.34f * t);
+    const float3 sparkScreen = projectPoint(cam, sparkWorld);
+    if (sparkScreen.z <= 0.0f || sparkScreen.x < -0.05f || sparkScreen.x > 1.05f || sparkScreen.y < -0.05f || sparkScreen.y > 1.05f) {
+        return;
+    }
+
+    const float radius = (0.0015f + h3 * 0.0021f) / fmaxf(0.55f, sparkScreen.z);
+    const float centerX = sparkScreen.x * static_cast<float>(p.frameW) - 0.5f;
+    const float centerY = sparkScreen.y * static_cast<float>(p.frameH) - 0.5f;
+    const int pad = max(2, static_cast<int>(ceilf(radius * static_cast<float>(max(p.frameW, p.frameH)) * 3.5f)));
+    const int minX = max(0, static_cast<int>(floorf(centerX)) - pad);
+    const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
+    const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
+    const int maxY = min(p.frameH - 1, static_cast<int>(ceilf(centerY)) + pad);
+    const float3 sparkColor = lerp3(make_float3(1.0f, 0.42f, 0.08f), make_float3(0.62f, 0.10f, 0.025f), life);
+    const float lifeFade = smoothstepf(1.0f, 0.10f, life) * sparkGate * 1.20f;
+
+    for (int y = minY; y <= maxY; ++y) {
+        const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH);
+        for (int x = minX; x <= maxX; ++x) {
+            const float ux = (static_cast<float>(x) + 0.5f) / static_cast<float>(p.frameW);
+            const float2 d = sub2(make_float2(ux, uy), make_float2(sparkScreen.x, sparkScreen.y));
+            const float spark = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius)) * lifeFade;
+            if (spark > 0.00001f) {
+                const int pixelIndex = y * p.frameW + x;
+                atomicAdd(&hdr[pixelIndex].x, sparkColor.x * spark);
+                atomicAdd(&hdr[pixelIndex].y, sparkColor.y * spark);
+                atomicAdd(&hdr[pixelIndex].z, sparkColor.z * spark);
+            }
+        }
+    }
 }
 
 __device__ float3 unpackBgra(std::uint32_t pixel) {
@@ -1749,7 +1793,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) overlayKernel(
     if (p.renderDebugMode != 0) {
         return;
     }
-    if (p.showGizmos == 0 && p.emberCount <= 0) {
+    if (p.showGizmos == 0) {
         return;
     }
 
@@ -1759,30 +1803,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) overlayKernel(
         (static_cast<float>(x) + 0.5f) / static_cast<float>(p.frameW),
         (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH));
     const CameraState cam = makeCamera(p);
-    const float baseGlow = saturate(sampleScalar(heatField, p, 0.50f, 0.06f, 0.50f) * 0.42f);
-
-    const int emberCount = min(max(p.emberCount, 0), kMaxEmberCount);
-    const float sparkGate = smoothstepf(0.02f, 0.30f, baseGlow);
-    for (int i = 0; i < kMaxEmberCount && i < emberCount; ++i) {
-        const float seed = static_cast<float>(i);
-        const float h0 = hash21(make_float2(seed, 3.7f));
-        const float h1 = hash21(make_float2(seed, 9.1f));
-        const float h2 = hash21(make_float2(seed, 19.4f));
-        const float h3 = hash21(make_float2(seed, 31.6f));
-        const float life = fracf(p.time * (0.42f + h2 * 0.34f) + h0);
-        const float t = life * 1.42f;
-        const float3 sparkWorld = make_float3(
-            (h0 - 0.5f) * 1.10f + ((h1 - 0.5f) * 0.38f + p.wind * 0.58f) * t,
-            0.04f + (0.92f + h3 * 1.42f) * t - 0.30f * t * t,
-            (h1 - 0.5f) * 0.72f + (h2 - 0.5f) * 0.34f * t);
-        const float3 sparkScreen = projectPoint(cam, sparkWorld);
-        if (sparkScreen.z > 0.0f && sparkScreen.x > -0.05f && sparkScreen.x < 1.05f && sparkScreen.y > -0.05f && sparkScreen.y < 1.05f) {
-            const float2 d = sub2(uv, make_float2(sparkScreen.x, sparkScreen.y));
-            const float radius = (0.0015f + h3 * 0.0021f) / fmaxf(0.55f, sparkScreen.z);
-            const float spark = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius)) * smoothstepf(1.0f, 0.10f, life) * sparkGate;
-            color = add3(color, mul3(lerp3(make_float3(1.0f, 0.42f, 0.08f), make_float3(0.62f, 0.10f, 0.025f), life), spark * 0.76f));
-        }
-    }
+    (void)heatField;
 
     drawGizmos(&color, uv, cam, p);
     frame[pixelIndex] = packBgra(color);
@@ -1904,6 +1925,16 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.launchFrameYStart = 0;
     params.launchFrameYEnd = g_frameH;
     return params;
+}
+
+void updateCameraCache(SimParams& params) {
+    const CameraState cam = computeCameraFromSettings(params);
+    params.cameraEye = cam.eye;
+    params.cameraForward = cam.forward;
+    params.cameraRight = cam.right;
+    params.cameraUp = cam.up;
+    params.cameraTanHalfFov = cam.tanHalfFov;
+    params.cameraAspect = cam.aspect;
 }
 
 SimParams withVolumeWindow(SimParams params, int zStart, int zEnd) {
@@ -2129,6 +2160,7 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
     params.exposure = std::max(0.45f, std::min(2.40f, settings.exposure));
     params.reflectionGain = std::max(0.0f, std::min(2.2f, settings.reflectionGain));
     params.smokeDarkness = std::max(0.35f, std::min(2.4f, settings.smokeDarkness));
+    updateCameraCache(params);
 
     if (settings.reset != 0 && !fireCudaReset()) {
         return false;
@@ -2286,15 +2318,13 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
     if (!check("renderKernel launch", cudaGetLastError())) {
         return false;
     }
-    if (writeD3DInterop) {
-        for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-            const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
-            const SimParams slice = withFrameWindow(params, yStart, yEnd);
-            emberHdrKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_hdrFrameDevice, g_heat, slice);
-        }
+    if (params.emberCount > 0 && params.renderDebugMode == 0) {
+        emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_hdrFrameDevice, g_heat, params);
         if (!check("emberHdrKernel launch", cudaGetLastError())) {
             return false;
         }
+    }
+    if (writeD3DInterop) {
         for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
             const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
             const SimParams slice = withFrameWindow(params, yStart, yEnd);
