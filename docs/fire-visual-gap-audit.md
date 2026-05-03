@@ -107,7 +107,7 @@ The current render is visibly wrong in the same way the metrics say it is wrong:
 5. Higher-order scalar transport: heat, fuel, oxygen, soot, pyrolysis, progress, turbulence energy, and soot optics now use clamped MacCormack/BFECC correction over the stable semi-Lagrangian backtrace.
 6. Soot optical model: soot optical depth is now a separate transported scalar with oxidation feedback, renderer extinction coupling, and particle-size-derived absorption/scattering terms.
 7. Volumetric shadowing: the raymarcher now traces short in-volume transmittance through soot optics and progress fields.
-8. HDR render path: the CUDA raymarcher now writes linear `float4` radiance first; a separate tone-map kernel applies ACES display mapping and dithering before BGRA presentation.
+8. HDR render path: the CUDA raymarcher now writes linear `float4` radiance first; a separate tone-map kernel applies ACES display mapping and dithering before FP16 D3D11 viewport publication.
 9. Fuel-bed breakup: the reset/source path now seeds broken char chunks and ash, and pyrolysis is gated by remaining char instead of a uniform orange source.
 8. Emitter scattering: smoke scattering and flame emission now use local shadow/transmittance terms instead of flat additive glow.
 9. Calibration data layer: validation now accepts `--calibration=<csv>` and `--geometry=<json>` sidecars for HRR, mass loss, thermocouples, IR, video-derived plume height, and experiment geometry.

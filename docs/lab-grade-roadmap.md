@@ -61,7 +61,7 @@ For this project, lab-grade means:
 - Chemistry is reduced. It needs explicit, documented closure constants and calibration bounds.
 - Soot optics are reduced to transported fields and particle-size-derived optical terms, not a full particle distribution.
 - Radiation is still approximate and not scene-coupled enough for wall/fuel heat feedback.
-- The app still transports final frames as BGRA through shared memory; internal HDR exists, but final lab image capture needs calibrated HDR/EXR output.
+- The app now transports live viewport frames through an FP16 D3D11 shared texture; final lab image capture still needs calibrated HDR/EXR output.
 
 ## Required New Systems
 

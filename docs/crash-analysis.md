@@ -49,12 +49,12 @@ Windows also logged repeated `WUDFRd failed to load` warnings for Intel audio / 
 
 ## Current Runtime Policy
 
-The main app viewport no longer initializes CUDA or submits custom simulation/render kernels in the UI process. It starts an isolated CUDA worker process for the real 3D volume and receives frames through shared memory. If the worker exits, stalls, or does not publish a fresh frame, the UI remains alive and falls back to the animated replay preview. There is still no CPU fire simulator fallback. There is one canonical CUDA runtime configuration; the project no longer switches between lower-quality and reference-quality modes.
+The main app viewport no longer initializes CUDA or submits custom simulation/render kernels in the UI process. It starts an isolated CUDA worker process for the real 3D volume and receives an FP16 D3D11 shared texture handle plus worker metadata through shared memory. If the worker exits, stalls, or does not publish a fresh frame, the UI remains alive and shows explicit stale-worker state. There is no CPU fire simulator fallback. There is one canonical CUDA runtime configuration; the project no longer switches between lower-quality and reference-quality modes.
 
 The worker contract now includes heartbeat and restart policy: frame stale after `2200 ms`, heartbeat stale after `3400 ms`, forced worker termination after `7200 ms`, and at most three restarts per minute before cooldown. The UI status rail shows the current worker state, and worker lifecycle events append to `out/worker-events.log`.
 
 - no args: opens the UI process and starts the isolated CUDA worker for real 3D volume frames
-- `--disable-cuda-worker`: opens the safe animated preview; no CUDA kernel launch
+- `--disable-cuda-worker`: opens the operator UI without launching CUDA kernels
 - `--cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=<pid>`: internal worker process mode
 - `--smoke-test` / `--cuda-smoke-test`: blocked unless `--allow-gpu-kernels --accept-bugcheck-risk` is present
 - `--validation` / `--validate`: blocked unless `--allow-gpu-kernels --accept-bugcheck-risk` is present

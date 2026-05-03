@@ -2439,7 +2439,7 @@ bool fireCudaRegisterD3D11Texture(void* d3d11Texture) {
     auto* resource = static_cast<ID3D11Resource*>(d3d11Texture);
     return check(
         "cudaGraphicsD3D11RegisterResource fp16 texture",
-        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resource, resource, cudaGraphicsRegisterFlagsWriteDiscard));
+        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resource, resource, cudaGraphicsRegisterFlagsNone));
 }
 
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings) {

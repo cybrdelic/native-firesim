@@ -19,15 +19,16 @@ NativeFireSim treats GPU work as production kernel code, not shader toy code. A 
 
 - CUDA separable compilation is disabled because all device code lives in one CUDA translation unit.
 - CUDA line info is enabled for debugger/profiler attribution.
-- The raymarch cap is 72 samples per pixel.
-- Raymarching writes CUDA `float4` HDR radiance first; `tonemapKernel` performs ACES display mapping and dithering before the BGRA display copy.
+- The raymarch cap is 104 samples per pixel.
+- Raymarching writes CUDA `float4` HDR radiance first; `tonemapKernel` performs ACES display mapping and dithering before FP16 D3D11 interop publication.
 - Embers and gizmos run in `overlayKernel`, outside `renderKernel`.
 - 3D volume work is sliced into 12-z-layer kernel windows.
 - Raymarch and overlay work are sliced into 36-row frame windows.
-- There is one canonical runtime configuration: 384x240 requested grid, 72 raymarch steps, and 176 embers.
+- There is one canonical runtime configuration: 384x240 requested grid, 104 raymarch steps, and 176 embers.
 - The recursive `smoothstepf` helper was replaced with a non-recursive inverted-edge implementation.
-- The main app starts an isolated CUDA worker for real 3D volume frames and falls back to safe animated replay if worker frames are stale.
-- The shared frame transport is `Local\NativeFireSimViewportFrameV1`.
+- The main app starts an isolated CUDA worker for real 3D volume frames and shows explicit stale-worker state if worker frames are not fresh.
+- The shared frame transport is an FP16 D3D11 keyed-mutex texture handle exposed through `Local\NativeFireSimViewportFrameV4`.
+- `--diagnostics` validates D3D/CUDA FP16 texture registration without launching simulation kernels.
 - UI-to-worker settings use an odd/even sequence counter so the worker does not consume a torn settings struct.
 - Worker frames are considered stale after `2200 ms`; worker heartbeat is stale after `3400 ms`; a worker that exceeds `7200 ms` without heartbeat is terminated.
 - Worker restarts are limited to three per minute before cooldown.
@@ -54,7 +55,7 @@ After any risky run, query recent system events for `BugCheck`, `Display`, `nvld
 
 ## Next Hardening Targets
 
-1. Replace shared CPU BGRA frames with Direct3D/CUDA external-memory textures and GPU semaphores.
+1. Add explicit interprocess GPU fence/semaphore publication on top of the current FP16 D3D11 texture transport.
 2. Add temporal resolve so the sliced raymarcher can accumulate more samples across frames without increasing per-kernel watchdog residency.
 3. Replace atomic velocity forcing with staged force buffers.
 4. Replace red/black SOR with a bounded multigrid or PCG pressure solve.

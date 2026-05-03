@@ -1727,8 +1727,9 @@ bool cudaWorkerEnabledByDefault(const std::string& args) {
 struct WorkerD3DTarget {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<IDXGIKeyedMutex> mutex;
+    ComPtr<ID3D11Texture2D> cudaTexture;
+    ComPtr<ID3D11Texture2D> sharedTexture;
+    ComPtr<IDXGIKeyedMutex> sharedMutex;
     HANDLE sharedHandle = nullptr;
 };
 
@@ -1746,24 +1747,53 @@ bool initializeWorkerD3DTarget(WorkerD3DTarget& target) {
     desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = 0;
+    desc.MiscFlags = 0;
+    HRESULT hr = target.device->CreateTexture2D(&desc, nullptr, target.cudaTexture.GetAddressOf());
+    if (FAILED(hr)) {
+        char detail[96] = {};
+        std::snprintf(detail, sizeof(detail), "%s", hresultString(hr).c_str());
+        appendRuntimeEvent("worker-d3d-create-cuda-target-failed", detail);
+        return false;
+    }
+
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-    HRESULT hr = target.device->CreateTexture2D(&desc, nullptr, target.texture.GetAddressOf());
+    hr = target.device->CreateTexture2D(&desc, nullptr, target.sharedTexture.GetAddressOf());
     if (FAILED(hr)) {
         char detail[96] = {};
         std::snprintf(detail, sizeof(detail), "%s", hresultString(hr).c_str());
         appendRuntimeEvent("worker-d3d-create-shared-failed", detail);
         return false;
     }
-    if (FAILED(target.texture.As(&target.mutex))) {
+    if (FAILED(target.sharedTexture.As(&target.sharedMutex))) {
         appendRuntimeEvent("worker-d3d-keyed-mutex-failed", "");
         return false;
     }
     ComPtr<IDXGIResource> sharedResource;
-    if (FAILED(target.texture.As(&sharedResource)) || FAILED(sharedResource->GetSharedHandle(&target.sharedHandle)) || target.sharedHandle == nullptr) {
+    if (FAILED(target.sharedTexture.As(&sharedResource)) || FAILED(sharedResource->GetSharedHandle(&target.sharedHandle)) || target.sharedHandle == nullptr) {
         appendRuntimeEvent("worker-d3d-shared-handle-failed", "");
         return false;
     }
+    return true;
+}
+
+bool runD3DInteropProbe(std::string& detail) {
+    WorkerD3DTarget target;
+    if (!initializeWorkerD3DTarget(target)) {
+        detail = "D3D FP16 target init failed";
+        return false;
+    }
+    if (!fireCudaSelectDeviceForD3D11(target.device.Get())) {
+        detail = fireCudaLastError();
+        return false;
+    }
+    if (!fireCudaRegisterD3D11Texture(target.cudaTexture.Get())) {
+        detail = fireCudaLastError();
+        return false;
+    }
+    fireCudaUnregisterD3D11Texture();
+    detail = "ok";
     return true;
 }
 
@@ -1830,7 +1860,7 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
-    if (!fireCudaRegisterD3D11Texture(d3dTarget.texture.Get())) {
+    if (!fireCudaRegisterD3D11Texture(d3dTarget.cudaTexture.Get())) {
         g_sharedViewport->workerStatus = -3;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
@@ -1866,7 +1896,16 @@ int runCudaWorker(const std::string& args) {
         settings.dt = dt;
         applyCanonicalFireSettings(settings);
 
-        const HRESULT acquire = d3dTarget.mutex->AcquireSync(0, 8);
+        if (!fireCudaStepAndRenderD3D11(settings)) {
+            g_sharedViewport->workerStatus = -2;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 4;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA/D3D render failed: %.145s", fireCudaLastError());
+            appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
+            break;
+        }
+
+        const HRESULT acquire = d3dTarget.sharedMutex->AcquireSync(0, 8);
         if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
             Sleep(1);
             continue;
@@ -1880,16 +1919,8 @@ int runCudaWorker(const std::string& args) {
             break;
         }
 
-        if (!fireCudaStepAndRenderD3D11(settings)) {
-            d3dTarget.mutex->ReleaseSync(0);
-            g_sharedViewport->workerStatus = -2;
-            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
-            g_sharedViewport->workerExitCode = 4;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA/D3D render failed: %.145s", fireCudaLastError());
-            appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
-            break;
-        }
-        const HRESULT release = d3dTarget.mutex->ReleaseSync(1);
+        d3dTarget.context->CopyResource(d3dTarget.sharedTexture.Get(), d3dTarget.cudaTexture.Get());
+        const HRESULT release = d3dTarget.sharedMutex->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;
             InterlockedIncrement(&g_sharedViewport->workerErrorCount);
@@ -1903,7 +1934,6 @@ int runCudaWorker(const std::string& args) {
         g_sharedViewport->lastFrameTickMs = tickMs();
         g_sharedViewport->workerStatus = 2;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming FP16 D3D11 interop");
-        InterlockedIncrement(&g_sharedViewport->frameSequence);
 
         Sleep(1);
     }
@@ -2779,6 +2809,8 @@ int runDiagnostics() {
     CreateDirectoryA("out", nullptr);
     FireCudaDiagnostics diagnostics;
     const bool cudaOk = fireCudaGetDiagnostics(&diagnostics);
+    std::string interopDetail = "skipped";
+    const bool d3dInteropOk = cudaOk && runD3DInteropProbe(interopDetail);
 
     std::ofstream out("out\\diagnostics.txt", std::ios::binary);
     if (!out) {
@@ -2802,7 +2834,9 @@ int runDiagnostics() {
     out << "runtimeBackend=CUDA\n";
     out << "liveCudaDefault=isolated-worker\n";
     out << "mainViewportKernelLaunches=false\n";
-    out << "interactiveCudaViewport=shared-memory worker frames\n";
+    out << "interactiveCudaViewport=FP16 D3D11 shared texture from isolated CUDA worker\n";
+    out << "d3dCudaInteropOk=" << (d3dInteropOk ? "true" : "false") << "\n";
+    out << "d3dCudaInteropDetail=" << interopDetail << "\n";
     out << "mainViewportMode=real CUDA worker volume; no animated simulation fallback\n";
     out << "workerProcessIsolation=true\n";
     out << "sharedFrameTransport=" << kSharedViewportName << "\n";
@@ -2827,7 +2861,7 @@ int runDiagnostics() {
     out << "requestedGrid=" << kSimulationGridWidth << "x" << kSimulationGridHeight << "\n";
     out << "raymarchSteps=" << kRaymarchSteps << "\n";
     out << "emberCount=" << kEmberCount << "\n";
-    return out.good() && cudaOk ? 0 : 2;
+    return out.good() && cudaOk && d3dInteropOk ? 0 : 2;
 }
 
 } // namespace
