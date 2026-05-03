@@ -26,9 +26,9 @@ constexpr int kSimulationGridWidth = 384;
 constexpr int kSimulationGridHeight = 240;
 constexpr int kRaymarchSteps = 88;
 constexpr int kEmberCount = 176;
-constexpr float kExposure = 0.92f;
-constexpr float kReflectionGain = 1.20f;
-constexpr float kSmokeDarkness = 1.08f;
+constexpr float kExposure = 0.76f;
+constexpr float kReflectionGain = 0.72f;
+constexpr float kSmokeDarkness = 1.18f;
 constexpr float kFireIntensity = 1.42f;
 constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
@@ -89,7 +89,6 @@ struct SharedViewportBuffer {
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
-std::vector<std::uint32_t> g_safeBaseFrame;
 BITMAPINFO g_bitmap = {};
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
@@ -120,7 +119,6 @@ int g_activeGizmo = 1;
 int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
-float g_safePreviewTime = 0.0f;
 bool g_cudaWorkerRequested = false;
 bool g_cudaWorkerFrameLive = false;
 unsigned long long g_lastWorkerStartTickMs = 0;
@@ -158,10 +156,8 @@ std::uint32_t packBgra(float r, float g, float b) {
     return 0xff000000u | (ri << 16) | (gi << 8) | bi;
 }
 
-void unpackBgra(std::uint32_t pixel, float* r, float* g, float* b) {
-    *r = static_cast<float>((pixel >> 16) & 0xff) / 255.0f;
-    *g = static_cast<float>((pixel >> 8) & 0xff) / 255.0f;
-    *b = static_cast<float>(pixel & 0xff) / 255.0f;
+void clearSimulationFrame(std::vector<std::uint32_t>& pixels) {
+    pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.006f, 0.007f, 0.008f));
 }
 
 void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
@@ -527,7 +523,7 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "SAFE FALLBACK PREVIEW   WORKER STARTING/STALE   D DEBUG   C CLEAN",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "NO LIVE CUDA FRAME   WORKER STARTING/STALE   D DEBUG   C CLEAN",
         1,
         0.76f,
         0.78f,
@@ -596,7 +592,7 @@ void updateTitle(float fps) {
         title,
         sizeof(title),
         "Native FireSim %s | %.0f fps | %s | debug %s | wind %.2f | turbulence %.2f | %s",
-        g_useCudaBackend ? "CUDA 3D volume" : "safe animated preview",
+        g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
         fps,
         toolName(g_activeGizmo),
         renderDebugName(g_renderDebugMode),
@@ -878,165 +874,6 @@ std::string joinPath(const std::string& directory, const char* filename) {
     }
     path += filename;
     return path;
-}
-
-bool loadBmp(const char* path, std::vector<std::uint32_t>& pixels, int width, int height) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return false;
-    }
-
-    BITMAPFILEHEADER fileHeader = {};
-    BITMAPINFOHEADER infoHeader = {};
-    in.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
-    in.read(reinterpret_cast<char*>(&infoHeader), sizeof(infoHeader));
-    if (!in || fileHeader.bfType != 0x4d42 || infoHeader.biBitCount != 32 || infoHeader.biCompression != BI_RGB) {
-        return false;
-    }
-    if (infoHeader.biWidth != width || std::abs(infoHeader.biHeight) != height) {
-        return false;
-    }
-
-    std::vector<std::uint32_t> loaded(static_cast<std::size_t>(width) * height, 0xff000000u);
-    in.seekg(fileHeader.bfOffBits, std::ios::beg);
-    if (infoHeader.biHeight < 0) {
-        in.read(reinterpret_cast<char*>(loaded.data()), static_cast<std::streamsize>(loaded.size() * sizeof(std::uint32_t)));
-    } else {
-        for (int y = height - 1; y >= 0; --y) {
-            in.read(
-                reinterpret_cast<char*>(loaded.data() + static_cast<std::size_t>(y) * width),
-                static_cast<std::streamsize>(static_cast<std::size_t>(width) * sizeof(std::uint32_t)));
-        }
-    }
-    if (!in) {
-        return false;
-    }
-    pixels.swap(loaded);
-    return true;
-}
-
-void prepareSafeViewportFrame(std::vector<std::uint32_t>& pixels) {
-    if (loadBmp("out\\validation-frame.bmp", pixels, kFrameWidth, kFrameHeight) ||
-        loadBmp("out\\cuda-smoke-test-frame.bmp", pixels, kFrameWidth, kFrameHeight)) {
-        return;
-    }
-
-    pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.012f, 0.013f, 0.013f));
-    for (int y = 0; y < kFrameHeight; ++y) {
-        const float v = static_cast<float>(y) / static_cast<float>(std::max(1, kFrameHeight - 1));
-        for (int x = 0; x < kFrameWidth; ++x) {
-            const float u = static_cast<float>(x) / static_cast<float>(std::max(1, kFrameWidth - 1));
-            const float tray = std::exp(-((u - 0.50f) * (u - 0.50f) / 0.070f + (v - 0.76f) * (v - 0.76f) / 0.010f));
-            const float floor = std::max(0.0f, (v - 0.62f) * 0.22f);
-            pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(
-                0.014f + tray * 0.13f + floor,
-                0.015f + tray * 0.050f + floor * 0.80f,
-                0.014f + tray * 0.018f + floor * 0.58f);
-        }
-    }
-}
-
-std::uint32_t sampleSafeFrame(const std::vector<std::uint32_t>& source, float x, float y) {
-    const int ix = static_cast<int>(clampf(x, 0.0f, static_cast<float>(kFrameWidth - 1)));
-    const int iy = static_cast<int>(clampf(y, 0.0f, static_cast<float>(kFrameHeight - 1)));
-    return source[static_cast<std::size_t>(iy) * kFrameWidth + ix];
-}
-
-float hashFloat(int value) {
-    std::uint32_t x = static_cast<std::uint32_t>(value);
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
-}
-
-void renderSafeAnimatedViewport(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& source, const FireSettings& settings, float timeSeconds) {
-    if (source.size() < static_cast<std::size_t>(kFrameWidth * kFrameHeight)) {
-        pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.012f, 0.013f, 0.013f));
-        return;
-    }
-    if (pixels.size() != source.size()) {
-        pixels.resize(source.size());
-    }
-
-    const float wind = clampf(settings.wind, -1.0f, 1.0f);
-    const float turbulence = clampf(settings.turbulence, 0.05f, 1.85f);
-    const float yaw = settings.cameraYaw;
-    const float pitch = settings.cameraPitch;
-    const float zoom = clampf(3.0f / std::max(1.0f, settings.cameraDistance), 0.68f, 1.42f);
-    const float orbitX = std::sin(yaw) * 82.0f;
-    const float orbitY = pitch * 150.0f;
-    const float centerX = static_cast<float>(kFrameWidth) * 0.5f;
-    const float centerY = static_cast<float>(kFrameHeight) * 0.54f;
-    for (int y = 0; y < kFrameHeight; ++y) {
-        const float yf = static_cast<float>(y);
-        const float vertical = static_cast<float>(y) / static_cast<float>(kFrameHeight);
-        for (int x = 0; x < kFrameWidth; ++x) {
-            const float xf = static_cast<float>(x);
-            const float normalizedX = (xf - centerX) / std::max(0.001f, zoom);
-            const float normalizedY = (yf - centerY) / std::max(0.001f, zoom);
-            const float parallax = 0.35f + vertical * 0.85f;
-            const float viewX = centerX + normalizedX - orbitX * parallax;
-            const float viewY = centerY + normalizedY + orbitY;
-
-            float br = 0.0f;
-            float bg = 0.0f;
-            float bb = 0.0f;
-            unpackBgra(sampleSafeFrame(source, viewX, viewY), &br, &bg, &bb);
-            const float luma = br * 0.2126f + bg * 0.7152f + bb * 0.0722f;
-            const float chroma = std::max(br, std::max(bg, bb)) - std::min(br, std::min(bg, bb));
-            const float warm = clamp01((br - bg * 0.82f) * 3.2f + (bg - bb) * 1.1f + luma * 0.32f);
-            const float smoke = clamp01((0.52f - luma) * 1.35f + (0.26f - chroma) * 1.1f);
-            const float hot = clamp01((luma - 0.35f) * 2.8f + warm * 0.28f);
-            const float flameMask = warm * hot * smoothstepf(0.92f, 0.08f, vertical);
-            const float smokeMask = smoke * smoothstepf(0.18f, 0.90f, vertical);
-            const float fireLift = flameMask * (1.0f - vertical) * (1.0f + turbulence * 0.45f);
-
-            const float waveA = std::sin(viewY * 0.060f + timeSeconds * (6.0f + turbulence * 2.2f));
-            const float waveB = std::sin((viewX + viewY) * 0.034f - timeSeconds * (9.0f + turbulence * 2.6f));
-            const float waveC = std::sin(viewX * 0.041f - timeSeconds * (5.2f + turbulence * 1.4f));
-            const float waveD = std::sin((viewX - viewY) * 0.027f + timeSeconds * 13.0f);
-            const float sx =
-                viewX -
-                wind * (flameMask * 18.0f + smokeMask * 22.0f) -
-                waveA * (flameMask * 13.0f + smokeMask * 3.8f) -
-                waveB * flameMask * 9.0f -
-                waveD * fireLift * 5.0f;
-            const float sy =
-                viewY +
-                waveC * (flameMask * 13.5f + smokeMask * 4.0f) +
-                std::sin(timeSeconds * 15.0f + viewX * 0.050f) * flameMask * 5.6f -
-                fireLift * (7.0f + 5.0f * std::sin(timeSeconds * 4.7f + viewX * 0.018f));
-
-            float r = 0.0f;
-            float g = 0.0f;
-            float b = 0.0f;
-            unpackBgra(sampleSafeFrame(source, sx, sy), &r, &g, &b);
-            const float flicker =
-                1.0f +
-                flameMask * (0.14f * std::sin(timeSeconds * 17.0f + viewX * 0.043f) + 0.09f * std::sin(timeSeconds * 25.0f + viewY * 0.067f)) -
-                smokeMask * 0.035f * std::sin(timeSeconds * 2.4f + viewX * 0.012f);
-            r += flameMask * 0.045f * (0.5f + 0.5f * std::sin(timeSeconds * 21.0f + viewY * 0.073f));
-            g += flameMask * 0.018f * (0.5f + 0.5f * std::sin(timeSeconds * 18.0f + viewX * 0.049f));
-            pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(r * flicker, g * flicker, b * flicker);
-        }
-    }
-
-    const int emberCount = 76;
-    for (int i = 0; i < emberCount; ++i) {
-        const float seedA = hashFloat(i * 17 + 3);
-        const float seedB = hashFloat(i * 31 + 9);
-        const float seedC = hashFloat(i * 47 + 15);
-        const float life = std::fmod(timeSeconds * (0.10f + seedC * 0.16f) + seedB, 1.0f);
-        const float emberZoom = clampf(zoom, 0.72f, 1.30f);
-        const int x = static_cast<int>((0.34f + seedA * 0.32f + wind * life * 0.14f + std::sin(timeSeconds * 1.7f + seedA * 9.0f) * 0.018f) * kFrameWidth * emberZoom + orbitX * 0.42f);
-        const int y = static_cast<int>((0.80f - life * (0.58f + seedC * 0.22f)) * kFrameHeight * emberZoom + orbitY * 0.30f + (1.0f - emberZoom) * kFrameHeight * 0.30f);
-        const float alpha = (1.0f - life) * (0.28f + seedC * 0.50f);
-        const int radius = seedC > 0.72f ? 2 : 1;
-        drawCirclePx(pixels, x, y, radius, 1.0f, 0.48f + seedB * 0.28f, 0.08f, alpha);
-    }
 }
 
 bool gpuKernelLaunchAllowed(const std::string& args) {
@@ -2448,7 +2285,7 @@ int runDiagnostics() {
     out << "liveCudaDefault=isolated-worker\n";
     out << "mainViewportKernelLaunches=false\n";
     out << "interactiveCudaViewport=shared-memory worker frames\n";
-    out << "mainViewportMode=real CUDA worker volume with safe animated fallback\n";
+    out << "mainViewportMode=real CUDA worker volume; no animated simulation fallback\n";
     out << "workerProcessIsolation=true\n";
     out << "sharedFrameTransport=" << kSharedViewportName << "\n";
     out << "workerFrameStaleMs=" << kWorkerFrameStaleMs << "\n";
@@ -2505,8 +2342,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
 
     timeBeginPeriod(1);
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
-    prepareSafeViewportFrame(g_safeBaseFrame);
-    g_simFrame = g_safeBaseFrame;
+    clearSimulationFrame(g_simFrame);
     initializeSharedViewport(true);
     initializeBitmapInfo();
 
@@ -2558,18 +2394,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.cameraPitch = g_cameraPitch;
         settings.cameraDistance = g_cameraDistance;
         if (g_needsReset) {
-            prepareSafeViewportFrame(g_safeBaseFrame);
-            g_safePreviewTime = 0.0f;
+            clearSimulationFrame(g_simFrame);
             g_needsReset = false;
         }
 
         writeWorkerSettings(settings);
         serviceCudaWorkerWatchdog();
-        g_cudaWorkerFrameLive = g_cudaWorkerRequested && readWorkerFrame(g_simFrame);
+        const bool copiedWorkerFrame = g_cudaWorkerRequested && readWorkerFrame(g_simFrame);
+        const bool workerTimestampFresh =
+            g_sharedViewport != nullptr &&
+            g_sharedViewport->lastFrameTickMs != 0 &&
+            tickMs() - g_sharedViewport->lastFrameTickMs <= kWorkerFrameStaleMs;
+        g_cudaWorkerFrameLive = copiedWorkerFrame || workerTimestampFresh;
         g_useCudaBackend = g_cudaWorkerFrameLive;
-        if (!g_cudaWorkerFrameLive) {
-            g_safePreviewTime += dt;
-            renderSafeAnimatedViewport(g_simFrame, g_safeBaseFrame, settings, g_safePreviewTime);
+        if (!g_cudaWorkerFrameLive && !copiedWorkerFrame) {
+            clearSimulationFrame(g_simFrame);
         }
         composeAppFrame(g_frame, g_simFrame, settings, g_useCudaBackend, g_cleanViewportMode);
 

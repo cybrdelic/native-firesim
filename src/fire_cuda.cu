@@ -195,24 +195,6 @@ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-__device__ float luminance3(float3 color) {
-    return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
-}
-
-__device__ float saturation3(float3 color) {
-    const float maxc = fmaxf(color.x, fmaxf(color.y, color.z));
-    const float minc = fminf(color.x, fminf(color.y, color.z));
-    return maxc > 0.0001f ? (maxc - minc) / maxc : 0.0f;
-}
-
-__device__ float3 saturateAroundLuma(float3 color, float amount) {
-    const float luma = luminance3(color);
-    return make_float3(
-        saturate(luma + (color.x - luma) * amount),
-        saturate(luma + (color.y - luma) * amount),
-        saturate(luma + (color.z - luma) * amount));
-}
-
 __device__ float3 cross3(float3 a, float3 b) {
     return make_float3(
         a.y * b.z - a.z * b.y,
@@ -290,7 +272,7 @@ __device__ float volumeDomainFade(float u, float v, float w) {
         smoothstepf(0.000f, 0.070f, w) *
         smoothstepf(1.000f, 0.930f, w);
     const float floorFade = smoothstepf(0.000f, 0.018f, v);
-    const float topFade = smoothstepf(1.000f, 0.760f, v);
+    const float topFade = smoothstepf(1.000f, 0.640f, v);
     return saturate(side * floorFade * topFade);
 }
 
@@ -1204,24 +1186,24 @@ __device__ float3 roomBackgroundRay(const CameraState& cam, float2 uv, float3 rd
     float3 color = make_float3(0.060f, 0.058f, 0.055f);
     if (surface == 1) {
         const float marble = fbm(make_float2(hit.x * 8.5f + hit.z * 1.3f, hit.z * 7.0f - hit.x * 0.8f));
-        color = cinematic ? make_float3(0.050f, 0.046f, 0.041f) : make_float3(0.044f, 0.041f, 0.039f);
-        color = add3(color, mul3(make_float3(0.060f, 0.054f, 0.047f), (marble - 0.5f) * 0.18f));
+        color = cinematic ? make_float3(0.047f, 0.047f, 0.046f) : make_float3(0.043f, 0.043f, 0.042f);
+        color = add3(color, mul3(make_float3(0.048f, 0.048f, 0.046f), (marble - 0.5f) * 0.16f));
 
         const float trayBody = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(1.08f, 0.58f), 0.022f);
         const float trayInner = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(0.96f, 0.47f), 0.020f);
         const float trayRim = saturate(trayBody - trayInner * 0.74f);
         const float emberBed = trayInner * expf(-(hit.x * hit.x * 0.74f + hit.z * hit.z * 2.20f));
         color = lerp3(color, make_float3(0.017f, 0.014f, 0.012f), trayBody * 0.82f);
-        color = add3(color, mul3(make_float3(0.18f, 0.035f, 0.010f), emberBed * glow * 0.70f));
+        color = add3(color, mul3(make_float3(0.10f, 0.025f, 0.006f), emberBed * glow * 0.36f));
         color = add3(color, mul3(make_float3(0.30f, 0.28f, 0.24f), trayRim * 0.10f));
 
-        const float reflectCore = expf(-(hit.x * hit.x * 1.65f + (hit.z + 0.24f) * (hit.z + 0.24f) * 1.10f)) * glow;
-        const float reflectedTongues = smoothstepf(0.95f, 0.00f, fabsf(hit.x)) * smoothstepf(1.40f, 0.00f, fabsf(hit.z + 0.80f));
+        const float reflectCore = expf(-(hit.x * hit.x * 2.45f + (hit.z + 0.18f) * (hit.z + 0.18f) * 1.95f)) * glow;
+        const float reflectedTongues = smoothstepf(0.82f, 0.00f, fabsf(hit.x)) * smoothstepf(1.18f, 0.00f, fabsf(hit.z + 0.72f));
         const float streaks = floorGrid(hit.x + fbm(make_float2(hit.z * 2.0f, hit.x * 1.2f)) * 0.08f, hit.z, 14.0f, 0.012f);
-        color = add3(color, mul3(make_float3(1.72f, 0.43f, 0.060f), reflectCore * p.reflectionGain * 0.34f));
-        color = add3(color, mul3(make_float3(1.10f, 0.20f, 0.030f), reflectedTongues * streaks * glow * p.reflectionGain * 0.18f));
+        color = add3(color, mul3(make_float3(0.95f, 0.22f, 0.040f), reflectCore * p.reflectionGain * 0.13f));
+        color = add3(color, mul3(make_float3(0.74f, 0.14f, 0.025f), reflectedTongues * streaks * glow * p.reflectionGain * 0.07f));
     } else if (surface == 2) {
-        color = cinematic ? make_float3(0.040f, 0.035f, 0.031f) : make_float3(0.034f, 0.033f, 0.032f);
+        color = cinematic ? make_float3(0.038f, 0.038f, 0.037f) : make_float3(0.034f, 0.034f, 0.034f);
         const float panelA = lineMask(make_float2(hit.x, hit.z), make_float2(-1.2f, -2.0f), make_float2(-1.2f, 2.0f), 0.010f);
         const float panelB = lineMask(make_float2(hit.x, hit.z), make_float2(0.0f, -2.0f), make_float2(0.0f, 2.0f), 0.008f);
         const float fixtureL = expf(-((hit.x + 1.50f) * (hit.x + 1.50f) + (hit.z - 0.92f) * (hit.z - 0.92f)) * 120.0f);
@@ -1229,11 +1211,11 @@ __device__ float3 roomBackgroundRay(const CameraState& cam, float2 uv, float3 rd
         color = add3(color, mul3(make_float3(0.18f, 0.16f, 0.13f), (panelA + panelB) * 0.10f));
         color = add3(color, mul3(make_float3(0.55f, 0.43f, 0.30f), (fixtureL + fixtureR) * 0.22f));
     } else {
-        color = cinematic ? make_float3(0.062f, 0.055f, 0.049f) : color;
+        color = cinematic ? make_float3(0.058f, 0.058f, 0.056f) : color;
         const float soot = expf(-(hit.x * hit.x * 0.82f + hit.z * hit.z * 1.12f)) * smoothstepf(0.36f, 1.92f, hit.y);
-        color = lerp3(color, make_float3(0.012f, 0.010f, 0.009f), soot * 0.82f * p.smokeDarkness);
+        color = lerp3(color, make_float3(0.010f, 0.011f, 0.012f), soot * 0.82f * p.smokeDarkness);
         const float wallGlow = expf(-(hit.x * hit.x * 1.1f + hit.z * hit.z * 1.3f + (hit.y - 0.70f) * (hit.y - 0.70f) * 1.0f)) * glow;
-        color = add3(color, mul3(make_float3(0.78f, 0.24f, 0.060f), wallGlow * 0.105f));
+        color = add3(color, mul3(make_float3(0.32f, 0.13f, 0.050f), wallGlow * 0.040f));
         if (surface == 3 && hit.x < 0.0f) {
             const float window = rectMask(make_float2(hit.z, hit.y), make_float2(-1.28f, 0.92f), make_float2(0.06f, 0.62f), 0.030f);
             const float glassNoise = fbm(make_float2(hit.y * 11.0f, hit.z * 8.0f));
@@ -1476,42 +1458,57 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 combustion * reactionFront * flameSheet * (0.010f + fieldFilament * 2.05f + convectiveSheet * 1.45f + thinFront * 0.55f + progress * 0.10f) *
                 (0.055f + breakup * 1.20f + raggedEdge * 0.50f + lesBreakup * 0.44f) *
                 (0.62f + thinFront * 1.55f);
+            const float plumeVoid = smoothstepf(0.60f, 0.95f, holeNoise + fineNoise * 0.24f + shearNoise * 0.20f + fv * 0.12f);
+            const float topDissolve = smoothstepf(0.98f, 0.54f, fv);
+            const float raggedPlume = 1.0f - plumeVoid * smoothstepf(0.26f, 0.92f, fv) * 0.74f;
             const float upperPlume =
                 smoothstepf(0.14f, 0.48f, fv) *
                 smoothstepf(0.030f, 1.20f, sootOptics + soot * 0.42f) *
-                (0.12f + fineNoise * 0.12f + shearNoise * 0.10f + plumeNoise * 0.92f + raggedEdge * 0.28f + turbulenceEnergy * 0.09f);
-            const float sootDensity = domainFade * (
+                (0.12f + fineNoise * 0.12f + shearNoise * 0.10f + plumeNoise * 0.92f + raggedEdge * 0.28f + turbulenceEnergy * 0.09f) *
+                topDissolve * raggedPlume;
+            const float rawSootDensity = domainFade * (
                 smoothstepf(0.020f, 1.05f, sootOptics + soot * 0.32f) *
                     smoothstepf(0.16f, 0.42f, fv) *
                     (0.040f + fineNoise * 0.060f + shearNoise * 0.070f + plumeNoise * 0.58f + raggedEdge * 0.22f + ash * 0.020f) +
                 upperPlume * (0.26f + plumeNoise * 0.34f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.025f + plumeNoise * 0.045f));
+            const float emissiveMask = saturate(combustion * reactionFront * (0.35f + flameSheet * 0.65f) + flameDensity * 2.4f);
+            const float scatterSeparation = 1.0f - smoothstepf(0.05f, 0.52f, emissiveMask) * 0.70f;
+            const float absorptionDensity = rawSootDensity * (0.88f + (1.0f - scatterSeparation) * 0.12f);
+            const float scatterDensity = rawSootDensity * scatterSeparation;
 
             const float particleRadius = saturate(0.08f + sootOptics * 0.028f + ash * 0.085f + saturate(1.0f - oxygen) * 0.12f);
-            const float sootAbsorption = sootDensity * (1.85f + particleRadius * 3.10f + sootOptics * 0.42f) * p.smokeDarkness;
-            const float sootScattering = sootDensity * (0.14f + (1.0f - particleRadius) * 0.32f) * (0.55f + p.smokeGain * 0.34f);
+            const float sootAbsorption = absorptionDensity * (2.05f + particleRadius * 3.35f + sootOptics * 0.46f) * p.smokeDarkness;
+            const float sootScattering = scatterDensity * (0.08f + (1.0f - particleRadius) * 0.22f) * (0.40f + p.smokeGain * 0.24f);
             const float sootExtinction = sootAbsorption + sootScattering;
             const float flameExtinction = flameDensity * 0.24f;
             const float extinction = (sootExtinction + flameExtinction) * stepT;
             const float smokeAlpha = 1.0f - expf(-sootAbsorption * stepT);
             const float scatterAlpha = 1.0f - expf(-sootScattering * stepT);
             const float shadow = volumeShadow(sootOpticsField, progressField, p, warpedFu, warpedFv, warpedFw);
-            const float whiteCore = smoothstepf(1680.0f, 2380.0f, tempK) * combustion * smoothstepf(0.08f, 0.72f, oxygen) * (0.42f + thinFront * 0.58f);
-            const float radiantPower = powf(saturate((tempK - 780.0f) / 1720.0f), 2.05f) * (2.20f + fieldFilament * 4.35f + convectiveSheet * 2.55f + progress * 0.62f + whiteCore * 3.40f);
-            const float whiteFilament = saturate(whiteCore * (0.22f + fieldFilament * 0.32f + thinFront * 0.24f));
-            float3 flameColor = lerp3(blackbodyColor(tempK), make_float3(1.0f, 0.72f, 0.34f), saturate(whiteFilament * 0.30f));
-            float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.42f + shadow * 1.18f + whiteCore * 1.75f));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.18f, 0.98f, 0.68f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * (0.82f + shadow * 0.52f)));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.08f, 0.14f, 0.018f), fieldFilament * heat * stepT * (0.085f + shadow * 0.075f) * (1.0f - whiteCore * 0.70f)));
             const float sootLoad = saturate(sootOptics * 0.74f + soot * 0.20f + upperPlume * 0.46f);
-            const float ashVeil = saturate(ash * 0.075f + smoothstepf(0.18f, 0.82f, fv) * (1.0f - sootLoad) * 0.035f);
+            const float whiteCore =
+                smoothstepf(2050.0f, 2850.0f, tempK) *
+                combustion *
+                smoothstepf(0.24f, 0.86f, oxygen) *
+                (0.18f + thinFront * 0.44f + fieldFilament * 0.38f) *
+                (1.0f - smoothstepf(0.22f, 0.88f, sootLoad) * 0.55f);
+            const float radiantPower = powf(saturate((tempK - 820.0f) / 1880.0f), 2.35f) * (1.70f + fieldFilament * 3.30f + convectiveSheet * 1.80f + progress * 0.42f + whiteCore * 1.45f);
+            const float whiteFilament = saturate(whiteCore * (0.10f + fieldFilament * 0.24f + thinFront * 0.20f));
+            const float orangeEdge = (1.0f - whiteFilament) * thinFront * reactionFront * (0.32f + breakup * 0.68f) * smoothstepf(0.10f, 0.82f, oxygen);
+            float3 flameColor = lerp3(blackbodyColor(tempK), make_float3(1.0f, 0.78f, 0.46f), saturate(whiteFilament * 0.16f));
+            float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.18f + shadow * 0.95f + whiteCore * 0.70f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 0.98f, 0.78f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * (0.36f + shadow * 0.26f)));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.26f, 0.22f, 0.035f), orangeEdge * heat * stepT * (0.10f + shadow * 0.08f)));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.04f, 0.13f, 0.018f), fieldFilament * heat * stepT * (0.070f + shadow * 0.055f) * (1.0f - whiteCore * 0.35f)));
+            const float ashVeil = saturate(ash * 0.060f + smoothstepf(0.18f, 0.82f, fv) * (1.0f - sootLoad) * 0.024f);
             const float3 smokeBlack = make_float3(0.0026f, 0.0027f, 0.0031f);
-            const float3 smokeCoal = make_float3(0.018f, 0.018f, 0.018f);
-            const float3 smokeAsh = make_float3(0.080f, 0.079f, 0.075f);
+            const float3 smokeCoal = make_float3(0.016f, 0.0165f, 0.0175f);
+            const float3 smokeAsh = make_float3(0.064f, 0.067f, 0.071f);
             float3 smokeColor = lerp3(smokeCoal, smokeBlack, sootLoad);
             smokeColor = lerp3(smokeColor, smokeAsh, ashVeil);
-            const float backScatter = scatterAlpha * shadow * baseGlow * (0.006f + flameDensity * 0.006f) * (0.06f + (1.0f - particleRadius) * 0.08f);
-            smokeColor = add3(smokeColor, mul3(make_float3(0.20f, 0.17f, 0.13f), backScatter));
-            const float scatterGain = scatterAlpha * (0.010f + shadow * 0.020f + flameDensity * 0.008f + turbulenceEnergy * 0.003f) * (0.20f + (1.0f - particleRadius) * 0.30f);
+            const float backScatter = scatterAlpha * shadow * baseGlow * (0.003f + flameDensity * 0.002f) * (0.035f + (1.0f - particleRadius) * 0.045f) * scatterSeparation;
+            smokeColor = add3(smokeColor, mul3(make_float3(0.055f, 0.055f, 0.058f), backScatter));
+            const float scatterGain = scatterAlpha * (0.006f + shadow * 0.014f + flameDensity * 0.003f + turbulenceEnergy * 0.002f) * (0.14f + (1.0f - particleRadius) * 0.22f) * scatterSeparation;
             const float coalGlow = smoothstepf(0.004f, 0.18f, charMass) * smoothstepf(0.64f, 0.02f, fv) * (0.13f + pyrolysis * 0.30f + heat * 0.018f);
 
             debugFlame = fmaxf(debugFlame, saturate(flameDensity * radiantPower * 0.26f));
@@ -1520,7 +1517,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             accum = add3(accum, mul3(flameEmission, trans));
             accum = add3(accum, mul3(make_float3(1.0f, 0.24f, 0.035f), trans * coalGlow * stepT));
             accum = add3(accum, mul3(smokeColor, trans * scatterGain));
-            flameGlow = fmaxf(flameGlow, flameDensity * radiantPower * (0.18f + fieldFilament * 0.25f + whiteFilament * 0.35f));
+            flameGlow = fmaxf(flameGlow, flameDensity * radiantPower * (0.12f + fieldFilament * 0.18f + whiteFilament * 0.20f));
             smokeOcclusion = saturate(smokeOcclusion + smokeAlpha * trans);
             trans *= expf(-extinction);
         }
@@ -1548,8 +1545,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
 
     color = add3(mul3(color, trans), accum);
 
-    const float bloom = saturate(flameGlow * 0.18f) * (1.0f - saturate(smokeOcclusion * 0.78f));
-    color = add3(color, mul3(make_float3(1.0f, 0.42f, 0.085f), bloom * bloom * 0.055f * p.reflectionGain));
+    const float bloom = saturate(flameGlow * 0.12f) * (1.0f - saturate(smokeOcclusion * 0.92f));
+    color = add3(color, mul3(make_float3(1.0f, 0.36f, 0.070f), bloom * bloom * 0.026f * p.reflectionGain));
     out[y * p.frameW + x] = make_float4(
         fmaxf(0.0f, color.x),
         fmaxf(0.0f, color.y),
@@ -1569,20 +1566,6 @@ __device__ float3 acesToneMap(float3 color) {
         saturate((color.z * (a * color.z + b)) / (color.z * (c * color.z + d) + e)));
 }
 
-__device__ float3 referenceFireDisplayLook(float3 color) {
-    const float luma = luminance3(color);
-    const float sat = saturation3(color);
-    const float warm = saturate((color.x - color.z) * 2.15f + (color.y - color.z) * 0.70f);
-    const float smoke = smoothstepf(0.05f, 0.42f, luma) * smoothstepf(0.44f, 0.05f, sat) * (1.0f - warm * 0.65f);
-    const float shadow = smoothstepf(0.40f, 0.02f, luma);
-    const float hot = warm * smoothstepf(0.50f, 0.84f, luma);
-
-    color = mul3(color, 1.0f - shadow * (0.16f + smoke * 0.24f));
-    color = saturateAroundLuma(color, 1.0f + warm * (0.22f - hot * 0.10f));
-    color = lerp3(color, make_float3(1.0f, fmaxf(color.y, 0.80f), fmaxf(color.z, 0.36f)), hot * 0.08f);
-    return make_float3(saturate(color.x), saturate(color.y), saturate(color.z));
-}
-
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
     std::uint32_t* out,
     const float4* hdr,
@@ -1596,11 +1579,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
     const int pixelIndex = y * p.frameW + x;
     const float4 radiance = hdr[pixelIndex];
     float3 color = make_float3(radiance.x, radiance.y, radiance.z);
-    const float exposure = (p.cinematicMode != 0 && p.renderDebugMode == 0 ? 1.04f : 1.0f) * p.exposure;
+    const float exposure = p.exposure;
     color = acesToneMap(mul3(color, exposure));
-    if (p.cinematicMode != 0 && p.renderDebugMode == 0) {
-        color = referenceFireDisplayLook(color);
-    }
     color = make_float3(
         powf(saturate(color.x), 1.0f / 2.2f),
         powf(saturate(color.y), 1.0f / 2.2f),
