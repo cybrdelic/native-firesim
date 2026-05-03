@@ -195,6 +195,10 @@ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+__device__ float luminance3(float3 color) {
+    return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
+}
+
 __device__ float3 cross3(float3 a, float3 b) {
     return make_float3(
         a.y * b.z - a.z * b.y,
@@ -1554,16 +1558,19 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
         1.0f);
 }
 
-__device__ float3 acesToneMap(float3 color) {
+__device__ float acesToneCurve(float value) {
     const float a = 2.51f;
     const float b = 0.03f;
     const float c = 2.43f;
     const float d = 0.59f;
     const float e = 0.14f;
-    return make_float3(
-        saturate((color.x * (a * color.x + b)) / (color.x * (c * color.x + d) + e)),
-        saturate((color.y * (a * color.y + b)) / (color.y * (c * color.y + d) + e)),
-        saturate((color.z * (a * color.z + b)) / (color.z * (c * color.z + d) + e)));
+    return saturate((value * (a * value + b)) / (value * (c * value + d) + e));
+}
+
+__device__ float3 acesToneMapPreserveHue(float3 color) {
+    const float luma = fmaxf(0.000001f, luminance3(color));
+    const float mappedLuma = acesToneCurve(luma);
+    return mul3(color, mappedLuma / luma);
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
@@ -1580,7 +1587,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) tonemapKernel(
     const float4 radiance = hdr[pixelIndex];
     float3 color = make_float3(radiance.x, radiance.y, radiance.z);
     const float exposure = p.exposure;
-    color = acesToneMap(mul3(color, exposure));
+    color = acesToneMapPreserveHue(mul3(color, exposure));
     color = make_float3(
         powf(saturate(color.x), 1.0f / 2.2f),
         powf(saturate(color.y), 1.0f / 2.2f),
