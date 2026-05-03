@@ -95,6 +95,7 @@ struct SharedViewportBuffer {
     unsigned long long workerHeartbeatTickMs;
     unsigned long long workerStartTickMs;
     unsigned long long workerStopTickMs;
+    unsigned long long sharedTextureHandleValue;
     FireSettings settings;
     char statusText[192];
 };
@@ -852,23 +853,6 @@ bool initializeD3D(HWND hwnd) {
     simDesc.SampleDesc.Count = 1;
     simDesc.Usage = D3D11_USAGE_DEFAULT;
     simDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    simDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-    hr = g_d3d.device->CreateTexture2D(&simDesc, nullptr, g_d3d.sharedSimTexture.GetAddressOf());
-    if (FAILED(hr)) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 texture failed: %s", hresultString(hr).c_str());
-        return false;
-    }
-    if (FAILED(g_d3d.sharedSimTexture.As(&g_d3d.sharedSimMutex))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 keyed mutex missing");
-        return false;
-    }
-    ComPtr<IDXGIResource> sharedResource;
-    if (FAILED(g_d3d.sharedSimTexture.As(&sharedResource)) || FAILED(sharedResource->GetSharedHandle(&g_d3d.sharedSimHandle)) || g_d3d.sharedSimHandle == nullptr) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 handle lookup failed");
-        return false;
-    }
-
-    simDesc.MiscFlags = 0;
     hr = g_d3d.device->CreateTexture2D(&simDesc, nullptr, g_d3d.displaySimTexture.GetAddressOf());
     if (FAILED(hr) || FAILED(g_d3d.device->CreateShaderResourceView(g_d3d.displaySimTexture.Get(), nullptr, g_d3d.displaySimSrv.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "private FP16 display texture failed");
@@ -944,7 +928,30 @@ bool initializeD3D(HWND hwnd) {
 }
 
 bool copyD3DWorkerFrame() {
-    if (!g_d3d.initialized || g_d3d.sharedSimMutex == nullptr || g_d3d.sharedSimTexture == nullptr || g_d3d.displaySimTexture == nullptr) {
+    if (!g_d3d.initialized || g_sharedViewport == nullptr || g_d3d.displaySimTexture == nullptr) {
+        return false;
+    }
+    const auto handleValue = static_cast<uintptr_t>(g_sharedViewport->sharedTextureHandleValue);
+    if (handleValue == 0) {
+        return false;
+    }
+    if (g_d3d.sharedSimTexture == nullptr || reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandle) != handleValue) {
+        g_d3d.sharedSimTexture.Reset();
+        g_d3d.sharedSimMutex.Reset();
+        g_d3d.sharedSimHandle = reinterpret_cast<HANDLE>(handleValue);
+        const HRESULT hr = g_d3d.device->OpenSharedResource(
+            g_d3d.sharedSimHandle,
+            __uuidof(ID3D11Texture2D),
+            reinterpret_cast<void**>(g_d3d.sharedSimTexture.GetAddressOf()));
+        if (FAILED(hr) || FAILED(g_d3d.sharedSimTexture.As(&g_d3d.sharedSimMutex))) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "host open worker FP16 texture failed: %s", hresultString(hr).c_str());
+            g_d3d.sharedSimTexture.Reset();
+            g_d3d.sharedSimMutex.Reset();
+            g_d3d.sharedSimHandle = nullptr;
+            return false;
+        }
+    }
+    if (g_d3d.sharedSimMutex == nullptr || g_d3d.sharedSimTexture == nullptr) {
         return false;
     }
     const HRESULT acquire = g_d3d.sharedSimMutex->AcquireSync(1, 0);
@@ -1428,19 +1435,6 @@ int argumentIntValue(const std::string& args, const char* prefix, int fallback, 
     return static_cast<int>(std::max<long>(minimum, std::min<long>(maximum, parsed)));
 }
 
-unsigned long long argumentU64Value(const std::string& args, const char* prefix, unsigned long long fallback) {
-    const std::string value = argumentValue(args, prefix);
-    if (value.empty()) {
-        return fallback;
-    }
-    char* end = nullptr;
-    const unsigned long long parsed = std::strtoull(value.c_str(), &end, 0);
-    if (end == value.c_str()) {
-        return fallback;
-    }
-    return parsed;
-}
-
 void applyCanonicalFireSettings(FireSettings& settings) {
     settings.cinematicMode = 1;
     settings.raymarchSteps = kRaymarchSteps;
@@ -1619,10 +1613,6 @@ bool startCudaWorker() {
     if (!initializeSharedViewport(false)) {
         return false;
     }
-    if (!g_d3d.initialized || g_d3d.sharedSimHandle == nullptr) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D FP16 shared texture is not ready");
-        return false;
-    }
 
     g_lastWorkerStartTickMs = now;
     ++g_workerRestartCount;
@@ -1640,10 +1630,9 @@ bool startCudaWorker() {
     std::snprintf(
         commandLine,
         sizeof(commandLine),
-        "\"%s\" --cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=%lu --d3d11-shared-texture=0x%llx",
+        "\"%s\" --cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=%lu",
         exePath,
-        static_cast<unsigned long>(GetCurrentProcessId()),
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandle)));
+        static_cast<unsigned long>(GetCurrentProcessId()));
 
     STARTUPINFOA startup = {};
     startup.cb = sizeof(startup);
@@ -1740,34 +1729,41 @@ struct WorkerD3DTarget {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<IDXGIKeyedMutex> mutex;
+    HANDLE sharedHandle = nullptr;
 };
 
-bool initializeWorkerD3DTarget(unsigned long long sharedTextureHandle, WorkerD3DTarget& target) {
-    if (sharedTextureHandle == 0) {
-        appendRuntimeEvent("worker-d3d-missing-handle", "");
-        return false;
-    }
+bool initializeWorkerD3DTarget(WorkerD3DTarget& target) {
     if (!createD3DDevice(target.device, target.context)) {
         appendRuntimeEvent("worker-d3d-device-failed", "");
         return false;
     }
-    const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(sharedTextureHandle));
-    const HRESULT hr = target.device->OpenSharedResource(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(target.texture.GetAddressOf()));
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = kFrameWidth;
+    desc.Height = kFrameHeight;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    HRESULT hr = target.device->CreateTexture2D(&desc, nullptr, target.texture.GetAddressOf());
     if (FAILED(hr)) {
         char detail[96] = {};
         std::snprintf(detail, sizeof(detail), "%s", hresultString(hr).c_str());
-        appendRuntimeEvent("worker-d3d-open-shared-failed", detail);
+        appendRuntimeEvent("worker-d3d-create-shared-failed", detail);
         return false;
     }
     if (FAILED(target.texture.As(&target.mutex))) {
         appendRuntimeEvent("worker-d3d-keyed-mutex-failed", "");
         return false;
     }
-    if (!fireCudaRegisterD3D11Texture(target.texture.Get())) {
-        appendRuntimeEvent("worker-cuda-d3d-register-failed", fireCudaLastError());
+    ComPtr<IDXGIResource> sharedResource;
+    if (FAILED(target.texture.As(&sharedResource)) || FAILED(sharedResource->GetSharedHandle(&target.sharedHandle)) || target.sharedHandle == nullptr) {
+        appendRuntimeEvent("worker-d3d-shared-handle-failed", "");
         return false;
     }
-    appendRuntimeEvent("worker-cuda-d3d-registered", "");
     return true;
 }
 
@@ -1799,6 +1795,29 @@ int runCudaWorker(const std::string& args) {
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "initializing CUDA worker");
     appendRuntimeEvent("worker-process-entered", "");
 
+    WorkerD3DTarget d3dTarget;
+    if (!initializeWorkerD3DTarget(d3dTarget)) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D FP16 target init failed");
+        appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
+    if (!fireCudaSelectDeviceForD3D11(d3dTarget.device.Get())) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D device CUDA selection failed: %.130s", fireCudaLastError());
+        appendRuntimeEvent("worker-cuda-d3d-device-select-failed", g_sharedViewport->statusText);
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
     if (!fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight)) {
         g_sharedViewport->workerStatus = -1;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
@@ -1811,14 +1830,12 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
-
-    WorkerD3DTarget d3dTarget;
-    const unsigned long long sharedTextureHandle = argumentU64Value(args, "--d3d11-shared-texture=", 0);
-    if (!initializeWorkerD3DTarget(sharedTextureHandle, d3dTarget)) {
+    if (!fireCudaRegisterD3D11Texture(d3dTarget.texture.Get())) {
         g_sharedViewport->workerStatus = -3;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D/CUDA FP16 interop init failed");
+        appendRuntimeEvent("worker-cuda-d3d-register-failed", fireCudaLastError());
         appendRuntimeEvent("worker-d3d-interop-init-failed", g_sharedViewport->statusText);
         fireCudaShutdown();
         if (parentProcess != nullptr) {
@@ -1826,6 +1843,8 @@ int runCudaWorker(const std::string& args) {
         }
         return 5;
     }
+    g_sharedViewport->sharedTextureHandleValue = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(d3dTarget.sharedHandle));
+    appendRuntimeEvent("worker-cuda-d3d-registered", "");
 
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
@@ -1891,6 +1910,7 @@ int runCudaWorker(const std::string& args) {
 
     fireCudaUnregisterD3D11Texture();
     fireCudaShutdown();
+    g_sharedViewport->sharedTextureHandleValue = 0;
     g_sharedViewport->workerStatus = 0;
     g_sharedViewport->workerStopTickMs = tickMs();
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker stopped");

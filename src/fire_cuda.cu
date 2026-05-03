@@ -125,6 +125,7 @@ cudaEvent_t g_afterRenderEvent = nullptr;
 int g_nx = 0;
 int g_ny = 0;
 int g_nz = 0;
+int g_cudaDevice = 0;
 int g_frameW = 0;
 int g_frameH = 0;
 int g_frameIndex = 0;
@@ -1956,7 +1957,7 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
     const std::size_t hdrFrameBytes = static_cast<std::size_t>(frameWidth) * static_cast<std::size_t>(frameHeight) * sizeof(float4);
     const std::size_t fp16FrameBytes = static_cast<std::size_t>(frameWidth) * static_cast<std::size_t>(frameHeight) * sizeof(ushort4);
 
-    if (!check("cudaSetDevice", cudaSetDevice(0))) {
+    if (!check("cudaSetDevice", cudaSetDevice(g_cudaDevice))) {
         return false;
     }
     if (!check("cudaMalloc heat", cudaMalloc(&g_heat, scalarBytes)) ||
@@ -2410,6 +2411,23 @@ bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings
         return false;
     }
     return stepAndRenderInternal(bgraPixels, settings, metrics, false);
+}
+
+bool fireCudaSelectDeviceForD3D11(void* d3d11Device) {
+    if (d3d11Device == nullptr) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 device pointer was null.");
+        return false;
+    }
+    auto* device = static_cast<ID3D11Device*>(d3d11Device);
+    unsigned int deviceCount = 0;
+    int devices[8] = {};
+    const cudaError_t err = cudaD3D11GetDevices(&deviceCount, devices, 8, device, cudaD3D11DeviceListAll);
+    if (err != cudaSuccess || deviceCount == 0) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 device has no CUDA-compatible adapter: %s", cudaGetErrorString(err));
+        return false;
+    }
+    g_cudaDevice = devices[0];
+    return check("cudaSetDevice for D3D11 interop", cudaSetDevice(g_cudaDevice));
 }
 
 bool fireCudaRegisterD3D11Texture(void* d3d11Texture) {

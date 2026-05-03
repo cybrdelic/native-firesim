@@ -80,6 +80,7 @@ struct FireSettings {
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);
 bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settings);
 bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics);
+bool fireCudaSelectDeviceForD3D11(void* d3d11Device);
 bool fireCudaRegisterD3D11Texture(void* d3d11Texture);
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings);
 void fireCudaUnregisterD3D11Texture();
