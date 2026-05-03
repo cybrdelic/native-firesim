@@ -1756,6 +1756,7 @@ struct WorkerD3DTarget {
     ComPtr<ID3D11Texture2D> cudaTexture;
     ComPtr<ID3D11Texture2D> sharedTexture;
     ComPtr<IDXGIKeyedMutex> sharedMutex;
+    ComPtr<ID3D11Query> completionQuery;
     HANDLE sharedHandle = nullptr;
 };
 
@@ -1801,7 +1802,32 @@ bool initializeWorkerD3DTarget(WorkerD3DTarget& target) {
         appendRuntimeEvent("worker-d3d-shared-handle-failed", "");
         return false;
     }
+    D3D11_QUERY_DESC queryDesc = {};
+    queryDesc.Query = D3D11_QUERY_EVENT;
+    hr = target.device->CreateQuery(&queryDesc, target.completionQuery.GetAddressOf());
+    if (FAILED(hr)) {
+        appendRuntimeEvent("worker-d3d-completion-query-failed", hresultString(hr).c_str());
+        return false;
+    }
     return true;
+}
+
+bool waitForWorkerD3DCompletion(WorkerD3DTarget& target) {
+    if (target.context == nullptr || target.completionQuery == nullptr) {
+        return false;
+    }
+    target.context->End(target.completionQuery.Get());
+    target.context->Flush();
+    for (;;) {
+        const HRESULT hr = target.context->GetData(target.completionQuery.Get(), nullptr, 0, 0);
+        if (hr == S_OK) {
+            return true;
+        }
+        if (hr != S_FALSE) {
+            return false;
+        }
+        Sleep(0);
+    }
 }
 
 bool runD3DInteropProbe(std::string& detail) {
@@ -1821,6 +1847,130 @@ bool runD3DInteropProbe(std::string& detail) {
     fireCudaUnregisterD3D11Texture();
     detail = "ok";
     return true;
+}
+
+int runWorkerBenchmark(const std::string& args) {
+    if (!gpuKernelLaunchAllowed(args)) {
+        return writeGpuSafetyStop("worker-benchmark");
+    }
+    ensureDirectoryTree("out");
+    const std::string outputDirArg = argumentValue(args, "--output-dir=");
+    const std::string outputDir = outputDirArg.empty() ? "out\\worker-benchmark" : outputDirArg;
+    const int benchmarkFrames = argumentIntValue(args, "--benchmark-frames=", 16, 4, 120);
+    const int warmupFrames = argumentIntValue(args, "--warmup-frames=", 8, 0, 120);
+    if (!ensureDirectoryTree(outputDir)) {
+        return 3;
+    }
+
+    WorkerD3DTarget target;
+    bool ok = initializeWorkerD3DTarget(target);
+    if (ok) {
+        ok = fireCudaSelectDeviceForD3D11(target.device.Get());
+    }
+    if (ok) {
+        ok = fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight);
+    }
+    if (ok) {
+        ok = fireCudaRegisterD3D11Texture(target.cudaTexture.Get());
+    }
+    if (!ok) {
+        const std::string reportPath = joinPath(outputDir, "worker-benchmark.json");
+        std::ofstream report(reportPath, std::ios::binary);
+        if (report) {
+            report << "{\n";
+            report << "  \"workerBenchmarkOk\": false,\n";
+            report << "  \"error\": \"" << jsonEscape(fireCudaLastError()) << "\"\n";
+            report << "}\n";
+        }
+        fireCudaUnregisterD3D11Texture();
+        fireCudaShutdown();
+        return 4;
+    }
+
+    using Clock = std::chrono::high_resolution_clock;
+    double totalCudaMs = 0.0;
+    double totalPublishMs = 0.0;
+    double totalFrameMs = 0.0;
+    int completedFrames = 0;
+    bool stable = true;
+    for (int i = 0; i < warmupFrames + benchmarkFrames; ++i) {
+        const bool measureFrame = i >= warmupFrames;
+        FireSettings settings;
+        settings.width = kFrameWidth;
+        settings.height = kFrameHeight;
+        settings.dt = 1.0f / 60.0f;
+        settings.mouseX = 0.50f + 0.04f * std::sin(static_cast<float>(i) * 0.11f);
+        settings.mouseY = 0.12f + 0.02f * std::sin(static_cast<float>(i) * 0.07f);
+        settings.leftDown = 1;
+        settings.rightDown = 0;
+        settings.showGizmos = 0;
+        settings.activeGizmo = 1;
+        settings.wind = 0.0f;
+        settings.cameraYaw = 0.18f;
+        settings.cameraPitch = 0.08f;
+        settings.cameraDistance = 2.62f;
+        applyCanonicalFireSettings(settings);
+
+        const auto frameStart = Clock::now();
+        if (!fireCudaStepAndRenderD3D11(settings)) {
+            stable = false;
+            break;
+        }
+        const auto cudaDone = Clock::now();
+        const HRESULT acquire = target.sharedMutex->AcquireSync(0, 8);
+        if (FAILED(acquire)) {
+            stable = false;
+            break;
+        }
+        target.context->CopyResource(target.sharedTexture.Get(), target.cudaTexture.Get());
+        if (!waitForWorkerD3DCompletion(target)) {
+            stable = false;
+            break;
+        }
+        const HRESULT release = target.sharedMutex->ReleaseSync(0);
+        if (FAILED(release)) {
+            stable = false;
+            break;
+        }
+        const auto published = Clock::now();
+        if (measureFrame) {
+            totalCudaMs += std::chrono::duration<double, std::milli>(cudaDone - frameStart).count();
+            totalPublishMs += std::chrono::duration<double, std::milli>(published - cudaDone).count();
+            totalFrameMs += std::chrono::duration<double, std::milli>(published - frameStart).count();
+            ++completedFrames;
+        }
+    }
+
+    fireCudaUnregisterD3D11Texture();
+    fireCudaShutdown();
+
+    stable = stable && completedFrames == benchmarkFrames;
+    const double frames = static_cast<double>(std::max(1, completedFrames));
+    const double averageCudaMs = totalCudaMs / frames;
+    const double averagePublishMs = totalPublishMs / frames;
+    const double averageFrameMs = totalFrameMs / frames;
+    const std::string reportPath = joinPath(outputDir, "worker-benchmark.json");
+    std::ofstream report(reportPath, std::ios::binary);
+    if (!report) {
+        return 3;
+    }
+    report << std::fixed << std::setprecision(6);
+    report << "{\n";
+    report << "  \"workerBenchmarkOk\": " << (stable ? "true" : "false") << ",\n";
+    report << "  \"frames\": " << completedFrames << ",\n";
+    report << "  \"requestedFrames\": " << benchmarkFrames << ",\n";
+    report << "  \"warmupFrames\": " << warmupFrames << ",\n";
+    report << "  \"requestedGrid\": [" << kSimulationGridWidth << ", " << kSimulationGridHeight << "],\n";
+    report << "  \"raymarchSteps\": " << kRaymarchSteps << ",\n";
+    report << "  \"emberCount\": " << kEmberCount << ",\n";
+    report << "  \"pressureIterations\": 40,\n";
+    report << "  \"averageCudaMs\": " << averageCudaMs << ",\n";
+    report << "  \"averagePublishMs\": " << averagePublishMs << ",\n";
+    report << "  \"averageFrameMs\": " << averageFrameMs << ",\n";
+    report << "  \"effectiveFps\": " << (averageFrameMs > 0.0 ? 1000.0 / averageFrameMs : 0.0) << ",\n";
+    report << "  \"output\": \"" << jsonEscape(reportPath) << "\"\n";
+    report << "}\n";
+    return stable ? 0 : 4;
 }
 
 int runCudaWorker(const std::string& args) {
@@ -1949,7 +2099,15 @@ int runCudaWorker(const std::string& args) {
 
         InterlockedIncrement(&g_sharedViewport->frameSequence);
         d3dTarget.context->CopyResource(d3dTarget.sharedTexture.Get(), d3dTarget.cudaTexture.Get());
-        d3dTarget.context->Flush();
+        if (!waitForWorkerD3DCompletion(d3dTarget)) {
+            g_sharedViewport->workerStatus = -4;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 6;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D shared copy completion wait failed");
+            appendRuntimeEvent("worker-d3d-completion-wait-failed", g_sharedViewport->statusText);
+            d3dTarget.sharedMutex->ReleaseSync(0);
+            break;
+        }
         const HRESULT release = d3dTarget.sharedMutex->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;
@@ -2906,6 +3064,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     const std::string args = commandLine != nullptr ? commandLine : "";
     if (args.find("--diagnostics") != std::string::npos) {
         return runDiagnostics();
+    }
+    if (args.find("--worker-benchmark") != std::string::npos) {
+        return runWorkerBenchmark(args);
     }
     if (args.find("--cuda-worker") != std::string::npos) {
         return runCudaWorker(args);

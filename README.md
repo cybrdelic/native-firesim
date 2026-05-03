@@ -88,6 +88,12 @@ Run the CUDA validation harness:
 .\build\NativeFireSim.exe --validation --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
+Run the completed-frame worker benchmark for the live CUDA/D3D path:
+
+```powershell
+.\build\NativeFireSim.exe --worker-benchmark --warmup-frames=8 --benchmark-frames=16 --output-dir=out\worker-benchmark --allow-gpu-kernels --accept-bugcheck-risk
+```
+
 Run validation against an external target envelope:
 
 ```powershell
@@ -159,6 +165,7 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - 300 FPS presentation target with immediate D3D present and no quality-mode downgrade
 - sparse HDR ember splats instead of full-screen per-pixel ember loops
 - cached per-frame camera basis for CUDA ray generation instead of per-pixel trigonometry
+- completed-frame worker benchmark for the CUDA/D3D path so FPS compares finished frames instead of queued submissions
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
 - optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 

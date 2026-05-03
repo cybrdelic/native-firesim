@@ -320,7 +320,16 @@ __device__ float hash21(float2 p) {
 }
 
 __device__ float hash31(float3 p) {
-    return fracf(sinf(p.x * 127.1f + p.y * 311.7f + p.z * 74.7f) * 43758.5453123f);
+    unsigned int x = static_cast<unsigned int>(static_cast<int>(p.x));
+    unsigned int y = static_cast<unsigned int>(static_cast<int>(p.y));
+    unsigned int z = static_cast<unsigned int>(static_cast<int>(p.z));
+    unsigned int h = x * 0x8da6b343u ^ y * 0xd8163841u ^ z * 0xcb1ab31fu;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return static_cast<float>(h & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
 __device__ float valueNoise(float2 p) {
@@ -1490,25 +1499,34 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float progress = sampleScalar(progressField, p, warpedFu, warpedFv, warpedFw);
             const float turbulenceEnergy = sampleScalar(turbulenceEnergyField, p, warpedFu, warpedFv, warpedFw);
             const float sootOptics = sampleScalar(sootOpticsField, p, warpedFu, warpedFv, warpedFw);
-            const float3 velocity = sampleVelocity(uField, vField, wField, p, warpedFu, warpedFv, warpedFw);
+            float3 velocity = make_float3(0.0f, 0.0f, 0.0f);
+            if (p.renderDebugMode == 6) {
+                velocity = sampleVelocity(uField, vField, wField, p, warpedFu, warpedFv, warpedFw);
+            }
             const float activeField = (heat + fuel * 0.42f + soot * 0.34f + progress * 0.32f + pyrolysis * 0.18f) * domainFade;
             if (activeField <= 0.0025f) {
                 continue;
             }
             debugFuel = fmaxf(debugFuel, domainFade * saturate(fuel * 0.18f + charMass * 0.22f + pyrolysis * 0.30f));
-            debugVelocity = fmaxf(debugVelocity, saturate(sqrtf(dot3(velocity, velocity)) * 0.22f));
+            if (p.renderDebugMode == 6) {
+                debugVelocity = fmaxf(debugVelocity, saturate(sqrtf(dot3(velocity, velocity)) * 0.22f));
+            }
             const float cellX = 1.0f / static_cast<float>(p.nx);
             const float cellY = 1.0f / static_cast<float>(p.ny);
             const float cellZ = 1.0f / static_cast<float>(p.nz);
-            const float gradHeatX = sampleScalar(heatField, p, warpedFu + cellX, warpedFv, warpedFw) - sampleScalar(heatField, p, warpedFu - cellX, warpedFv, warpedFw);
-            const float gradHeatY = sampleScalar(heatField, p, warpedFu, warpedFv + cellY, warpedFw) - sampleScalar(heatField, p, warpedFu, warpedFv - cellY, warpedFw);
-            const float gradHeatZ = sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw + cellZ) - sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw - cellZ);
-            const float gradFuelX = sampleScalar(fuelField, p, warpedFu + cellX, warpedFv, warpedFw) - sampleScalar(fuelField, p, warpedFu - cellX, warpedFv, warpedFw);
-            const float gradFuelY = sampleScalar(fuelField, p, warpedFu, warpedFv + cellY, warpedFw) - sampleScalar(fuelField, p, warpedFu, warpedFv - cellY, warpedFw);
-            const float gradFuelZ = sampleScalar(fuelField, p, warpedFu, warpedFv, warpedFw + cellZ) - sampleScalar(fuelField, p, warpedFu, warpedFv, warpedFw - cellZ);
-            const float frontGradient =
-                sqrtf(gradHeatX * gradHeatX + gradHeatY * gradHeatY + gradHeatZ * gradHeatZ) +
-                sqrtf(gradFuelX * gradFuelX + gradFuelY * gradFuelY + gradFuelZ * gradFuelZ) * 0.32f;
+            const float flameCandidate = heat + fuel * 0.32f + progress * 0.18f + pyrolysis * 0.10f;
+            float frontGradient = 0.0f;
+            if (flameCandidate > 0.012f) {
+                const float gradHeatX = sampleScalar(heatField, p, warpedFu + cellX, warpedFv, warpedFw) - sampleScalar(heatField, p, warpedFu - cellX, warpedFv, warpedFw);
+                const float gradHeatY = sampleScalar(heatField, p, warpedFu, warpedFv + cellY, warpedFw) - sampleScalar(heatField, p, warpedFu, warpedFv - cellY, warpedFw);
+                const float gradHeatZ = sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw + cellZ) - sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw - cellZ);
+                const float gradFuelX = sampleScalar(fuelField, p, warpedFu + cellX, warpedFv, warpedFw) - sampleScalar(fuelField, p, warpedFu - cellX, warpedFv, warpedFw);
+                const float gradFuelY = sampleScalar(fuelField, p, warpedFu, warpedFv + cellY, warpedFw) - sampleScalar(fuelField, p, warpedFu, warpedFv - cellY, warpedFw);
+                const float gradFuelZ = sampleScalar(fuelField, p, warpedFu, warpedFv, warpedFw + cellZ) - sampleScalar(fuelField, p, warpedFu, warpedFv, warpedFw - cellZ);
+                frontGradient =
+                    sqrtf(gradHeatX * gradHeatX + gradHeatY * gradHeatY + gradHeatZ * gradHeatZ) +
+                    sqrtf(gradFuelX * gradFuelX + gradFuelY * gradFuelY + gradFuelZ * gradFuelZ) * 0.32f;
+            }
             const float reactionFront = smoothstepf(0.020f, 0.46f, frontGradient * 1.35f + fuel * oxygen * 0.040f + progress * 0.18f + pyrolysis * 0.080f);
 
             const float fineNoise = fbm3(make_float3(warpedFu * 42.0f + p.time * 0.72f, warpedFv * 54.0f - p.time * 1.28f, warpedFw * 43.0f + p.time * 0.38f));

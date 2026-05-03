@@ -29,6 +29,7 @@ NativeFireSim treats GPU work as production kernel code, not shader toy code. A 
 - The main app starts an isolated CUDA worker for real 3D volume frames and shows explicit stale-worker state if worker frames are not fresh.
 - The shared frame transport is an FP16 D3D11 keyed-mutex texture handle exposed through `Local\NativeFireSimViewportFrameV6`.
 - The presenter targets 300 FPS with immediate present; live worker status reports submitted worker timing and copied-display FPS separately.
+- `--worker-benchmark` measures completed CUDA/D3D worker frames with a D3D event query, warmup frames, and locked canonical quality settings.
 - `--diagnostics` validates D3D/CUDA FP16 texture registration without launching simulation kernels.
 - UI-to-worker settings use an odd/even sequence counter so the worker does not consume a torn settings struct.
 - Worker frames are considered stale after `2200 ms`; worker heartbeat is stale after `3400 ms`; a worker that exceeds `7200 ms` without heartbeat is terminated.
