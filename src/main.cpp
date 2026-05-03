@@ -1,6 +1,10 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <mmsystem.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <dxgi.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cfloat>
@@ -20,6 +24,8 @@
 
 namespace {
 
+using Microsoft::WRL::ComPtr;
+
 constexpr int kFrameWidth = 960;
 constexpr int kFrameHeight = 540;
 constexpr int kSimulationGridWidth = 384;
@@ -36,6 +42,7 @@ constexpr float kTargetFrameSeconds = 1.0f / 30.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
 constexpr DWORD kSharedViewportVersion = 4u;
 constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV4";
+constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
 }
@@ -76,6 +83,7 @@ struct SharedViewportBuffer {
     DWORD buildStamp;
     DWORD width;
     DWORD height;
+    DWORD displayFormat;
     volatile LONG frameSequence;
     volatile LONG settingsSequence;
     volatile LONG shutdownRequested;
@@ -89,13 +97,39 @@ struct SharedViewportBuffer {
     unsigned long long workerStopTickMs;
     FireSettings settings;
     char statusText[192];
-    std::uint32_t pixels[kFrameWidth * kFrameHeight];
+};
+
+struct DisplayConstants {
+    float exposure;
+    float padding[3];
+};
+
+struct D3DDisplayState {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<IDXGISwapChain> swapChain;
+    ComPtr<ID3D11RenderTargetView> renderTargetView;
+    ComPtr<ID3D11Texture2D> sharedSimTexture;
+    ComPtr<IDXGIKeyedMutex> sharedSimMutex;
+    ComPtr<ID3D11Texture2D> displaySimTexture;
+    ComPtr<ID3D11ShaderResourceView> displaySimSrv;
+    ComPtr<ID3D11Texture2D> uiTexture;
+    ComPtr<ID3D11ShaderResourceView> uiSrv;
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11VertexShader> vertexShader;
+    ComPtr<ID3D11PixelShader> simPixelShader;
+    ComPtr<ID3D11PixelShader> uiPixelShader;
+    ComPtr<ID3D11Buffer> displayConstants;
+    ComPtr<ID3D11BlendState> alphaBlend;
+    HANDLE sharedSimHandle = nullptr;
+    bool initialized = false;
+    bool hasSimFrame = false;
 };
 
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
-BITMAPINFO g_bitmap = {};
+D3DDisplayState g_d3d;
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
 HANDLE g_cudaWorkerProcess = nullptr;
@@ -121,6 +155,7 @@ float g_turbulence = 1.00f;
 float g_cameraYaw = 0.0f;
 float g_cameraPitch = 0.08f;
 float g_cameraDistance = 2.62f;
+float g_displayExposure = kExposure;
 int g_activeGizmo = 1;
 int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
@@ -155,11 +190,12 @@ float smoothstepf(float edge0, float edge1, float x) {
     return inverted ? 1.0f - value : value;
 }
 
-std::uint32_t packBgra(float r, float g, float b) {
+std::uint32_t packBgra(float r, float g, float b, float alpha = 1.0f) {
     const auto ri = static_cast<std::uint32_t>(clamp01(r) * 255.0f);
     const auto gi = static_cast<std::uint32_t>(clamp01(g) * 255.0f);
     const auto bi = static_cast<std::uint32_t>(clamp01(b) * 255.0f);
-    return 0xff000000u | (ri << 16) | (gi << 8) | bi;
+    const auto ai = static_cast<std::uint32_t>(clamp01(alpha) * 255.0f);
+    return (ai << 24) | (ri << 16) | (gi << 8) | bi;
 }
 
 void clearSimulationFrame(std::vector<std::uint32_t>& pixels) {
@@ -171,14 +207,18 @@ void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float
         return;
     }
     const std::uint32_t dst = pixels[static_cast<std::size_t>(y) * kFrameWidth + x];
+    const float da = static_cast<float>((dst >> 24) & 0xff) / 255.0f;
     const float dr = static_cast<float>((dst >> 16) & 0xff) / 255.0f;
     const float dg = static_cast<float>((dst >> 8) & 0xff) / 255.0f;
     const float db = static_cast<float>(dst & 0xff) / 255.0f;
     alpha = clamp01(alpha);
+    const float outA = alpha + da * (1.0f - alpha);
+    const float invOutA = outA > 0.000001f ? 1.0f / outA : 0.0f;
     pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(
-        mixf(dr, r, alpha),
-        mixf(dg, g, alpha),
-        mixf(db, b, alpha));
+        (r * alpha + dr * da * (1.0f - alpha)) * invOutA,
+        (g * alpha + dg * da * (1.0f - alpha)) * invOutA,
+        (b * alpha + db * da * (1.0f - alpha)) * invOutA,
+        outA);
 }
 
 bool contains(const UiRect& rect, int x, int y) {
@@ -191,7 +231,7 @@ void fillRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r, f
     const int x1 = std::min(kFrameWidth, rect.x + rect.w);
     const int y1 = std::min(kFrameHeight, rect.y + rect.h);
     if (alpha >= 0.999f) {
-        const std::uint32_t packed = packBgra(r, g, b);
+        const std::uint32_t packed = packBgra(r, g, b, alpha);
         for (int y = y0; y < y1; ++y) {
             std::fill(
                 pixels.begin() + static_cast<std::ptrdiff_t>(y * kFrameWidth + x0),
@@ -476,10 +516,7 @@ void drawViewportOverlays(std::vector<std::uint32_t>& pixels, const FireSettings
     drawLinePx(pixels, ax, ay, ax - 30, ay + 20, 0.20f, 0.42f, 1.0f, 0.86f);
 }
 
-void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
-    std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
-
-    blitViewport(pixels, simPixels);
+void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
     if (cleanViewport) {
         return;
     }
@@ -496,7 +533,7 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
     drawViewportOverlays(pixels, settings);
 
     drawText(pixels, 30, 26, "NATIVE FIRESIM", 1, 0.88f, 0.90f, 0.84f, 0.96f);
-    drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D VOLUME" : "SAFE ANIMATED PREVIEW", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
+    drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D FP16 D3D" : "NO LIVE CUDA FRAME", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
     drawText(pixels, 628, 26, cudaBackend ? "RMB ORBIT   WHEEL ZOOM" : "NO CUSTOM CUDA KERNELS", 1, 0.70f, 0.72f, 0.68f, 0.88f);
 
     drawCenteredText(pixels, {kRailRect.x, 78, kRailRect.w, 14}, "TOOLS", 1, 0.60f, 0.62f, 0.58f, 0.82f);
@@ -537,6 +574,17 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
         0.88f);
     drawText(pixels, 276, 506, renderDebugName(settings.renderDebugMode), 1, 0.86f, 0.84f, 0.62f, 0.88f);
     drawClippedText(pixels, 330, 506, g_workerUiStatus, 74, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
+}
+
+void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
+    std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
+    blitViewport(pixels, simPixels);
+    drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
+}
+
+void composeD3DOverlayFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    std::fill(pixels.begin(), pixels.end(), 0u);
+    drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
 }
 
 int hitTestToolButton(int frameX, int frameY) {
@@ -606,6 +654,365 @@ void updateTitle(float fps) {
         g_turbulence,
         g_cleanViewportMode ? "clean viewport" : "operator UI");
     SetWindowTextA(g_window, title);
+}
+
+std::string hresultString(HRESULT hr) {
+    char text[32] = {};
+    std::snprintf(text, sizeof(text), "0x%08lx", static_cast<unsigned long>(hr));
+    return text;
+}
+
+bool createD3DDevice(ComPtr<ID3D11Device>& device, ComPtr<ID3D11DeviceContext>& context) {
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.GetAddressOf())))) {
+        return false;
+    }
+
+    ComPtr<IDXGIAdapter1> bestAdapter;
+    SIZE_T bestMemory = 0;
+    for (UINT i = 0;; ++i) {
+        ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(i, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            continue;
+        }
+        if (desc.DedicatedVideoMemory >= bestMemory) {
+            bestMemory = desc.DedicatedVideoMemory;
+            bestAdapter = adapter;
+        }
+    }
+
+    constexpr D3D_FEATURE_LEVEL kFeatureLevels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+    };
+    D3D_FEATURE_LEVEL createdLevel = D3D_FEATURE_LEVEL_10_0;
+    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = E_FAIL;
+    if (bestAdapter != nullptr) {
+        hr = D3D11CreateDevice(
+            bestAdapter.Get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            flags,
+            kFeatureLevels,
+            static_cast<UINT>(sizeof(kFeatureLevels) / sizeof(kFeatureLevels[0])),
+            D3D11_SDK_VERSION,
+            device.GetAddressOf(),
+            &createdLevel,
+            context.GetAddressOf());
+    }
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            flags,
+            kFeatureLevels,
+            static_cast<UINT>(sizeof(kFeatureLevels) / sizeof(kFeatureLevels[0])),
+            D3D11_SDK_VERSION,
+            device.GetAddressOf(),
+            &createdLevel,
+            context.GetAddressOf());
+    }
+    return SUCCEEDED(hr);
+}
+
+bool compileShader(const char* source, const char* entry, const char* target, ComPtr<ID3DBlob>& blob) {
+    ComPtr<ID3DBlob> errors;
+    const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    const HRESULT hr = D3DCompile(
+        source,
+        std::strlen(source),
+        nullptr,
+        nullptr,
+        nullptr,
+        entry,
+        target,
+        flags,
+        0,
+        blob.GetAddressOf(),
+        errors.GetAddressOf());
+    if (FAILED(hr)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader compile failed: %s", hresultString(hr).c_str());
+        return false;
+    }
+    return true;
+}
+
+const char* d3dShaderSource() {
+    return R"HLSL(
+struct VSOut {
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+VSOut FullscreenVS(uint id : SV_VertexID) {
+    float2 pos[3] = {
+        float2(-1.0, -1.0),
+        float2(-1.0,  3.0),
+        float2( 3.0, -1.0)
+    };
+    VSOut outp;
+    outp.pos = float4(pos[id], 0.0, 1.0);
+    outp.uv = float2(pos[id].x * 0.5 + 0.5, 0.5 - pos[id].y * 0.5);
+    return outp;
+}
+
+Texture2D<float4> FrameTex : register(t0);
+SamplerState LinearSampler : register(s0);
+
+cbuffer DisplayConstants : register(b0) {
+    float Exposure;
+    float3 _Padding;
+}
+
+float Luma(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+float AcesCurve(float v) {
+    return saturate((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14));
+}
+
+float3 ToneMapPreserveHue(float3 c) {
+    float l = max(0.000001, Luma(c));
+    return c * (AcesCurve(l) / l);
+}
+
+float4 SimPS(VSOut input) : SV_TARGET {
+    float3 radiance = max(FrameTex.Sample(LinearSampler, input.uv).rgb, 0.0);
+    float3 color = ToneMapPreserveHue(radiance * Exposure);
+    color = pow(saturate(color), 1.0 / 2.2);
+    return float4(color, 1.0);
+}
+
+float4 UiPS(VSOut input) : SV_TARGET {
+    return FrameTex.Sample(LinearSampler, input.uv);
+}
+)HLSL";
+}
+
+bool initializeD3D(HWND hwnd) {
+    if (g_d3d.initialized) {
+        return true;
+    }
+    if (!createD3DDevice(g_d3d.device, g_d3d.context)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 device creation failed");
+        return false;
+    }
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIFactory> factory;
+    if (FAILED(g_d3d.device.As(&dxgiDevice)) ||
+        FAILED(dxgiDevice->GetAdapter(adapter.GetAddressOf())) ||
+        FAILED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(factory.GetAddressOf())))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 DXGI factory lookup failed");
+        return false;
+    }
+
+    DXGI_SWAP_CHAIN_DESC swapDesc = {};
+    swapDesc.BufferDesc.Width = kFrameWidth;
+    swapDesc.BufferDesc.Height = kFrameHeight;
+    swapDesc.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    swapDesc.BufferDesc.RefreshRate.Numerator = 0;
+    swapDesc.BufferDesc.RefreshRate.Denominator = 1;
+    swapDesc.SampleDesc.Count = 1;
+    swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapDesc.BufferCount = 1;
+    swapDesc.OutputWindow = hwnd;
+    swapDesc.Windowed = TRUE;
+    swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    HRESULT hr = factory->CreateSwapChain(g_d3d.device.Get(), &swapDesc, g_d3d.swapChain.GetAddressOf());
+    if (FAILED(hr)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "FP16 swapchain failed: %s", hresultString(hr).c_str());
+        return false;
+    }
+    factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    ComPtr<ID3D11Texture2D> backBuffer;
+    hr = g_d3d.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(backBuffer.GetAddressOf()));
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateRenderTargetView(backBuffer.Get(), nullptr, g_d3d.renderTargetView.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 render target setup failed");
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC simDesc = {};
+    simDesc.Width = kFrameWidth;
+    simDesc.Height = kFrameHeight;
+    simDesc.MipLevels = 1;
+    simDesc.ArraySize = 1;
+    simDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    simDesc.SampleDesc.Count = 1;
+    simDesc.Usage = D3D11_USAGE_DEFAULT;
+    simDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    simDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    hr = g_d3d.device->CreateTexture2D(&simDesc, nullptr, g_d3d.sharedSimTexture.GetAddressOf());
+    if (FAILED(hr)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 texture failed: %s", hresultString(hr).c_str());
+        return false;
+    }
+    if (FAILED(g_d3d.sharedSimTexture.As(&g_d3d.sharedSimMutex))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 keyed mutex missing");
+        return false;
+    }
+    ComPtr<IDXGIResource> sharedResource;
+    if (FAILED(g_d3d.sharedSimTexture.As(&sharedResource)) || FAILED(sharedResource->GetSharedHandle(&g_d3d.sharedSimHandle)) || g_d3d.sharedSimHandle == nullptr) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "shared FP16 handle lookup failed");
+        return false;
+    }
+
+    simDesc.MiscFlags = 0;
+    hr = g_d3d.device->CreateTexture2D(&simDesc, nullptr, g_d3d.displaySimTexture.GetAddressOf());
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateShaderResourceView(g_d3d.displaySimTexture.Get(), nullptr, g_d3d.displaySimSrv.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "private FP16 display texture failed");
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC uiDesc = {};
+    uiDesc.Width = kFrameWidth;
+    uiDesc.Height = kFrameHeight;
+    uiDesc.MipLevels = 1;
+    uiDesc.ArraySize = 1;
+    uiDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    uiDesc.SampleDesc.Count = 1;
+    uiDesc.Usage = D3D11_USAGE_DEFAULT;
+    uiDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = g_d3d.device->CreateTexture2D(&uiDesc, nullptr, g_d3d.uiTexture.GetAddressOf());
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateShaderResourceView(g_d3d.uiTexture.Get(), nullptr, g_d3d.uiSrv.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D UI texture failed");
+        return false;
+    }
+
+    D3D11_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(g_d3d.device->CreateSamplerState(&samplerDesc, g_d3d.sampler.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D sampler creation failed");
+        return false;
+    }
+
+    ComPtr<ID3DBlob> vsBlob;
+    ComPtr<ID3DBlob> simPsBlob;
+    ComPtr<ID3DBlob> uiPsBlob;
+    if (!compileShader(d3dShaderSource(), "FullscreenVS", "vs_5_0", vsBlob) ||
+        !compileShader(d3dShaderSource(), "SimPS", "ps_5_0", simPsBlob) ||
+        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob)) {
+        return false;
+    }
+    if (FAILED(g_d3d.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, g_d3d.vertexShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreatePixelShader(simPsBlob->GetBufferPointer(), simPsBlob->GetBufferSize(), nullptr, g_d3d.simPixelShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader creation failed");
+        return false;
+    }
+
+    D3D11_BUFFER_DESC constantsDesc = {};
+    constantsDesc.ByteWidth = sizeof(DisplayConstants);
+    constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+    constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(g_d3d.device->CreateBuffer(&constantsDesc, nullptr, g_d3d.displayConstants.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D constants buffer failed");
+        return false;
+    }
+
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(g_d3d.device->CreateBlendState(&blendDesc, g_d3d.alphaBlend.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D alpha blend creation failed");
+        return false;
+    }
+
+    g_d3d.initialized = true;
+    return true;
+}
+
+bool copyD3DWorkerFrame() {
+    if (!g_d3d.initialized || g_d3d.sharedSimMutex == nullptr || g_d3d.sharedSimTexture == nullptr || g_d3d.displaySimTexture == nullptr) {
+        return false;
+    }
+    const HRESULT acquire = g_d3d.sharedSimMutex->AcquireSync(1, 0);
+    if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+        return false;
+    }
+    if (FAILED(acquire)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shared frame acquire failed: %s", hresultString(acquire).c_str());
+        return false;
+    }
+    g_d3d.context->CopyResource(g_d3d.displaySimTexture.Get(), g_d3d.sharedSimTexture.Get());
+    const HRESULT release = g_d3d.sharedSimMutex->ReleaseSync(0);
+    if (FAILED(release)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shared frame release failed: %s", hresultString(release).c_str());
+        return false;
+    }
+    g_d3d.hasSimFrame = true;
+    return true;
+}
+
+bool renderD3DFrame(bool drawSim, float exposure) {
+    if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
+        return false;
+    }
+    g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
+
+    const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
+    g_d3d.context->OMSetRenderTargets(1, renderTargets, nullptr);
+    g_d3d.context->ClearRenderTargetView(g_d3d.renderTargetView.Get(), clearColor);
+
+    D3D11_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(kFrameWidth);
+    viewport.Height = static_cast<float>(kFrameHeight);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    g_d3d.context->RSSetViewports(1, &viewport);
+    g_d3d.context->IASetInputLayout(nullptr);
+    g_d3d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
+    ID3D11SamplerState* samplers[] = {g_d3d.sampler.Get()};
+    g_d3d.context->PSSetSamplers(0, 1, samplers);
+
+    if (drawSim && g_d3d.hasSimFrame) {
+        DisplayConstants constants = {};
+        constants.exposure = exposure;
+        g_d3d.context->UpdateSubresource(g_d3d.displayConstants.Get(), 0, nullptr, &constants, 0, 0);
+        ID3D11Buffer* constantBuffers[] = {g_d3d.displayConstants.Get()};
+        ID3D11ShaderResourceView* simSrvs[] = {g_d3d.displaySimSrv.Get()};
+        g_d3d.context->PSSetConstantBuffers(0, 1, constantBuffers);
+        g_d3d.context->PSSetShaderResources(0, 1, simSrvs);
+        g_d3d.context->PSSetShader(g_d3d.simPixelShader.Get(), nullptr, 0);
+        g_d3d.context->Draw(3, 0);
+        ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+        g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
+    }
+
+    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
+    ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
+    g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
+    g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
+    g_d3d.context->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+    g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
+    g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
+
+    return SUCCEEDED(g_d3d.swapChain->Present(1, 0));
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -728,22 +1135,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps = {};
-        HDC dc = BeginPaint(hwnd, &ps);
-        SetStretchBltMode(dc, HALFTONE);
-        StretchDIBits(
-            dc,
-            0,
-            0,
-            std::max(1, g_clientW),
-            std::max(1, g_clientH),
-            0,
-            0,
-            kFrameWidth,
-            kFrameHeight,
-            g_frame.data(),
-            &g_bitmap,
-            DIB_RGB_COLORS,
-            SRCCOPY);
+        BeginPaint(hwnd, &ps);
+        renderD3DFrame(g_useCudaBackend, g_displayExposure);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -786,15 +1179,6 @@ bool createMainWindow(HINSTANCE instance) {
         nullptr);
 
     return g_window != nullptr;
-}
-
-void initializeBitmapInfo() {
-    g_bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    g_bitmap.bmiHeader.biWidth = kFrameWidth;
-    g_bitmap.bmiHeader.biHeight = -kFrameHeight;
-    g_bitmap.bmiHeader.biPlanes = 1;
-    g_bitmap.bmiHeader.biBitCount = 32;
-    g_bitmap.bmiHeader.biCompression = BI_RGB;
 }
 
 bool writeBmp(const char* path, const std::vector<std::uint32_t>& pixels, int width, int height) {
@@ -1044,6 +1428,19 @@ int argumentIntValue(const std::string& args, const char* prefix, int fallback, 
     return static_cast<int>(std::max<long>(minimum, std::min<long>(maximum, parsed)));
 }
 
+unsigned long long argumentU64Value(const std::string& args, const char* prefix, unsigned long long fallback) {
+    const std::string value = argumentValue(args, prefix);
+    if (value.empty()) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value.c_str(), &end, 0);
+    if (end == value.c_str()) {
+        return fallback;
+    }
+    return parsed;
+}
+
 void applyCanonicalFireSettings(FireSettings& settings) {
     settings.cinematicMode = 1;
     settings.raymarchSteps = kRaymarchSteps;
@@ -1098,13 +1495,15 @@ bool initializeSharedViewport(bool reset) {
         g_sharedViewport->version != kSharedViewportVersion ||
         g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
         g_sharedViewport->width != kFrameWidth ||
-        g_sharedViewport->height != kFrameHeight) {
+        g_sharedViewport->height != kFrameHeight ||
+        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
         std::memset(g_sharedViewport, 0, sizeof(SharedViewportBuffer));
         g_sharedViewport->magic = kSharedViewportMagic;
         g_sharedViewport->version = kSharedViewportVersion;
         g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
         g_sharedViewport->width = kFrameWidth;
         g_sharedViewport->height = kFrameHeight;
+        g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
         g_sharedViewport->workerStatus = 0;
         g_sharedViewport->workerExitCode = 0;
         g_sharedViewport->workerErrorCount = 0;
@@ -1150,13 +1549,14 @@ FireSettings readStableWorkerSettings(const SharedViewportBuffer* shared) {
     return shared->settings;
 }
 
-bool readWorkerFrame(std::vector<std::uint32_t>& outFrame) {
+bool workerFrameMetadataFresh() {
     if (g_sharedViewport == nullptr ||
         g_sharedViewport->magic != kSharedViewportMagic ||
         g_sharedViewport->version != kSharedViewportVersion ||
         g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
         g_sharedViewport->width != kFrameWidth ||
-        g_sharedViewport->height != kFrameHeight) {
+        g_sharedViewport->height != kFrameHeight ||
+        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
         return false;
     }
     const LONG sequenceA = g_sharedViewport->frameSequence;
@@ -1166,10 +1566,6 @@ bool readWorkerFrame(std::vector<std::uint32_t>& outFrame) {
     if (tickMs() - g_sharedViewport->lastFrameTickMs > kWorkerFrameStaleMs) {
         return false;
     }
-    if (outFrame.size() != static_cast<std::size_t>(kFrameWidth * kFrameHeight)) {
-        outFrame.resize(static_cast<std::size_t>(kFrameWidth) * kFrameHeight);
-    }
-    std::memcpy(outFrame.data(), g_sharedViewport->pixels, outFrame.size() * sizeof(std::uint32_t));
     const LONG sequenceB = g_sharedViewport->frameSequence;
     return sequenceA == sequenceB && (sequenceB & 1) == 0;
 }
@@ -1223,6 +1619,10 @@ bool startCudaWorker() {
     if (!initializeSharedViewport(false)) {
         return false;
     }
+    if (!g_d3d.initialized || g_d3d.sharedSimHandle == nullptr) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D FP16 shared texture is not ready");
+        return false;
+    }
 
     g_lastWorkerStartTickMs = now;
     ++g_workerRestartCount;
@@ -1240,9 +1640,10 @@ bool startCudaWorker() {
     std::snprintf(
         commandLine,
         sizeof(commandLine),
-        "\"%s\" --cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=%lu",
+        "\"%s\" --cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=%lu --d3d11-shared-texture=0x%llx",
         exePath,
-        static_cast<unsigned long>(GetCurrentProcessId()));
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandle)));
 
     STARTUPINFOA startup = {};
     startup.cb = sizeof(startup);
@@ -1334,6 +1735,42 @@ bool cudaWorkerEnabledByDefault(const std::string& args) {
     return !(disabledSize > 0 && std::string(disabled) == "1");
 }
 
+struct WorkerD3DTarget {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<IDXGIKeyedMutex> mutex;
+};
+
+bool initializeWorkerD3DTarget(unsigned long long sharedTextureHandle, WorkerD3DTarget& target) {
+    if (sharedTextureHandle == 0) {
+        appendRuntimeEvent("worker-d3d-missing-handle", "");
+        return false;
+    }
+    if (!createD3DDevice(target.device, target.context)) {
+        appendRuntimeEvent("worker-d3d-device-failed", "");
+        return false;
+    }
+    const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(sharedTextureHandle));
+    const HRESULT hr = target.device->OpenSharedResource(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(target.texture.GetAddressOf()));
+    if (FAILED(hr)) {
+        char detail[96] = {};
+        std::snprintf(detail, sizeof(detail), "%s", hresultString(hr).c_str());
+        appendRuntimeEvent("worker-d3d-open-shared-failed", detail);
+        return false;
+    }
+    if (FAILED(target.texture.As(&target.mutex))) {
+        appendRuntimeEvent("worker-d3d-keyed-mutex-failed", "");
+        return false;
+    }
+    if (!fireCudaRegisterD3D11Texture(target.texture.Get())) {
+        appendRuntimeEvent("worker-cuda-d3d-register-failed", fireCudaLastError());
+        return false;
+    }
+    appendRuntimeEvent("worker-cuda-d3d-registered", "");
+    return true;
+}
+
 int runCudaWorker(const std::string& args) {
     if (!gpuKernelLaunchAllowed(args)) {
         return writeGpuSafetyStop("cuda-worker");
@@ -1355,13 +1792,13 @@ int runCudaWorker(const std::string& args) {
     g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
     g_sharedViewport->width = kFrameWidth;
     g_sharedViewport->height = kFrameHeight;
+    g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
     g_sharedViewport->workerPid = GetCurrentProcessId();
     g_sharedViewport->workerStartTickMs = tickMs();
     g_sharedViewport->workerHeartbeatTickMs = tickMs();
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "initializing CUDA worker");
     appendRuntimeEvent("worker-process-entered", "");
 
-    std::vector<std::uint32_t> frame(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, 0xff000000u);
     if (!fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight)) {
         g_sharedViewport->workerStatus = -1;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
@@ -1374,6 +1811,21 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
+
+    WorkerD3DTarget d3dTarget;
+    const unsigned long long sharedTextureHandle = argumentU64Value(args, "--d3d11-shared-texture=", 0);
+    if (!initializeWorkerD3DTarget(sharedTextureHandle, d3dTarget)) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D/CUDA FP16 interop init failed");
+        appendRuntimeEvent("worker-d3d-interop-init-failed", g_sharedViewport->statusText);
+        fireCudaShutdown();
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
 
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
@@ -1395,25 +1847,49 @@ int runCudaWorker(const std::string& args) {
         settings.dt = dt;
         applyCanonicalFireSettings(settings);
 
-        if (!fireCudaStepAndRender(frame.data(), settings)) {
+        const HRESULT acquire = d3dTarget.mutex->AcquireSync(0, 8);
+        if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+            Sleep(1);
+            continue;
+        }
+        if (FAILED(acquire)) {
+            g_sharedViewport->workerStatus = -4;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 6;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D keyed mutex acquire failed: %.80s", hresultString(acquire).c_str());
+            appendRuntimeEvent("worker-d3d-acquire-failed", g_sharedViewport->statusText);
+            break;
+        }
+
+        if (!fireCudaStepAndRenderD3D11(settings)) {
+            d3dTarget.mutex->ReleaseSync(0);
             g_sharedViewport->workerStatus = -2;
             InterlockedIncrement(&g_sharedViewport->workerErrorCount);
             g_sharedViewport->workerExitCode = 4;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA render failed: %.150s", fireCudaLastError());
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA/D3D render failed: %.145s", fireCudaLastError());
             appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
+            break;
+        }
+        const HRESULT release = d3dTarget.mutex->ReleaseSync(1);
+        if (FAILED(release)) {
+            g_sharedViewport->workerStatus = -5;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 7;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D keyed mutex release failed: %.80s", hresultString(release).c_str());
+            appendRuntimeEvent("worker-d3d-release-failed", g_sharedViewport->statusText);
             break;
         }
 
         InterlockedIncrement(&g_sharedViewport->frameSequence);
-        std::memcpy(g_sharedViewport->pixels, frame.data(), frame.size() * sizeof(std::uint32_t));
         g_sharedViewport->lastFrameTickMs = tickMs();
         g_sharedViewport->workerStatus = 2;
-        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming");
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming FP16 D3D11 interop");
         InterlockedIncrement(&g_sharedViewport->frameSequence);
 
         Sleep(1);
     }
 
+    fireCudaUnregisterD3D11Texture();
     fireCudaShutdown();
     g_sharedViewport->workerStatus = 0;
     g_sharedViewport->workerStopTickMs = tickMs();
@@ -2322,7 +2798,7 @@ int runDiagnostics() {
     out << "turbulenceModel=LES-style scalar turbulence-energy closure\n";
     out << "sootModel=soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\n";
     out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\n";
-    out << "rendererStorage=CUDA float4 HDR radiance before final BGRA display pack\n";
+    out << "rendererStorage=CUDA float4 HDR radiance exported to FP16 D3D11 shared texture for live display\n";
     out << "renderDebugModes=final,flame,soot,transmittance,temperature,fuel-char,velocity\n";
     out << "cleanViewportMode=C key hides app chrome and CUDA gizmos for visual judging\n";
     out << "scalarTransport=clamped MacCormack/BFECC correction for transported scalar fields\n";
@@ -2366,10 +2842,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
     clearSimulationFrame(g_simFrame);
     initializeSharedViewport(true);
-    initializeBitmapInfo();
 
     if (!createMainWindow(instance)) {
         MessageBoxA(nullptr, "Failed to create the Native FireSim window.", "Native FireSim", MB_ICONERROR);
+        return 1;
+    }
+    if (!initializeD3D(g_window)) {
+        MessageBoxA(nullptr, g_workerUiStatus, "Native FireSim D3D11", MB_ICONERROR);
         return 1;
     }
     if (g_cudaWorkerRequested) {
@@ -2422,17 +2901,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
 
         writeWorkerSettings(settings);
         serviceCudaWorkerWatchdog();
-        const bool copiedWorkerFrame = g_cudaWorkerRequested && readWorkerFrame(g_simFrame);
-        const bool workerTimestampFresh =
-            g_sharedViewport != nullptr &&
-            g_sharedViewport->lastFrameTickMs != 0 &&
-            tickMs() - g_sharedViewport->lastFrameTickMs <= kWorkerFrameStaleMs;
-        g_cudaWorkerFrameLive = copiedWorkerFrame || workerTimestampFresh;
+        const bool copiedWorkerFrame = g_cudaWorkerRequested && copyD3DWorkerFrame();
+        const bool workerTimestampFresh = workerFrameMetadataFresh();
+        g_cudaWorkerFrameLive = (copiedWorkerFrame || workerTimestampFresh) && g_d3d.hasSimFrame;
         g_useCudaBackend = g_cudaWorkerFrameLive;
         if (!g_cudaWorkerFrameLive && !copiedWorkerFrame) {
             clearSimulationFrame(g_simFrame);
         }
-        composeAppFrame(g_frame, g_simFrame, settings, g_useCudaBackend, g_cleanViewportMode);
+        g_displayExposure = settings.exposure;
+        if (g_useCudaBackend) {
+            composeD3DOverlayFrame(g_frame, settings, true, g_cleanViewportMode);
+        } else {
+            composeAppFrame(g_frame, g_simFrame, settings, false, g_cleanViewportMode);
+        }
 
         InvalidateRect(g_window, nullptr, FALSE);
         UpdateWindow(g_window);
