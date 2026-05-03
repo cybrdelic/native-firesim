@@ -24,18 +24,23 @@ constexpr int kFrameWidth = 960;
 constexpr int kFrameHeight = 540;
 constexpr int kSimulationGridWidth = 384;
 constexpr int kSimulationGridHeight = 240;
-constexpr int kRaymarchSteps = 88;
+constexpr int kRaymarchSteps = 104;
 constexpr int kEmberCount = 176;
 constexpr float kExposure = 0.84f;
-constexpr float kReflectionGain = 0.72f;
-constexpr float kSmokeDarkness = 1.18f;
+constexpr float kReflectionGain = 0.54f;
+constexpr float kSmokeDarkness = 1.26f;
 constexpr float kFireIntensity = 1.42f;
 constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
 constexpr float kTargetFrameSeconds = 1.0f / 30.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 3u;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV1";
+constexpr DWORD kSharedViewportVersion = 4u;
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV4";
+constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
+    return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
+}
+constexpr const char* kSharedViewportBuildStampText = __DATE__ " " __TIME__;
+constexpr DWORD kSharedViewportBuildStamp = fnv1a32(kSharedViewportBuildStampText);
 constexpr unsigned long long kWorkerFrameStaleMs = 2200ull;
 constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
@@ -68,6 +73,7 @@ constexpr UiRect kTurbulenceSliderRect = {790, 304, 130, 16};
 struct SharedViewportBuffer {
     DWORD magic;
     DWORD version;
+    DWORD buildStamp;
     DWORD width;
     DWORD height;
     volatile LONG frameSequence;
@@ -1087,10 +1093,16 @@ bool initializeSharedViewport(bool reset) {
         return false;
     }
 
-    if (reset || g_sharedViewport->magic != kSharedViewportMagic || g_sharedViewport->version != kSharedViewportVersion) {
+    if (reset ||
+        g_sharedViewport->magic != kSharedViewportMagic ||
+        g_sharedViewport->version != kSharedViewportVersion ||
+        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
+        g_sharedViewport->width != kFrameWidth ||
+        g_sharedViewport->height != kFrameHeight) {
         std::memset(g_sharedViewport, 0, sizeof(SharedViewportBuffer));
         g_sharedViewport->magic = kSharedViewportMagic;
         g_sharedViewport->version = kSharedViewportVersion;
+        g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
         g_sharedViewport->width = kFrameWidth;
         g_sharedViewport->height = kFrameHeight;
         g_sharedViewport->workerStatus = 0;
@@ -1139,7 +1151,12 @@ FireSettings readStableWorkerSettings(const SharedViewportBuffer* shared) {
 }
 
 bool readWorkerFrame(std::vector<std::uint32_t>& outFrame) {
-    if (g_sharedViewport == nullptr || g_sharedViewport->magic != kSharedViewportMagic) {
+    if (g_sharedViewport == nullptr ||
+        g_sharedViewport->magic != kSharedViewportMagic ||
+        g_sharedViewport->version != kSharedViewportVersion ||
+        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
+        g_sharedViewport->width != kFrameWidth ||
+        g_sharedViewport->height != kFrameHeight) {
         return false;
     }
     const LONG sequenceA = g_sharedViewport->frameSequence;
@@ -1333,6 +1350,11 @@ int runCudaWorker(const std::string& args) {
     }
 
     g_sharedViewport->workerStatus = 1;
+    g_sharedViewport->magic = kSharedViewportMagic;
+    g_sharedViewport->version = kSharedViewportVersion;
+    g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
+    g_sharedViewport->width = kFrameWidth;
+    g_sharedViewport->height = kFrameHeight;
     g_sharedViewport->workerPid = GetCurrentProcessId();
     g_sharedViewport->workerStartTickMs = tickMs();
     g_sharedViewport->workerHeartbeatTickMs = tickMs();
