@@ -2099,15 +2099,7 @@ int runCudaWorker(const std::string& args) {
 
         InterlockedIncrement(&g_sharedViewport->frameSequence);
         d3dTarget.context->CopyResource(d3dTarget.sharedTexture.Get(), d3dTarget.cudaTexture.Get());
-        if (!waitForWorkerD3DCompletion(d3dTarget)) {
-            g_sharedViewport->workerStatus = -4;
-            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
-            g_sharedViewport->workerExitCode = 6;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D shared copy completion wait failed");
-            appendRuntimeEvent("worker-d3d-completion-wait-failed", g_sharedViewport->statusText);
-            d3dTarget.sharedMutex->ReleaseSync(0);
-            break;
-        }
+        d3dTarget.context->Flush();
         const HRESULT release = d3dTarget.sharedMutex->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;
