@@ -143,7 +143,7 @@ CUDA diagnostics only, without simulation kernels:
 
 ## Current Scope
 
-The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps into an FP16 D3D11 texture, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV5`, and is stopped when the UI exits. The CUDA solver architecture is:
+The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps into an FP16 D3D11 texture, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV6`, and is stopped when the UI exits. The CUDA solver architecture is:
 
 - CUDA 3D MAC-style simulation step with staggered velocity, weighted red/black pressure projection, heat, fuel vapor, oxygen, and soot channels
 - GPU fuel-bed state seeded as broken material chunks with char, ash, pyrolysis release, oxygen-limited heat release, soot formation, soot oxidation, and radiative cooling terms

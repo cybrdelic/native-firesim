@@ -40,8 +40,8 @@ constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
 constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 5u;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV5";
+constexpr DWORD kSharedViewportVersion = 6u;
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV6";
 constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
@@ -166,6 +166,8 @@ int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
 bool g_cudaWorkerRequested = false;
 bool g_cudaWorkerFrameLive = false;
+LONG g_lastCopiedWorkerSequence = 0;
+float g_visualFps = 0.0f;
 unsigned long long g_lastWorkerStartTickMs = 0;
 unsigned long long g_workerRestartWindowStartMs = 0;
 unsigned long long g_workerRestartBlockedUntilMs = 0;
@@ -941,6 +943,8 @@ bool copyD3DWorkerFrame() {
     if (g_d3d.sharedSimTexture == nullptr || reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandle) != handleValue) {
         g_d3d.sharedSimTexture.Reset();
         g_d3d.sharedSimMutex.Reset();
+        g_d3d.hasSimFrame = false;
+        g_lastCopiedWorkerSequence = 0;
         g_d3d.sharedSimHandle = reinterpret_cast<HANDLE>(handleValue);
         const HRESULT hr = g_d3d.device->OpenSharedResource(
             g_d3d.sharedSimHandle,
@@ -957,12 +961,21 @@ bool copyD3DWorkerFrame() {
     if (g_d3d.sharedSimMutex == nullptr || g_d3d.sharedSimTexture == nullptr) {
         return false;
     }
+    const LONG sequenceA = g_sharedViewport->frameSequence;
+    if (sequenceA <= 0 || (sequenceA & 1) != 0 || sequenceA == g_lastCopiedWorkerSequence) {
+        return false;
+    }
     const HRESULT acquire = g_d3d.sharedSimMutex->AcquireSync(1, 0);
     if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
         return false;
     }
     if (FAILED(acquire)) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shared frame acquire failed: %s", hresultString(acquire).c_str());
+        return false;
+    }
+    const LONG sequenceB = g_sharedViewport->frameSequence;
+    if (sequenceA != sequenceB || (sequenceB & 1) != 0) {
+        g_d3d.sharedSimMutex->ReleaseSync(0);
         return false;
     }
     g_d3d.context->CopyResource(g_d3d.displaySimTexture.Get(), g_d3d.sharedSimTexture.Get());
@@ -972,6 +985,7 @@ bool copyD3DWorkerFrame() {
         return false;
     }
     g_d3d.hasSimFrame = true;
+    g_lastCopiedWorkerSequence = sequenceB;
     return true;
 }
 
@@ -1715,9 +1729,10 @@ void serviceCudaWorkerWatchdog() {
         std::snprintf(
             g_workerUiStatus,
             sizeof(g_workerUiStatus),
-            "CUDA worker live %.0ffps %.1fms frame age %llums",
+            "CUDA worker submit %.0ffps %.1fms display %.0ffps age %llums",
             workerFps,
             frameMs,
+            g_visualFps,
             frameAge);
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker running; waiting for fresh frame");
@@ -1932,7 +1947,9 @@ int runCudaWorker(const std::string& args) {
             break;
         }
 
+        InterlockedIncrement(&g_sharedViewport->frameSequence);
         d3dTarget.context->CopyResource(d3dTarget.sharedTexture.Get(), d3dTarget.cudaTexture.Get());
+        d3dTarget.context->Flush();
         const HRESULT release = d3dTarget.sharedMutex->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;
@@ -1944,13 +1961,13 @@ int runCudaWorker(const std::string& args) {
         }
         const auto published = Clock::now();
 
-        InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->lastFrameTickMs = tickMs();
         g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
         g_sharedViewport->workerFrameMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(published - frameStart).count());
         g_sharedViewport->workerPublishMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(published - cudaDone).count());
         g_sharedViewport->workerStatus = 2;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming FP16 D3D11 interop");
+        InterlockedIncrement(&g_sharedViewport->frameSequence);
 
         Sleep(0);
     }
@@ -2933,7 +2950,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
     auto fpsLast = last;
-    int frames = 0;
+    int visualFrames = 0;
     float fps = 0.0f;
 
     MSG msg = {};
@@ -2991,12 +3008,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         InvalidateRect(g_window, nullptr, FALSE);
         UpdateWindow(g_window);
 
-        ++frames;
+        if (copiedWorkerFrame || !g_cudaWorkerFrameLive) {
+            ++visualFrames;
+        }
         const float fpsElapsed = std::chrono::duration<float>(now - fpsLast).count();
         if (fpsElapsed >= 0.5f) {
-            fps = static_cast<float>(frames) / fpsElapsed;
-            frames = 0;
+            fps = static_cast<float>(visualFrames) / fpsElapsed;
+            visualFrames = 0;
             fpsLast = now;
+            g_visualFps = fps;
             updateTitle(fps);
         }
 
