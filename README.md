@@ -143,7 +143,7 @@ CUDA diagnostics only, without simulation kernels:
 
 ## Current Scope
 
-The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps into an FP16 D3D11 texture, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV6`, and is stopped when the UI exits. The CUDA solver architecture is:
+The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, writes FP16 radiance directly into a mapped D3D11 surface, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV6`, and is stopped when the UI exits. The CUDA solver architecture is:
 
 - CUDA 3D MAC-style simulation step with staggered velocity, weighted red/black pressure projection, heat, fuel vapor, oxygen, and soot channels
 - GPU fuel-bed state seeded as broken material chunks with char, ash, pyrolysis release, oxygen-limited heat release, soot formation, soot oxidation, and radiative cooling terms
@@ -162,7 +162,7 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
 - optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 
-The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 88 raymarch steps, 176 ember samples, neutral black/gray soot, reduced floor glow, and target-room shading. It uses 40 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and FP16 D3D11 interop publication. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
+The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 104 raymarch steps, 176 ember samples, neutral black/gray soot, reduced floor glow, and target-room shading. It uses 40 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and direct FP16 D3D11 surface publication without an intermediate CUDA FP16 staging buffer. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
 
 Next hardening steps are explicit interprocess GPU fence/semaphore publication, video/frame export, calibrated material constants from a real burn dataset, sparse brick allocation for inactive volume regions, and replacing the fixed SOR projection with a residual-targeted multigrid or PCG solve.
 

@@ -2888,7 +2888,7 @@ int runDiagnostics() {
     out << "turbulenceModel=LES-style scalar turbulence-energy closure\n";
     out << "sootModel=soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\n";
     out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\n";
-    out << "rendererStorage=CUDA float4 HDR radiance exported to FP16 D3D11 shared texture for live display\n";
+    out << "rendererStorage=CUDA float4 HDR radiance written directly to mapped FP16 D3D11 surface for live display\n";
     out << "renderDebugModes=final,flame,soot,transmittance,temperature,fuel-char,velocity\n";
     out << "cleanViewportMode=C key hides app chrome and CUDA gizmos for visual judging\n";
     out << "scalarTransport=clamped MacCormack/BFECC correction for transported scalar fields\n";

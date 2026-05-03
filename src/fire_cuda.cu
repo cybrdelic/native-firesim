@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cuda_d3d11_interop.h>
 #include <cuda_fp16.h>
+#include <surface_functions.h>
 #include <d3d11.h>
 
 #include <algorithm>
@@ -123,7 +124,6 @@ float* g_wNext = nullptr;
 MetricAccumulator* g_metricsDevice = nullptr;
 std::uint32_t* g_frameDevice = nullptr;
 float4* g_hdrFrameDevice = nullptr;
-ushort4* g_fp16FrameDevice = nullptr;
 cudaGraphicsResource* g_d3dFp16Resource = nullptr;
 cudaEvent_t g_stepStartEvent = nullptr;
 cudaEvent_t g_afterSolveEvent = nullptr;
@@ -1688,8 +1688,8 @@ __device__ unsigned short halfBits(float value) {
     return __half_as_ushort(__float2half_rn(fmaxf(0.0f, value)));
 }
 
-__global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16Kernel(
-    ushort4* out,
+__global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16SurfaceKernel(
+    cudaSurfaceObject_t outSurface,
     const float4* hdr,
     SimParams p) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1700,11 +1700,12 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16Kernel(
 
     const int pixelIndex = y * p.frameW + x;
     const float4 radiance = hdr[pixelIndex];
-    out[pixelIndex] = make_ushort4(
+    const ushort4 value = make_ushort4(
         halfBits(radiance.x),
         halfBits(radiance.y),
         halfBits(radiance.z),
         halfBits(1.0f));
+    surf2Dwrite(value, outSurface, x * static_cast<int>(sizeof(ushort4)), y);
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
@@ -1847,7 +1848,6 @@ void freeDeviceMemory() {
     cudaFree(g_metricsDevice);
     cudaFree(g_frameDevice);
     cudaFree(g_hdrFrameDevice);
-    cudaFree(g_fp16FrameDevice);
     if (g_stepStartEvent != nullptr) {
         cudaEventDestroy(g_stepStartEvent);
     }
@@ -1890,7 +1890,6 @@ void freeDeviceMemory() {
     g_metricsDevice = nullptr;
     g_frameDevice = nullptr;
     g_hdrFrameDevice = nullptr;
-    g_fp16FrameDevice = nullptr;
     g_stepStartEvent = nullptr;
     g_afterSolveEvent = nullptr;
     g_afterRenderEvent = nullptr;
@@ -1986,7 +1985,6 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
     const std::size_t wBytes = wCount * sizeof(float);
     const std::size_t frameBytes = static_cast<std::size_t>(frameWidth) * static_cast<std::size_t>(frameHeight) * sizeof(std::uint32_t);
     const std::size_t hdrFrameBytes = static_cast<std::size_t>(frameWidth) * static_cast<std::size_t>(frameHeight) * sizeof(float4);
-    const std::size_t fp16FrameBytes = static_cast<std::size_t>(frameWidth) * static_cast<std::size_t>(frameHeight) * sizeof(ushort4);
 
     if (!check("cudaSetDevice", cudaSetDevice(g_cudaDevice))) {
         return false;
@@ -2023,8 +2021,7 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
         !check("cudaMalloc wNext", cudaMalloc(&g_wNext, wBytes)) ||
         !check("cudaMalloc metrics", cudaMalloc(&g_metricsDevice, sizeof(MetricAccumulator))) ||
         !check("cudaMalloc frame", cudaMalloc(&g_frameDevice, frameBytes)) ||
-        !check("cudaMalloc hdr frame", cudaMalloc(&g_hdrFrameDevice, hdrFrameBytes)) ||
-        !check("cudaMalloc fp16 frame", cudaMalloc(&g_fp16FrameDevice, fp16FrameBytes))) {
+        !check("cudaMalloc hdr frame", cudaMalloc(&g_hdrFrameDevice, hdrFrameBytes))) {
         freeDeviceMemory();
         return false;
     }
@@ -2120,7 +2117,7 @@ bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics) {
 }
 
 bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics, bool writeD3DInterop) {
-    if (g_heat == nullptr || g_frameDevice == nullptr || g_hdrFrameDevice == nullptr || g_fp16FrameDevice == nullptr) {
+    if (g_heat == nullptr || g_frameDevice == nullptr || g_hdrFrameDevice == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "CUDA renderer is not initialized.");
         return false;
     }
@@ -2325,27 +2322,31 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
         }
     }
     if (writeD3DInterop) {
-        for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-            const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
-            const SimParams slice = withFrameWindow(params, yStart, yEnd);
-            packFp16Kernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_fp16FrameDevice, g_hdrFrameDevice, slice);
-        }
-        if (!check("packFp16Kernel launch", cudaGetLastError())) {
-            return false;
-        }
         if (!check("cudaGraphicsMapResources d3d fp16", cudaGraphicsMapResources(1, &g_d3dFp16Resource, 0))) {
             return false;
         }
         cudaArray_t d3dArray = nullptr;
-        bool copiedToD3D = check("cudaGraphicsSubResourceGetMappedArray d3d fp16", cudaGraphicsSubResourceGetMappedArray(&d3dArray, g_d3dFp16Resource, 0, 0));
-        if (copiedToD3D) {
-            const std::size_t pitch = static_cast<std::size_t>(g_frameW) * sizeof(ushort4);
-            copiedToD3D = check(
-                "cudaMemcpy2DToArray d3d fp16",
-                cudaMemcpy2DToArray(d3dArray, 0, 0, g_fp16FrameDevice, pitch, pitch, static_cast<std::size_t>(g_frameH), cudaMemcpyDeviceToDevice));
+        bool wroteToD3D = check("cudaGraphicsSubResourceGetMappedArray d3d fp16", cudaGraphicsSubResourceGetMappedArray(&d3dArray, g_d3dFp16Resource, 0, 0));
+        cudaSurfaceObject_t surface = 0;
+        if (wroteToD3D) {
+            cudaResourceDesc surfaceDesc = {};
+            surfaceDesc.resType = cudaResourceTypeArray;
+            surfaceDesc.res.array.array = d3dArray;
+            wroteToD3D = check("cudaCreateSurfaceObject d3d fp16", cudaCreateSurfaceObject(&surface, &surfaceDesc));
+        }
+        if (wroteToD3D) {
+            for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
+                const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
+                const SimParams slice = withFrameWindow(params, yStart, yEnd);
+                packFp16SurfaceKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(surface, g_hdrFrameDevice, slice);
+            }
+            wroteToD3D = check("packFp16SurfaceKernel launch", cudaGetLastError());
+        }
+        if (surface != 0) {
+            wroteToD3D = check("cudaDestroySurfaceObject d3d fp16", cudaDestroySurfaceObject(surface)) && wroteToD3D;
         }
         const bool unmappedD3D = check("cudaGraphicsUnmapResources d3d fp16", cudaGraphicsUnmapResources(1, &g_d3dFp16Resource, 0));
-        if (!copiedToD3D || !unmappedD3D) {
+        if (!wroteToD3D || !unmappedD3D) {
             return false;
         }
     } else {
@@ -2469,7 +2470,7 @@ bool fireCudaRegisterD3D11Texture(void* d3d11Texture) {
     auto* resource = static_cast<ID3D11Resource*>(d3d11Texture);
     return check(
         "cudaGraphicsD3D11RegisterResource fp16 texture",
-        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resource, resource, cudaGraphicsRegisterFlagsNone));
+        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resource, resource, cudaGraphicsRegisterFlagsSurfaceLoadStore));
 }
 
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings) {

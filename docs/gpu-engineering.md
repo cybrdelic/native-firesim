@@ -20,10 +20,10 @@ NativeFireSim treats GPU work as production kernel code, not shader toy code. A 
 - CUDA separable compilation is disabled because all device code lives in one CUDA translation unit.
 - CUDA line info is enabled for debugger/profiler attribution.
 - The raymarch cap is 104 samples per pixel.
-- Raymarching writes CUDA `float4` HDR radiance first; `tonemapKernel` performs ACES display mapping and dithering before FP16 D3D11 interop publication.
+- Raymarching writes CUDA `float4` HDR radiance first; the live D3D path packs that radiance directly into a mapped FP16 D3D11 surface, and the presenter shader handles exposure and ACES display mapping.
 - Embers are sparse HDR splats instead of a full-screen per-pixel ember loop; gizmos stay outside `renderKernel`.
 - 3D volume work is sliced into 32-z-layer kernel windows.
-- Raymarch, pack, and overlay work are sliced into 180-row frame windows.
+- Raymarch, direct FP16 surface writes, and overlay work are sliced into 180-row frame windows.
 - There is one canonical runtime configuration: 384x240 requested grid, 104 raymarch steps, and 176 embers.
 - The recursive `smoothstepf` helper was replaced with a non-recursive inverted-edge implementation.
 - The main app starts an isolated CUDA worker for real 3D volume frames and shows explicit stale-worker state if worker frames are not fresh.
