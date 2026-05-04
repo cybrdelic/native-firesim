@@ -2443,7 +2443,6 @@ int runCudaWorker(const std::string& args) {
         const LONG writingSequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->slotFrameSequences[publishSlot] = writingSequence;
         d3dTarget.context->CopyResource(d3dTarget.sharedTextures[publishSlot].Get(), d3dTarget.cudaTexture.Get());
-        d3dTarget.context->Flush();
         const HRESULT release = d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;

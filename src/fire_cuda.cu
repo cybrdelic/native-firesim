@@ -1102,16 +1102,23 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) divergenceKernel(float* 
     pressure[idx] = 0.0f;
 }
 
-__global__ void __launch_bounds__(kCudaBlockThreads, 1) sorPressureKernel(float* pressure, const float* divergence, SimParams p, int parity, float omega) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int z = p.launchZStart + blockIdx.z * blockDim.z + threadIdx.z;
-    if (x >= p.nx || y >= p.ny || z >= p.launchZEnd || z >= p.nz) {
+__global__ void __launch_bounds__(kCudaBlockThreads, 1) sorPressureParityKernel(float* pressure, const float* divergence, SimParams p, int parity, float omega) {
+    const int compact = blockIdx.x * blockDim.x + threadIdx.x;
+    const int cellsPerRow = (p.nx + 1) / 2;
+    const int rowCount = p.ny * (p.launchZEnd - p.launchZStart);
+    if (compact >= cellsPerRow * rowCount) {
         return;
     }
-    if (((x + y + z) & 1) != parity) {
+    const int row = compact / cellsPerRow;
+    const int localX = compact - row * cellsPerRow;
+    const int y = row % p.ny;
+    const int z = p.launchZStart + row / p.ny;
+    const int firstX = (parity ^ y ^ z) & 1;
+    const int x = firstX + localX * 2;
+    if (x >= p.nx || z >= p.launchZEnd || z >= p.nz) {
         return;
     }
+
     const int idx = scalarIndex(x, y, z, p);
     const float pL = pressure[scalarIndex(x - 1, y, z, p)];
     const float pR = pressure[scalarIndex(x + 1, y, z, p)];
@@ -2696,9 +2703,10 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
             return false;
         }
 
+        const int pressureParityCells = ((g_nx + 1) / 2) * g_ny * g_nz;
         for (int i = 0; i < kPressureIterations; ++i) {
-            sorPressureKernel<<<scalarGrid, fieldBlock>>>(g_pressure, g_divergence, params, 0, kPressureOmega);
-            sorPressureKernel<<<scalarGrid, fieldBlock>>>(g_pressure, g_divergence, params, 1, kPressureOmega);
+            sorPressureParityKernel<<<(pressureParityCells + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_pressure, g_divergence, params, 0, kPressureOmega);
+            sorPressureParityKernel<<<(pressureParityCells + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_pressure, g_divergence, params, 1, kPressureOmega);
         }
         if (!check("pressure SOR launch", cudaGetLastError())) {
             return false;

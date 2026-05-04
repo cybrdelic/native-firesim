@@ -183,3 +183,34 @@ Current evidence from this pass:
 - `out/current-render-only/worker-benchmark.json`: render-only worker benchmark passed at `5.41 ms`, `184.92 FPS`.
 - `out/current-sim240/worker-benchmark.json`: physics-decoupled worker benchmark passed at `5.45 ms`, `183.36 FPS`.
 - Live bounded run after the timer-resolution fix showed `wrk 171-180fps` and `copyHz 153-179`, clearing the requested 100 FPS target in the live CUDA viewport.
+
+## Post-Merge Performance Pass
+
+Date: 2026-05-04
+
+This pass started from merged `main` after PR #3. Quality settings stayed fixed: `raymarchSteps=104`, `emberCount=176`, `pressureIterations=40`, and requested grid `384x240`.
+
+Baseline:
+
+- `out/postmerge-baseline-workerbench/worker-benchmark.json`: full physics benchmark passed at `88.12 ms`, `11.35 FPS`.
+- Baseline sampled GPU breakdown: velocity `5.72 ms`, reaction `26.00 ms`, projection `35.14 ms`, lighting `0.31 ms`, raymarch `15.85 ms`, pack `4.84 ms`.
+
+Kept fixes:
+
+- Replaced full-grid red/black SOR launches with a compact parity launch. This keeps the same 40 pressure iterations and same pressure math, but does not launch threads that immediately return for the inactive checkerboard color.
+- Removed the live worker's per-frame D3D immediate-context `Flush()` after copying the private CUDA/D3D FP16 texture into the shared keyed-mutex ring. Keyed mutex release still publishes key `1`, and live capture confirmed the host still receives frames.
+
+Rejected experiment:
+
+- A 2D compact parity launch was rejected. It regressed the full physics benchmark to `106.74 ms`, `9.37 FPS`, and the live-like `--sim-every-frames=30` benchmark to `23.61 ms`, `42.35 FPS`.
+
+Final evidence:
+
+- `out/postmerge-final-candidate-workerbench/worker-benchmark.json`: full physics benchmark passed at `71.28 ms`, `14.03 FPS`.
+- `out/postmerge-final-candidate-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `15.02 ms`, `66.57 FPS`.
+- `docs/pr-assets/screenshot-postmerge-performance-pass.png`: live viewport capture showed `wrk 143-146fps`, worker publish around `6.6-6.8 ms`, and `copyHz 39-40/52-53` with frames still visible.
+
+Remaining blockers:
+
+- The dense full-grid pressure solve is still the largest physics-side blocker. Compact parity reduces wasted work, but a real jump still needs a bounded multigrid/PCG pressure path or sparse active projection tiles.
+- The render-only/live-like path is now more limited by raymarch/pack/publish cadence than UI sleep, so the next exact pass should target persistent CUDA surface ownership or direct shared-slot rendering before changing visual quality.
