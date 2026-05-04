@@ -21,14 +21,17 @@ NativeFireSim treats GPU work as production kernel code, not shader toy code. A 
 - CUDA line info is enabled for debugger/profiler attribution.
 - The raymarch cap is 104 samples per pixel.
 - Raymarching writes CUDA `float4` HDR radiance first; the live D3D path packs that radiance directly into a mapped FP16 D3D11 surface, and the presenter shader handles exposure and ACES display mapping.
+- Scene lighting is a bounded CUDA radiance/shadow volume fed by flame, ember, soot, char, ash, and pyrolysis fields before the raymarch pass. Smoke scattering and room/fuel-bed materials sample that volume, so the fire, smoke, floor, walls, and tray are no longer separate glow illusions composited at the end.
 - Embers are sparse HDR splats instead of a full-screen per-pixel ember loop; gizmos stay outside `renderKernel`.
 - 3D volume work is sliced into 32-z-layer kernel windows.
 - Raymarch, direct FP16 surface writes, and overlay work are sliced into 180-row frame windows.
 - There is one canonical runtime configuration: 384x240 requested grid, 104 raymarch steps, and 176 embers.
 - The recursive `smoothstepf` helper was replaced with a non-recursive inverted-edge implementation.
 - The main app starts an isolated CUDA worker for real 3D volume frames and shows explicit stale-worker state if worker frames are not fresh.
-- The shared frame transport is an FP16 D3D11 keyed-mutex texture handle exposed through `Local\NativeFireSimViewportFrameV6`.
-- The presenter targets 300 FPS with immediate present; live worker status reports submitted worker timing and copied-display FPS separately.
+- The shared frame transport is a 3-slot FP16 D3D11 keyed-mutex texture ring exposed through `Local\NativeFireSimViewportFrameV7`.
+- The presenter uses a flip-model FP16 swap chain when available and non-blocking present, so a full compositor queue drops a present instead of blocking the UI thread.
+- The live worker owns its timer-resolution scope, paces publish at 180 FPS, and reports worker timing plus fresh copied-frame throughput separately.
+- The host presents only fresh CUDA frames or overlay changes; stale worker metadata does not trigger duplicate GPU presents.
 - `--worker-benchmark` measures completed CUDA/D3D worker frames with a D3D event query, warmup frames, and locked canonical quality settings.
 - `--diagnostics` validates D3D/CUDA FP16 texture registration without launching simulation kernels.
 - UI-to-worker settings use an odd/even sequence counter so the worker does not consume a torn settings struct.
