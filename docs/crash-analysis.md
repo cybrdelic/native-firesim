@@ -49,12 +49,12 @@ Windows also logged repeated `WUDFRd failed to load` warnings for Intel audio / 
 
 ## Current Runtime Policy
 
-The main app viewport no longer initializes CUDA or submits custom simulation/render kernels in the UI process. It starts an isolated CUDA worker process for the real 3D volume and receives frames through shared memory. If the worker exits, stalls, or does not publish a fresh frame, the UI remains alive and falls back to the animated replay preview. There is still no CPU fire simulator fallback. There is one canonical CUDA runtime configuration; the project no longer switches between lower-quality and reference-quality modes.
+The main app viewport no longer initializes CUDA or submits custom simulation/render kernels in the UI process. It starts an isolated CUDA worker process for the real 3D volume and receives an FP16 D3D11 shared texture handle plus worker metadata through shared memory. If the worker exits, stalls, or does not publish a fresh frame, the UI remains alive and shows explicit stale-worker state. There is no CPU fire simulator fallback. There is one canonical CUDA runtime configuration; the project no longer switches between lower-quality and reference-quality modes.
 
 The worker contract now includes heartbeat and restart policy: frame stale after `2200 ms`, heartbeat stale after `3400 ms`, forced worker termination after `7200 ms`, and at most three restarts per minute before cooldown. The UI status rail shows the current worker state, and worker lifecycle events append to `out/worker-events.log`.
 
 - no args: opens the UI process and starts the isolated CUDA worker for real 3D volume frames
-- `--disable-cuda-worker`: opens the safe animated preview; no CUDA kernel launch
+- `--disable-cuda-worker`: opens the operator UI without launching CUDA kernels
 - `--cuda-worker --allow-gpu-kernels --accept-bugcheck-risk --parent-pid=<pid>`: internal worker process mode
 - `--smoke-test` / `--cuda-smoke-test`: blocked unless `--allow-gpu-kernels --accept-bugcheck-risk` is present
 - `--validation` / `--validate`: blocked unless `--allow-gpu-kernels --accept-bugcheck-risk` is present
@@ -118,6 +118,6 @@ That pattern was used throughout the scalar, force, room, gizmo, and raymarch ke
 
 The helper is now non-recursive. It computes the lower/upper edge once and returns the inverted result without a device call back into itself. After that change, the safe verifier rebuilt the CUDA target without the previous unknown-stack `nvlink` warnings.
 
-The renderer has also been split so the heavy raymarch kernel no longer draws embers, gizmos, or final display packing. Raymarching writes HDR CUDA radiance, then a separate tone-map kernel and overlay kernel finish the display frame. Heavy 3D kernels now launch through bounded 12-layer z windows, and raymarch/tonemap/overlay kernels launch through bounded 36-row frame windows. All CUDA kernels use explicit launch bounds, the internal raymarch cap is 72 steps, and the build no longer enables CUDA separable compilation because the project has a single CUDA translation unit.
+The renderer has also been split so the heavy raymarch kernel no longer draws gizmos or final display packing. Raymarching writes HDR CUDA radiance, sparse ember splats add particle radiance, then the pack/tone-map and overlay kernels finish the display frame. Heavy 3D kernels now launch through bounded 32-layer z windows, and raymarch/pack/overlay kernels launch through bounded 180-row frame windows. All CUDA kernels use explicit launch bounds, the internal raymarch cap is 120 steps, and the build no longer enables CUDA separable compilation because the project has a single CUDA translation unit.
 
 This does not prove the NVIDIA driver cannot crash again. It does identify and remove the strongest NativeFireSim-side trigger found so far: recursive device code inside large kernels submitted to a driver path that already crashed in `nvlddmkm.sys`.

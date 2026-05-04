@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">Visual gap fixes</title>
+  <desc id="desc">Diagram mapping fake-fire symptoms to the renderer and validation systems added in the PR.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e6a13a"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#090909"/>
+  <text x="60" y="70" fill="#f4f2ec" font-family="Consolas, monospace" font-size="31" font-weight="700">Fake-fire symptoms now map to testable systems</text>
+  <text x="60" y="105" fill="#9eaab0" font-family="Consolas, monospace" font-size="17">The fix is not another color tweak; the renderer exposes the field that causes each artifact.</text>
+
+  <g font-family="Consolas, monospace" font-size="18">
+    <text x="95" y="165" fill="#f4f2ec" font-size="22">Observed issue</text>
+    <text x="735" y="165" fill="#f4f2ec" font-size="22">System added or hardened</text>
+
+    <rect x="70" y="195" width="410" height="62" rx="8" fill="#15110e" stroke="#6b4831"/>
+    <text x="95" y="234" fill="#f1d4a0">Mustard / tan smoke</text>
+    <path d="M500 226 H690" stroke="#e6a13a" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="720" y="195" width="410" height="62" rx="8" fill="#111416" stroke="#506166"/>
+    <text x="745" y="234" fill="#d7e3e6">Separate soot absorption and scattering</text>
+
+    <rect x="70" y="285" width="410" height="62" rx="8" fill="#15110e" stroke="#6b4831"/>
+    <text x="95" y="324" fill="#f1d4a0">Hard box top and side clipping</text>
+    <path d="M500 316 H690" stroke="#e6a13a" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="720" y="285" width="410" height="62" rx="8" fill="#111416" stroke="#506166"/>
+    <text x="745" y="324" fill="#d7e3e6">Domain fade in raymarch integration</text>
+
+    <rect x="70" y="375" width="410" height="62" rx="8" fill="#15110e" stroke="#6b4831"/>
+    <text x="95" y="414" fill="#f1d4a0">Procedural-looking plume motion</text>
+    <path d="M500 406 H690" stroke="#e6a13a" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="720" y="375" width="410" height="62" rx="8" fill="#111416" stroke="#506166"/>
+    <text x="745" y="414" fill="#d7e3e6">Velocity-derived curl and stronger projection</text>
+
+    <rect x="70" y="465" width="410" height="62" rx="8" fill="#15110e" stroke="#6b4831"/>
+    <text x="95" y="504" fill="#f1d4a0">No measurable color gap</text>
+    <path d="M500 496 H690" stroke="#e6a13a" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="720" y="465" width="410" height="62" rx="8" fill="#111416" stroke="#506166"/>
+    <text x="745" y="504" fill="#d7e3e6">White-core, tan-smoke, black-smoke metrics</text>
+  </g>
+  <text x="60" y="610" fill="#c9d5d9" font-family="Consolas, monospace" font-size="15">PR evidence asset: docs/pr-assets/visual-gap-fixes.svg</text>
+</svg>

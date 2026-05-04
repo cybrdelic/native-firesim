@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">CUDA debug channel map</title>
+  <desc id="desc">Diagram showing the final render and six debug channels used to isolate visual defects in the fire volume.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101214"/>
+      <stop offset="1" stop-color="#060708"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="675" fill="#070809"/>
+  <text x="60" y="70" fill="#f4f2ec" font-family="Consolas, monospace" font-size="31" font-weight="700">Debug channels added for renderer hardening</text>
+  <text x="60" y="105" fill="#9eaab0" font-family="Consolas, monospace" font-size="17">Press D in the viewport to isolate the field that is causing the fake-fire look.</text>
+
+  <g font-family="Consolas, monospace">
+    <rect x="65" y="165" width="320" height="190" rx="10" fill="url(#panel)" stroke="#7a6b49" stroke-width="2"/>
+    <text x="95" y="215" fill="#fff0b5" font-size="24">FINAL</text>
+    <text x="95" y="250" fill="#b5c3c8" font-size="15">combined emission, soot, room</text>
+    <path d="M100 310 C145 235 230 235 220 170 C285 235 322 302 266 336 C221 363 133 359 100 310 z" fill="#ffb31d" opacity="0.56"/>
+    <path d="M131 316 C161 264 222 264 203 202 C244 254 265 306 229 334 C194 361 151 351 131 316 z" fill="#fff5ba" opacity="0.82"/>
+
+    <rect x="440" y="165" width="210" height="142" rx="10" fill="url(#panel)" stroke="#c7661e" stroke-width="2"/>
+    <text x="472" y="212" fill="#ff9b28" font-size="22">FLAME</text>
+    <text x="472" y="245" fill="#b5c3c8" font-size="14">emission only</text>
+
+    <rect x="700" y="165" width="210" height="142" rx="10" fill="url(#panel)" stroke="#5d6468" stroke-width="2"/>
+    <text x="732" y="212" fill="#bcc3c5" font-size="22">SOOT</text>
+    <text x="732" y="245" fill="#b5c3c8" font-size="14">optical depth</text>
+
+    <rect x="960" y="165" width="180" height="142" rx="10" fill="url(#panel)" stroke="#6d7e8d" stroke-width="2"/>
+    <text x="992" y="212" fill="#b8d9f2" font-size="22">TRANS</text>
+    <text x="992" y="245" fill="#b5c3c8" font-size="14">visibility</text>
+
+    <rect x="440" y="385" width="210" height="142" rx="10" fill="url(#panel)" stroke="#e0ac2b" stroke-width="2"/>
+    <text x="472" y="432" fill="#ffd773" font-size="22">TEMP</text>
+    <text x="472" y="465" fill="#b5c3c8" font-size="14">thermal field</text>
+
+    <rect x="700" y="385" width="210" height="142" rx="10" fill="url(#panel)" stroke="#6b7a3a" stroke-width="2"/>
+    <text x="732" y="432" fill="#b4c66a" font-size="22">FUEL</text>
+    <text x="732" y="465" fill="#b5c3c8" font-size="14">fuel + char bed</text>
+
+    <rect x="960" y="385" width="180" height="142" rx="10" fill="url(#panel)" stroke="#3f84a8" stroke-width="2"/>
+    <text x="992" y="432" fill="#64c2ec" font-size="22">VEL</text>
+    <text x="992" y="465" fill="#b5c3c8" font-size="14">velocity magnitude</text>
+
+    <path d="M385 260 H430" stroke="#d4953e" stroke-width="3"/>
+    <path d="M385 290 C520 350 620 350 700 456" stroke="#d4953e" stroke-width="3" fill="none"/>
+  </g>
+  <text x="60" y="610" fill="#c9d5d9" font-family="Consolas, monospace" font-size="15">PR evidence asset: docs/pr-assets/debug-channel-map.svg</text>
+</svg>

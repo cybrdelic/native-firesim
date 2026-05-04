@@ -1,6 +1,6 @@
 # Native FireSim
 
-Clean native Windows rewrite prototype for FireSim's core idea: a CUDA fire/smoke solver with a native Win32 operator shell. The main app viewport does not submit custom CUDA kernels directly. It starts an isolated CUDA worker process, receives real 3D volume frames through shared memory, and falls back to an animated replay preview if the worker is unavailable.
+Clean native Windows rewrite prototype for FireSim's core idea: a CUDA fire/smoke solver with a native Win32 operator shell. The main app viewport does not submit custom CUDA kernels directly. It starts an isolated CUDA worker process and receives real 3D volume frames through shared memory. There is no animated simulation fallback in the main viewport.
 
 The generated image reference is copied into:
 
@@ -22,13 +22,7 @@ cmd /c "`"C:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat`" && cmake -S . -B bui
 .\build\NativeFireSim.exe
 ```
 
-The main app opens the operator UI and starts the isolated CUDA worker by default. The primary UI process never owns CUDA initialization or kernel submission. To force the non-CUDA animated preview, run:
-
-```powershell
-.\build\NativeFireSim.exe --disable-cuda-worker
-```
-
-The worker boundary is intentional: the primary UI cannot be allowed to be the CUDA crash surface. If the worker exits or stops publishing frames, the viewport stays alive and falls back to the safe animated preview.
+The main app opens the operator UI and starts the isolated CUDA worker by default. The primary UI process never owns CUDA initialization or kernel submission. The worker boundary is intentional: the primary UI cannot be allowed to be the CUDA crash surface. If the worker exits or stops publishing fresh frames, the viewport stays alive and shows an explicit no-live-CUDA-frame state instead of faking motion.
 
 The runtime now includes production-style worker lifecycle controls:
 
@@ -94,24 +88,39 @@ Run the CUDA validation harness:
 .\build\NativeFireSim.exe --validation --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
+Run the completed-frame worker benchmark for the live CUDA/D3D path:
+
+```powershell
+.\build\NativeFireSim.exe --worker-benchmark --warmup-frames=8 --benchmark-frames=16 --output-dir=out\worker-benchmark --allow-gpu-kernels --accept-bugcheck-risk
+```
+
 Run validation against an external target envelope:
 
 ```powershell
 .\build\NativeFireSim.exe --validation --targets=benchmarks\reference-fire-room-envelope.csv --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
-Run validation against measured burn sidecars:
+Run the manifest-driven NIST FCD calibration runner. This verifies the real dataset first, launches the bounded CUDA validation path only with explicit risk acceptance, then writes experiment-scoped metrics, a sim-vs-measured CSV, JSON, PNG, and GIF:
 
 ```powershell
-.\build\NativeFireSim.exe --validation --calibration=benchmarks\real-burn-calibration-template.csv --geometry=benchmarks\geometry-template.json --allow-gpu-kernels --accept-bugcheck-risk
+.\scripts\run-nist-calibration.ps1 -RunGpuKernels -AcceptBugcheckRisk
 ```
 
 That writes:
 
-- `out/validation-metrics.csv`
-- `out/validation-report.json`
-- `out/validation-frame.bmp`
-- `out/validation-app-frame.bmp`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-metrics.csv`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/calibration-comparison.csv`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-report.json`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/sim-vs-nist-comparison.png`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/sim-vs-nist-hrr.gif`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-frame.bmp`
+- `out/validation/NIST_FCD_Methanol_1m_Pool_R1/validation-app-frame.bmp`
+
+The lower-level native executable still accepts direct sidecars for custom runs:
+
+```powershell
+.\build\NativeFireSim.exe --validation --manifest=benchmarks\nist-fcd\methanol-1m-pool-r1\manifest.json --calibration=benchmarks\nist-fcd\methanol-1m-pool-r1\calibration.csv --geometry=benchmarks\nist-fcd\methanol-1m-pool-r1\geometry.json --targets=benchmarks\nist-fcd\methanol-1m-pool-r1\validation-targets.csv --output-dir=out\validation\NIST_FCD_Methanol_1m_Pool_R1 --pool-fire-calibration --allow-gpu-kernels --accept-bugcheck-risk
+```
 
 CUDA diagnostics only, without simulation kernels:
 
@@ -127,7 +136,7 @@ CUDA diagnostics only, without simulation kernels:
 - Mouse wheel: zoom the camera.
 - Click the left toolbar to select fire, smoke, wind, or turbulence.
 - Drag the right panel sliders to tune wind and turbulence.
-- The main process sends controls to the CUDA worker over shared memory. If no worker frame is fresh, the preview animates from cached render frames instead.
+- The main process sends controls to the CUDA worker over shared memory. If no worker frame is fresh, the viewport does not synthesize a fake simulation frame.
 - `1`: fire/fuel source; left-drag injects hot flame at the cursor.
 - `2`: smoke source; left-drag injects cold soot/smoke at the cursor.
 - `3`: wind.
@@ -140,7 +149,7 @@ CUDA diagnostics only, without simulation kernels:
 
 ## Current Scope
 
-The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, tone-maps the final display frame, publishes BGRA frames through `Local\NativeFireSimViewportFrameV1`, and is stopped when the UI exits. The safe preview is animated replay/display code, not the CUDA simulator. The CUDA solver architecture is:
+The main app path is process-isolated: no custom CUDA kernels are submitted by the primary viewport process. The CUDA worker owns the real 3D volume simulation and renderer, accumulates linear HDR CUDA radiance, writes FP16 radiance directly into a mapped D3D11 surface, copies that private CUDA interop texture into the shared keyed-mutex viewport texture exposed through `Local\NativeFireSimViewportFrameV6`, and is stopped when the UI exits. The CUDA solver architecture is:
 
 - CUDA 3D MAC-style simulation step with staggered velocity, weighted red/black pressure projection, heat, fuel vapor, oxygen, and soot channels
 - GPU fuel-bed state seeded as broken material chunks with char, ash, pyrolysis release, oxygen-limited heat release, soot formation, soot oxidation, and radiative cooling terms
@@ -153,12 +162,16 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - interactive input
 - native viewport UI with a tool rail, field controls, and viewport overlays
 - ballistic ember particles with wind coupling
+- 300 FPS presentation target with immediate D3D present and no quality-mode downgrade
+- sparse HDR ember splats instead of full-screen per-pixel ember loops
+- cached per-frame camera basis for CUDA ray generation instead of per-pixel trigonometry
+- completed-frame worker benchmark for the CUDA/D3D path so FPS compares finished frames instead of queued submissions
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
-- optional benchmark target envelopes via `--targets=<csv>` and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, mass loss, thermocouples, IR, video-derived plume height, and geometry data
+- optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 
-The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 72 raymarch steps, 176 ember samples, darker soot, stronger floor reflection, and target-room shading. It uses 24 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and one final device-to-host display-frame copy. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
+The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 104 raymarch steps, 176 ember samples, neutral black/gray soot, reduced floor glow, and target-room shading. It uses 40 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and direct FP16 D3D11 surface publication without an intermediate CUDA FP16 staging buffer. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
 
-Next hardening steps are Direct3D/CUDA interop textures/semaphores instead of shared CPU BGRA display frames, video/frame export, calibrated material constants from a real burn dataset, sparse brick allocation for inactive volume regions, and replacing the fixed SOR projection with a residual-targeted multigrid or PCG solve.
+Next hardening steps are explicit interprocess GPU fence/semaphore publication, video/frame export, calibrated material constants from a real burn dataset, sparse brick allocation for inactive volume regions, and replacing the fixed SOR projection with a residual-targeted multigrid or PCG solve.
 
 See:
 

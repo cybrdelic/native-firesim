@@ -1,0 +1,9 @@
+# metric,min,max
+# Initial engineering envelopes for bounded CUDA-vs-NIST calibration runs.
+# These catch broken or non-comparable outputs; tighten only after calibration work.
+calibrationHrrShapeRmse,0.00,1.00
+calibrationMassShapeRmse,0.00,1.00
+calibrationSmokeOpticalDepthShapeRmse,0.00,1.00
+calibrationRadiantHeatFluxShapeRmse,0.00,1.00
+averageGpuSolveMs,0.00,250.00
+averageGpuRenderMs,0.00,250.00

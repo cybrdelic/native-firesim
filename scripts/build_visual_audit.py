@@ -61,6 +61,9 @@ def image_metrics(name: str, image: Image.Image) -> dict[str, float | str | list
     sat = np.divide(maxc - minc, maxc, out=np.zeros_like(maxc), where=maxc > 0.0001)
     warm = (arr[..., 0] > arr[..., 1] * 1.05) & (arr[..., 0] > arr[..., 2] * 1.55) & (luma > 0.20)
     hot = warm & (luma > 0.62)
+    tan_smoke = (arr[..., 0] > arr[..., 1] * 1.03) & (arr[..., 1] > arr[..., 2] * 1.35) & (sat < 0.58) & (luma > 0.20) & (luma < 0.68)
+    black_smoke = (luma < 0.16) & (sat < 0.42)
+    white_core = warm & (luma > 0.82) & (sat < 0.40)
     dark_smoke = (luma < 0.18) & (sat < 0.45)
     dx = np.abs(np.diff(luma, axis=1)).mean()
     dy = np.abs(np.diff(luma, axis=0)).mean()
@@ -80,6 +83,9 @@ def image_metrics(name: str, image: Image.Image) -> dict[str, float | str | list
         "brightFractionLumaGt068": float((luma > 0.68).mean()),
         "warmFireFraction": float(warm.mean()),
         "hotFireFraction": float(hot.mean()),
+        "tanSmokeFraction": float(tan_smoke.mean()),
+        "blackSmokeFraction": float(black_smoke.mean()),
+        "whiteCoreFraction": float(white_core.mean()),
         "darkNeutralSmokeFraction": float(dark_smoke.mean()),
         "meanSaturation": float(sat.mean()),
         "edgeEnergy": float(dx + dy),

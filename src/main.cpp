@@ -1,8 +1,14 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <mmsystem.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <dxgi.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -12,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -19,27 +26,39 @@
 
 namespace {
 
+using Microsoft::WRL::ComPtr;
+
 constexpr int kFrameWidth = 960;
 constexpr int kFrameHeight = 540;
 constexpr int kSimulationGridWidth = 384;
 constexpr int kSimulationGridHeight = 240;
-constexpr int kRaymarchSteps = 72;
+constexpr int kRaymarchSteps = 104;
 constexpr int kEmberCount = 176;
-constexpr float kExposure = 0.92f;
-constexpr float kReflectionGain = 1.65f;
-constexpr float kSmokeDarkness = 1.85f;
+constexpr float kExposure = 0.84f;
+constexpr float kReflectionGain = 0.54f;
+constexpr float kSmokeDarkness = 1.26f;
 constexpr float kFireIntensity = 1.42f;
-constexpr float kSmokeGain = 1.35f;
+constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
-constexpr float kTargetFrameSeconds = 1.0f / 30.0f;
+constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
+constexpr float kWorkerMaxPublishFps = 180.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 2u;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV1";
+constexpr DWORD kSharedViewportVersion = 7u;
+constexpr int kSharedFrameSlots = 3;
+constexpr int kDisplayFrameSlots = 3;
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV7";
+constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
+constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
+    return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
+}
+constexpr const char* kSharedViewportBuildStampText = __DATE__ " " __TIME__;
+constexpr DWORD kSharedViewportBuildStamp = fnv1a32(kSharedViewportBuildStampText);
 constexpr unsigned long long kWorkerFrameStaleMs = 2200ull;
 constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
+constexpr int kWorkerPhysicsFrameInterval = 30;
 
 struct UiRect {
     int x;
@@ -67,8 +86,10 @@ constexpr UiRect kTurbulenceSliderRect = {790, 304, 130, 16};
 struct SharedViewportBuffer {
     DWORD magic;
     DWORD version;
+    DWORD buildStamp;
     DWORD width;
     DWORD height;
+    DWORD displayFormat;
     volatile LONG frameSequence;
     volatile LONG settingsSequence;
     volatile LONG shutdownRequested;
@@ -80,16 +101,51 @@ struct SharedViewportBuffer {
     unsigned long long workerHeartbeatTickMs;
     unsigned long long workerStartTickMs;
     unsigned long long workerStopTickMs;
+    unsigned long long sharedTextureHandleValue;
+    unsigned long long sharedTextureHandleValues[kSharedFrameSlots];
+    volatile LONG latestFrameSlot;
+    volatile LONG slotFrameSequences[kSharedFrameSlots];
+    unsigned long long workerFrameMicros;
+    unsigned long long workerCudaMicros;
+    unsigned long long workerPublishMicros;
     FireSettings settings;
     char statusText[192];
-    std::uint32_t pixels[kFrameWidth * kFrameHeight];
+};
+
+struct DisplayConstants {
+    float exposure;
+    float padding[3];
+};
+
+struct D3DDisplayState {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<IDXGISwapChain> swapChain;
+    ComPtr<ID3D11RenderTargetView> renderTargetView;
+    std::array<ComPtr<ID3D11Texture2D>, kSharedFrameSlots> sharedSimTextures;
+    std::array<ComPtr<IDXGIKeyedMutex>, kSharedFrameSlots> sharedSimMutexes;
+    std::array<HANDLE, kSharedFrameSlots> sharedSimHandles = {};
+    std::array<ComPtr<ID3D11Texture2D>, kDisplayFrameSlots> displaySimTextures;
+    std::array<ComPtr<ID3D11ShaderResourceView>, kDisplayFrameSlots> displaySimSrvs;
+    ComPtr<ID3D11Texture2D> uiTexture;
+    ComPtr<ID3D11ShaderResourceView> uiSrv;
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11VertexShader> vertexShader;
+    ComPtr<ID3D11PixelShader> simPixelShader;
+    ComPtr<ID3D11PixelShader> uiPixelShader;
+    ComPtr<ID3D11Buffer> displayConstants;
+    ComPtr<ID3D11BlendState> alphaBlend;
+    ComPtr<ID3D11Query> copyCompletionQuery;
+    int activeDisplaySimSlot = -1;
+    int nextDisplaySimSlot = 0;
+    bool initialized = false;
+    bool hasSimFrame = false;
 };
 
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
-std::vector<std::uint32_t> g_safeBaseFrame;
-BITMAPINFO g_bitmap = {};
+D3DDisplayState g_d3d;
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
 HANDLE g_cudaWorkerProcess = nullptr;
@@ -100,6 +156,7 @@ bool g_rightDown = false;
 bool g_orbiting = false;
 bool g_needsReset = false;
 bool g_showGizmos = true;
+bool g_cleanViewportMode = false;
 bool g_useCudaBackend = false;
 float g_mouseX = 0.5f;
 float g_mouseY = 0.10f;
@@ -114,18 +171,83 @@ float g_turbulence = 1.00f;
 float g_cameraYaw = 0.0f;
 float g_cameraPitch = 0.08f;
 float g_cameraDistance = 2.62f;
+float g_displayExposure = kExposure;
 int g_activeGizmo = 1;
+int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
-float g_safePreviewTime = 0.0f;
 bool g_cudaWorkerRequested = false;
 bool g_cudaWorkerFrameLive = false;
+LONG g_lastCopiedWorkerSequence = 0;
+float g_visualFps = 0.0f;
 unsigned long long g_lastWorkerStartTickMs = 0;
 unsigned long long g_workerRestartWindowStartMs = 0;
 unsigned long long g_workerRestartBlockedUntilMs = 0;
 int g_workerRestartCount = 0;
 int g_workerLastExitCode = 0;
 char g_workerUiStatus[192] = "worker not started";
+bool g_haveLastWorkerSettings = false;
+FireSettings g_lastWorkerSettings;
+bool g_haveLastOverlaySettings = false;
+FireSettings g_lastOverlaySettings;
+bool g_lastOverlayCudaBackend = false;
+bool g_lastOverlayCleanViewport = false;
+char g_lastOverlayStatus[sizeof(g_workerUiStatus)] = {};
+unsigned long long g_liveCopyCalls = 0;
+unsigned long long g_liveCopiedFrames = 0;
+unsigned long long g_livePresentCalls = 0;
+unsigned long long g_livePresentFailures = 0;
+unsigned long long g_liveCopyMicros = 0;
+unsigned long long g_livePresentMicros = 0;
+double g_liveCopyCallHz = 0.0;
+double g_liveCopiedHz = 0.0;
+double g_livePresentHz = 0.0;
+double g_liveIntervalCopyMs = 0.0;
+double g_liveIntervalPresentMs = 0.0;
+bool g_useNonBlockingPresent = true;
+
+bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
+    return a.width == b.width &&
+        a.height == b.height &&
+        a.mouseX == b.mouseX &&
+        a.mouseY == b.mouseY &&
+        a.leftDown == b.leftDown &&
+        a.rightDown == b.rightDown &&
+        a.reset == b.reset &&
+        a.showGizmos == b.showGizmos &&
+        a.activeGizmo == b.activeGizmo &&
+        a.wind == b.wind &&
+        a.turbulence == b.turbulence &&
+        a.detail == b.detail &&
+        a.smoke == b.smoke &&
+        a.intensity == b.intensity &&
+        a.cameraYaw == b.cameraYaw &&
+        a.cameraPitch == b.cameraPitch &&
+        a.cameraDistance == b.cameraDistance &&
+        a.cinematicMode == b.cinematicMode &&
+        a.raymarchSteps == b.raymarchSteps &&
+        a.emberCount == b.emberCount &&
+        a.renderDebugMode == b.renderDebugMode &&
+        a.exposure == b.exposure &&
+        a.reflectionGain == b.reflectionGain &&
+        a.smokeDarkness == b.smokeDarkness;
+}
+
+bool overlayStateDirty(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    return !g_haveLastOverlaySettings ||
+        !sameFireSettings(g_lastOverlaySettings, settings) ||
+        g_lastOverlayCudaBackend != cudaBackend ||
+        g_lastOverlayCleanViewport != cleanViewport ||
+        std::strncmp(g_lastOverlayStatus, g_workerUiStatus, sizeof(g_lastOverlayStatus)) != 0;
+}
+
+void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    g_lastOverlaySettings = settings;
+    g_lastOverlayCudaBackend = cudaBackend;
+    g_lastOverlayCleanViewport = cleanViewport;
+    std::snprintf(g_lastOverlayStatus, sizeof(g_lastOverlayStatus), "%s", g_workerUiStatus);
+    g_haveLastOverlaySettings = true;
+}
 
 float clamp01(float v) {
     return std::max(0.0f, std::min(1.0f, v));
@@ -148,17 +270,16 @@ float smoothstepf(float edge0, float edge1, float x) {
     return inverted ? 1.0f - value : value;
 }
 
-std::uint32_t packBgra(float r, float g, float b) {
+std::uint32_t packBgra(float r, float g, float b, float alpha = 1.0f) {
     const auto ri = static_cast<std::uint32_t>(clamp01(r) * 255.0f);
     const auto gi = static_cast<std::uint32_t>(clamp01(g) * 255.0f);
     const auto bi = static_cast<std::uint32_t>(clamp01(b) * 255.0f);
-    return 0xff000000u | (ri << 16) | (gi << 8) | bi;
+    const auto ai = static_cast<std::uint32_t>(clamp01(alpha) * 255.0f);
+    return (ai << 24) | (ri << 16) | (gi << 8) | bi;
 }
 
-void unpackBgra(std::uint32_t pixel, float* r, float* g, float* b) {
-    *r = static_cast<float>((pixel >> 16) & 0xff) / 255.0f;
-    *g = static_cast<float>((pixel >> 8) & 0xff) / 255.0f;
-    *b = static_cast<float>(pixel & 0xff) / 255.0f;
+void clearSimulationFrame(std::vector<std::uint32_t>& pixels) {
+    pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.006f, 0.007f, 0.008f));
 }
 
 void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
@@ -166,14 +287,18 @@ void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float
         return;
     }
     const std::uint32_t dst = pixels[static_cast<std::size_t>(y) * kFrameWidth + x];
+    const float da = static_cast<float>((dst >> 24) & 0xff) / 255.0f;
     const float dr = static_cast<float>((dst >> 16) & 0xff) / 255.0f;
     const float dg = static_cast<float>((dst >> 8) & 0xff) / 255.0f;
     const float db = static_cast<float>(dst & 0xff) / 255.0f;
     alpha = clamp01(alpha);
+    const float outA = alpha + da * (1.0f - alpha);
+    const float invOutA = outA > 0.000001f ? 1.0f / outA : 0.0f;
     pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(
-        mixf(dr, r, alpha),
-        mixf(dg, g, alpha),
-        mixf(db, b, alpha));
+        (r * alpha + dr * da * (1.0f - alpha)) * invOutA,
+        (g * alpha + dg * da * (1.0f - alpha)) * invOutA,
+        (b * alpha + db * da * (1.0f - alpha)) * invOutA,
+        outA);
 }
 
 bool contains(const UiRect& rect, int x, int y) {
@@ -186,7 +311,7 @@ void fillRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r, f
     const int x1 = std::min(kFrameWidth, rect.x + rect.w);
     const int y1 = std::min(kFrameHeight, rect.y + rect.h);
     if (alpha >= 0.999f) {
-        const std::uint32_t packed = packBgra(r, g, b);
+        const std::uint32_t packed = packBgra(r, g, b, alpha);
         for (int y = y0; y < y1; ++y) {
             std::fill(
                 pixels.begin() + static_cast<std::ptrdiff_t>(y * kFrameWidth + x0),
@@ -385,6 +510,18 @@ const char* toolName(int tool) {
     }
 }
 
+const char* renderDebugName(int mode) {
+    switch (mode) {
+    case 1: return "FLAME";
+    case 2: return "SOOT";
+    case 3: return "TRANS";
+    case 4: return "TEMP";
+    case 5: return "FUEL";
+    case 6: return "VEL";
+    default: return "FINAL";
+    }
+}
+
 void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
     const bool active = activeTool == tool;
     fillRect(pixels, rect, active ? 0.105f : 0.048f, active ? 0.059f : 0.050f, active ? 0.037f : 0.052f, 1.0f);
@@ -459,10 +596,10 @@ void drawViewportOverlays(std::vector<std::uint32_t>& pixels, const FireSettings
     drawLinePx(pixels, ax, ay, ax - 30, ay + 20, 0.20f, 0.42f, 1.0f, 0.86f);
 }
 
-void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend) {
-    std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
-
-    blitViewport(pixels, simPixels);
+void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    if (cleanViewport) {
+        return;
+    }
 
     fillRect(pixels, kRailRect, 0.020f, 0.022f, 0.022f, 0.74f);
     fillRect(pixels, kTopBarRect, 0.018f, 0.019f, 0.019f, 0.70f);
@@ -476,7 +613,7 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
     drawViewportOverlays(pixels, settings);
 
     drawText(pixels, 30, 26, "NATIVE FIRESIM", 1, 0.88f, 0.90f, 0.84f, 0.96f);
-    drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D VOLUME" : "SAFE ANIMATED PREVIEW", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
+    drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D FP16 D3D" : "NO LIVE CUDA FRAME", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
     drawText(pixels, 628, 26, cudaBackend ? "RMB ORBIT   WHEEL ZOOM" : "NO CUSTOM CUDA KERNELS", 1, 0.70f, 0.72f, 0.68f, 0.88f);
 
     drawCenteredText(pixels, {kRailRect.x, 78, kRailRect.w, 14}, "TOOLS", 1, 0.60f, 0.62f, 0.58f, 0.82f);
@@ -509,13 +646,25 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   ARROWS WIND/TURB   G OVERLAY   R RESET   ESC QUIT" : "SAFE FALLBACK PREVIEW   WORKER STARTING/STALE   ARROWS WIND/TURB   ESC QUIT",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "NO LIVE CUDA FRAME   WORKER STARTING/STALE   D DEBUG   C CLEAN",
         1,
         0.76f,
         0.78f,
         0.72f,
         0.88f);
-    drawClippedText(pixels, 276, 506, g_workerUiStatus, 82, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
+    drawText(pixels, 276, 506, renderDebugName(settings.renderDebugMode), 1, 0.86f, 0.84f, 0.62f, 0.88f);
+    drawClippedText(pixels, 330, 506, g_workerUiStatus, 74, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
+}
+
+void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
+    std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
+    blitViewport(pixels, simPixels);
+    drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
+}
+
+void composeD3DOverlayFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    std::fill(pixels.begin(), pixels.end(), 0u);
+    drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
 }
 
 int hitTestToolButton(int frameX, int frameY) {
@@ -573,16 +722,515 @@ void updateMouseFromLParam(LPARAM lParam) {
 
 void updateTitle(float fps) {
     char title[256] = {};
+    const double headlineFps = (g_useCudaBackend && g_livePresentHz > 0.0) ? g_livePresentHz : static_cast<double>(fps);
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | %.0f fps | %s | wind %.2f | turbulence %.2f | full viewport",
-        g_useCudaBackend ? "CUDA 3D volume" : "safe animated preview",
-        fps,
+        "Native FireSim %s | %.0f fps | %s | debug %s | wind %.2f | turbulence %.2f | %.64s",
+        g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
+        headlineFps,
         toolName(g_activeGizmo),
+        renderDebugName(g_renderDebugMode),
         g_wind,
-        g_turbulence);
+        g_turbulence,
+        g_workerUiStatus);
     SetWindowTextA(g_window, title);
+}
+
+std::string hresultString(HRESULT hr) {
+    char text[32] = {};
+    std::snprintf(text, sizeof(text), "0x%08lx", static_cast<unsigned long>(hr));
+    return text;
+}
+
+bool waitForD3DCompletion(ID3D11DeviceContext* context, ID3D11Query* query) {
+    if (context == nullptr || query == nullptr) {
+        return false;
+    }
+    context->End(query);
+    context->Flush();
+    for (;;) {
+        const HRESULT hr = context->GetData(query, nullptr, 0, 0);
+        if (hr == S_OK) {
+            return true;
+        }
+        if (hr != S_FALSE) {
+            return false;
+        }
+        Sleep(0);
+    }
+}
+
+bool createD3DDevice(ComPtr<ID3D11Device>& device, ComPtr<ID3D11DeviceContext>& context) {
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.GetAddressOf())))) {
+        return false;
+    }
+
+    ComPtr<IDXGIAdapter1> bestAdapter;
+    SIZE_T bestMemory = 0;
+    for (UINT i = 0;; ++i) {
+        ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(i, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            continue;
+        }
+        if (desc.DedicatedVideoMemory >= bestMemory) {
+            bestMemory = desc.DedicatedVideoMemory;
+            bestAdapter = adapter;
+        }
+    }
+
+    constexpr D3D_FEATURE_LEVEL kFeatureLevels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+    };
+    D3D_FEATURE_LEVEL createdLevel = D3D_FEATURE_LEVEL_10_0;
+    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = E_FAIL;
+    if (bestAdapter != nullptr) {
+        hr = D3D11CreateDevice(
+            bestAdapter.Get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            flags,
+            kFeatureLevels,
+            static_cast<UINT>(sizeof(kFeatureLevels) / sizeof(kFeatureLevels[0])),
+            D3D11_SDK_VERSION,
+            device.GetAddressOf(),
+            &createdLevel,
+            context.GetAddressOf());
+    }
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            flags,
+            kFeatureLevels,
+            static_cast<UINT>(sizeof(kFeatureLevels) / sizeof(kFeatureLevels[0])),
+            D3D11_SDK_VERSION,
+            device.GetAddressOf(),
+            &createdLevel,
+            context.GetAddressOf());
+    }
+    return SUCCEEDED(hr);
+}
+
+bool compileShader(const char* source, const char* entry, const char* target, ComPtr<ID3DBlob>& blob) {
+    ComPtr<ID3DBlob> errors;
+    const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    const HRESULT hr = D3DCompile(
+        source,
+        std::strlen(source),
+        nullptr,
+        nullptr,
+        nullptr,
+        entry,
+        target,
+        flags,
+        0,
+        blob.GetAddressOf(),
+        errors.GetAddressOf());
+    if (FAILED(hr)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader compile failed: %s", hresultString(hr).c_str());
+        return false;
+    }
+    return true;
+}
+
+const char* d3dShaderSource() {
+    return R"HLSL(
+struct VSOut {
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+VSOut FullscreenVS(uint id : SV_VertexID) {
+    float2 pos[3] = {
+        float2(-1.0, -1.0),
+        float2(-1.0,  3.0),
+        float2( 3.0, -1.0)
+    };
+    VSOut outp;
+    outp.pos = float4(pos[id], 0.0, 1.0);
+    outp.uv = float2(pos[id].x * 0.5 + 0.5, 0.5 - pos[id].y * 0.5);
+    return outp;
+}
+
+Texture2D<float4> FrameTex : register(t0);
+SamplerState LinearSampler : register(s0);
+
+cbuffer DisplayConstants : register(b0) {
+    float Exposure;
+    float3 _Padding;
+}
+
+float Luma(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+float AcesCurve(float v) {
+    return saturate((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14));
+}
+
+float3 ToneMapPreserveHue(float3 c) {
+    float l = max(0.000001, Luma(c));
+    return c * (AcesCurve(l) / l);
+}
+
+float3 CameraResponse(float3 radiance) {
+    float3 color = ToneMapPreserveHue(max(radiance, 0.0) * Exposure);
+    float l = Luma(color);
+    float toe = smoothstep(0.000, 0.055, l);
+    float shoulder = smoothstep(0.74, 1.0, l);
+    color = lerp(color * 0.82, color, toe);
+    color = lerp(color, color / max(1.0, l / 0.88), shoulder * 0.18);
+    return pow(saturate(color), 1.0 / 2.2);
+}
+
+float4 SimPS(VSOut input) : SV_TARGET {
+    float3 radiance = max(FrameTex.Sample(LinearSampler, input.uv).rgb, 0.0);
+    return float4(CameraResponse(radiance), 1.0);
+}
+
+float4 UiPS(VSOut input) : SV_TARGET {
+    return FrameTex.Sample(LinearSampler, input.uv);
+}
+)HLSL";
+}
+
+bool initializeD3D(HWND hwnd) {
+    if (g_d3d.initialized) {
+        return true;
+    }
+    if (!createD3DDevice(g_d3d.device, g_d3d.context)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 device creation failed");
+        return false;
+    }
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIFactory> factory;
+    if (FAILED(g_d3d.device.As(&dxgiDevice)) ||
+        FAILED(dxgiDevice->GetAdapter(adapter.GetAddressOf())) ||
+        FAILED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(factory.GetAddressOf())))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 DXGI factory lookup failed");
+        return false;
+    }
+
+    HRESULT hr = E_FAIL;
+    ComPtr<IDXGIFactory2> factory2;
+    if (SUCCEEDED(factory.As(&factory2))) {
+        DXGI_SWAP_CHAIN_DESC1 flipDesc = {};
+        flipDesc.Width = kFrameWidth;
+        flipDesc.Height = kFrameHeight;
+        flipDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        flipDesc.SampleDesc.Count = 1;
+        flipDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        flipDesc.BufferCount = 3;
+        flipDesc.Scaling = DXGI_SCALING_STRETCH;
+        flipDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        flipDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        ComPtr<IDXGISwapChain1> swapChain1;
+        hr = factory2->CreateSwapChainForHwnd(
+            g_d3d.device.Get(),
+            hwnd,
+            &flipDesc,
+            nullptr,
+            nullptr,
+            swapChain1.GetAddressOf());
+        if (SUCCEEDED(hr)) {
+            hr = swapChain1.As(&g_d3d.swapChain);
+        }
+    }
+    if (FAILED(hr)) {
+        DXGI_SWAP_CHAIN_DESC swapDesc = {};
+        swapDesc.BufferDesc.Width = kFrameWidth;
+        swapDesc.BufferDesc.Height = kFrameHeight;
+        swapDesc.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        swapDesc.BufferDesc.RefreshRate.Numerator = 0;
+        swapDesc.BufferDesc.RefreshRate.Denominator = 1;
+        swapDesc.SampleDesc.Count = 1;
+        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        swapDesc.BufferCount = 2;
+        swapDesc.OutputWindow = hwnd;
+        swapDesc.Windowed = TRUE;
+        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        hr = factory->CreateSwapChain(g_d3d.device.Get(), &swapDesc, g_d3d.swapChain.GetAddressOf());
+    }
+    if (FAILED(hr)) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "FP16 swapchain failed: %s", hresultString(hr).c_str());
+        return false;
+    }
+    factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    ComPtr<ID3D11Texture2D> backBuffer;
+    hr = g_d3d.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(backBuffer.GetAddressOf()));
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateRenderTargetView(backBuffer.Get(), nullptr, g_d3d.renderTargetView.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 render target setup failed");
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC simDesc = {};
+    simDesc.Width = kFrameWidth;
+    simDesc.Height = kFrameHeight;
+    simDesc.MipLevels = 1;
+    simDesc.ArraySize = 1;
+    simDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    simDesc.SampleDesc.Count = 1;
+    simDesc.Usage = D3D11_USAGE_DEFAULT;
+    simDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    for (int slot = 0; slot < kDisplayFrameSlots; ++slot) {
+        hr = g_d3d.device->CreateTexture2D(&simDesc, nullptr, g_d3d.displaySimTextures[slot].GetAddressOf());
+        if (FAILED(hr) || FAILED(g_d3d.device->CreateShaderResourceView(g_d3d.displaySimTextures[slot].Get(), nullptr, g_d3d.displaySimSrvs[slot].GetAddressOf()))) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "private FP16 display texture ring failed");
+            return false;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC uiDesc = {};
+    uiDesc.Width = kFrameWidth;
+    uiDesc.Height = kFrameHeight;
+    uiDesc.MipLevels = 1;
+    uiDesc.ArraySize = 1;
+    uiDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    uiDesc.SampleDesc.Count = 1;
+    uiDesc.Usage = D3D11_USAGE_DEFAULT;
+    uiDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = g_d3d.device->CreateTexture2D(&uiDesc, nullptr, g_d3d.uiTexture.GetAddressOf());
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateShaderResourceView(g_d3d.uiTexture.Get(), nullptr, g_d3d.uiSrv.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D UI texture failed");
+        return false;
+    }
+
+    D3D11_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(g_d3d.device->CreateSamplerState(&samplerDesc, g_d3d.sampler.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D sampler creation failed");
+        return false;
+    }
+
+    ComPtr<ID3DBlob> vsBlob;
+    ComPtr<ID3DBlob> simPsBlob;
+    ComPtr<ID3DBlob> uiPsBlob;
+    if (!compileShader(d3dShaderSource(), "FullscreenVS", "vs_5_0", vsBlob) ||
+        !compileShader(d3dShaderSource(), "SimPS", "ps_5_0", simPsBlob) ||
+        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob)) {
+        return false;
+    }
+    if (FAILED(g_d3d.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, g_d3d.vertexShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreatePixelShader(simPsBlob->GetBufferPointer(), simPsBlob->GetBufferSize(), nullptr, g_d3d.simPixelShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader creation failed");
+        return false;
+    }
+
+    D3D11_BUFFER_DESC constantsDesc = {};
+    constantsDesc.ByteWidth = sizeof(DisplayConstants);
+    constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+    constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(g_d3d.device->CreateBuffer(&constantsDesc, nullptr, g_d3d.displayConstants.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D constants buffer failed");
+        return false;
+    }
+
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(g_d3d.device->CreateBlendState(&blendDesc, g_d3d.alphaBlend.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D alpha blend creation failed");
+        return false;
+    }
+
+    D3D11_QUERY_DESC queryDesc = {};
+    queryDesc.Query = D3D11_QUERY_EVENT;
+    if (FAILED(g_d3d.device->CreateQuery(&queryDesc, g_d3d.copyCompletionQuery.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D copy completion query creation failed");
+        return false;
+    }
+
+    g_d3d.initialized = true;
+    return true;
+}
+
+bool copyD3DWorkerFrame() {
+    if (!g_d3d.initialized || g_sharedViewport == nullptr || g_d3d.displaySimTextures[0] == nullptr) {
+        return false;
+    }
+
+    bool openedAny = false;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        const auto handleValue = static_cast<uintptr_t>(g_sharedViewport->sharedTextureHandleValues[slot]);
+        if (handleValue == 0) {
+            continue;
+        }
+        if (g_d3d.sharedSimTextures[slot] != nullptr &&
+            reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandles[slot]) == handleValue) {
+            openedAny = true;
+            continue;
+        }
+        g_d3d.sharedSimTextures[slot].Reset();
+        g_d3d.sharedSimMutexes[slot].Reset();
+        g_d3d.sharedSimHandles[slot] = reinterpret_cast<HANDLE>(handleValue);
+        const HRESULT hr = g_d3d.device->OpenSharedResource(
+            g_d3d.sharedSimHandles[slot],
+            __uuidof(ID3D11Texture2D),
+            reinterpret_cast<void**>(g_d3d.sharedSimTextures[slot].GetAddressOf()));
+        if (FAILED(hr) || FAILED(g_d3d.sharedSimTextures[slot].As(&g_d3d.sharedSimMutexes[slot]))) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "host open worker FP16 slot %d failed: %s", slot, hresultString(hr).c_str());
+            g_d3d.sharedSimTextures[slot].Reset();
+            g_d3d.sharedSimMutexes[slot].Reset();
+            g_d3d.sharedSimHandles[slot] = nullptr;
+            return false;
+        }
+        openedAny = true;
+        g_d3d.hasSimFrame = false;
+        g_lastCopiedWorkerSequence = 0;
+    }
+    if (!openedAny) {
+        return false;
+    }
+
+    int copiedSlot = -1;
+    LONG copiedSequence = g_lastCopiedWorkerSequence;
+    bool skipped[kSharedFrameSlots] = {};
+    for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
+        int newestSlot = -1;
+        LONG newestSequence = g_lastCopiedWorkerSequence;
+        for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+            const LONG sequence = g_sharedViewport->slotFrameSequences[slot];
+            if (skipped[slot] ||
+                sequence <= 0 ||
+                (sequence & 1) != 0 ||
+                g_d3d.sharedSimMutexes[slot] == nullptr ||
+                g_d3d.sharedSimTextures[slot] == nullptr) {
+                continue;
+            }
+            if (sequence > newestSequence) {
+                newestSlot = slot;
+                newestSequence = sequence;
+            }
+        }
+        if (newestSlot < 0) {
+            break;
+        }
+
+        const HRESULT acquire = g_d3d.sharedSimMutexes[newestSlot]->AcquireSync(1, 0);
+        if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+            skipped[newestSlot] = true;
+            continue;
+        }
+        if (FAILED(acquire)) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shared frame acquire failed: %s", hresultString(acquire).c_str());
+            return false;
+        }
+
+        const LONG sequenceB = g_sharedViewport->slotFrameSequences[newestSlot];
+        const bool copyCandidate = sequenceB == newestSequence && (sequenceB & 1) == 0 && sequenceB > g_lastCopiedWorkerSequence;
+        if (copyCandidate) {
+            int targetSlot = g_d3d.nextDisplaySimSlot;
+            if (targetSlot == g_d3d.activeDisplaySimSlot) {
+                targetSlot = (targetSlot + 1) % kDisplayFrameSlots;
+            }
+            g_d3d.context->CopyResource(g_d3d.displaySimTextures[targetSlot].Get(), g_d3d.sharedSimTextures[newestSlot].Get());
+            g_d3d.activeDisplaySimSlot = targetSlot;
+            g_d3d.nextDisplaySimSlot = (targetSlot + 1) % kDisplayFrameSlots;
+            copiedSlot = newestSlot;
+            copiedSequence = sequenceB;
+        }
+
+        const HRESULT release = g_d3d.sharedSimMutexes[newestSlot]->ReleaseSync(0);
+        if (FAILED(release)) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shared frame release failed: %s", hresultString(release).c_str());
+            return false;
+        }
+        if (copyCandidate) {
+            break;
+        }
+        skipped[newestSlot] = true;
+    }
+    if (copiedSlot < 0) {
+        return false;
+    }
+
+    g_lastCopiedWorkerSequence = copiedSequence;
+    g_d3d.hasSimFrame = true;
+    return true;
+}
+
+bool renderD3DFrame(bool drawSim, float exposure) {
+    if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
+        return false;
+    }
+    g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
+
+    const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
+    g_d3d.context->OMSetRenderTargets(1, renderTargets, nullptr);
+    g_d3d.context->ClearRenderTargetView(g_d3d.renderTargetView.Get(), clearColor);
+
+    D3D11_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(kFrameWidth);
+    viewport.Height = static_cast<float>(kFrameHeight);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    g_d3d.context->RSSetViewports(1, &viewport);
+    g_d3d.context->IASetInputLayout(nullptr);
+    g_d3d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
+    ID3D11SamplerState* samplers[] = {g_d3d.sampler.Get()};
+    g_d3d.context->PSSetSamplers(0, 1, samplers);
+
+    if (drawSim && g_d3d.hasSimFrame) {
+        DisplayConstants constants = {};
+        constants.exposure = exposure;
+        g_d3d.context->UpdateSubresource(g_d3d.displayConstants.Get(), 0, nullptr, &constants, 0, 0);
+        ID3D11Buffer* constantBuffers[] = {g_d3d.displayConstants.Get()};
+        ID3D11ShaderResourceView* simView =
+            g_d3d.activeDisplaySimSlot >= 0 && g_d3d.activeDisplaySimSlot < kDisplayFrameSlots
+                ? g_d3d.displaySimSrvs[g_d3d.activeDisplaySimSlot].Get()
+                : nullptr;
+        ID3D11ShaderResourceView* simSrvs[] = {simView};
+        g_d3d.context->PSSetConstantBuffers(0, 1, constantBuffers);
+        g_d3d.context->PSSetShaderResources(0, 1, simSrvs);
+        g_d3d.context->PSSetShader(g_d3d.simPixelShader.Get(), nullptr, 0);
+        g_d3d.context->Draw(3, 0);
+        ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+        g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
+    }
+
+    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
+    ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
+    g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
+    g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
+    g_d3d.context->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+    g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
+    g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
+
+    HRESULT present = g_d3d.swapChain->Present(0, g_useNonBlockingPresent ? DXGI_PRESENT_DO_NOT_WAIT : 0);
+    if (present == DXGI_ERROR_INVALID_CALL && g_useNonBlockingPresent) {
+        g_useNonBlockingPresent = false;
+        present = g_d3d.swapChain->Present(0, 0);
+    }
+    return SUCCEEDED(present);
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -674,6 +1322,14 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_showGizmos = !g_showGizmos;
             return 0;
         }
+        if (wParam == 'C') {
+            g_cleanViewportMode = !g_cleanViewportMode;
+            return 0;
+        }
+        if (wParam == 'D') {
+            g_renderDebugMode = (g_renderDebugMode + 1) % 7;
+            return 0;
+        }
         if (wParam >= '1' && wParam <= '4') {
             g_activeGizmo = static_cast<int>(wParam - '0');
             return 0;
@@ -697,22 +1353,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps = {};
-        HDC dc = BeginPaint(hwnd, &ps);
-        SetStretchBltMode(dc, HALFTONE);
-        StretchDIBits(
-            dc,
-            0,
-            0,
-            std::max(1, g_clientW),
-            std::max(1, g_clientH),
-            0,
-            0,
-            kFrameWidth,
-            kFrameHeight,
-            g_frame.data(),
-            &g_bitmap,
-            DIB_RGB_COLORS,
-            SRCCOPY);
+        BeginPaint(hwnd, &ps);
+        renderD3DFrame(g_useCudaBackend, g_displayExposure);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -757,15 +1399,6 @@ bool createMainWindow(HINSTANCE instance) {
     return g_window != nullptr;
 }
 
-void initializeBitmapInfo() {
-    g_bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    g_bitmap.bmiHeader.biWidth = kFrameWidth;
-    g_bitmap.bmiHeader.biHeight = -kFrameHeight;
-    g_bitmap.bmiHeader.biPlanes = 1;
-    g_bitmap.bmiHeader.biBitCount = 32;
-    g_bitmap.bmiHeader.biCompression = BI_RGB;
-}
-
 bool writeBmp(const char* path, const std::vector<std::uint32_t>& pixels, int width, int height) {
     BITMAPFILEHEADER fileHeader = {};
     BITMAPINFOHEADER infoHeader = {};
@@ -793,163 +1426,62 @@ bool writeBmp(const char* path, const std::vector<std::uint32_t>& pixels, int wi
     return out.good();
 }
 
-bool loadBmp(const char* path, std::vector<std::uint32_t>& pixels, int width, int height) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return false;
-    }
-
-    BITMAPFILEHEADER fileHeader = {};
-    BITMAPINFOHEADER infoHeader = {};
-    in.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
-    in.read(reinterpret_cast<char*>(&infoHeader), sizeof(infoHeader));
-    if (!in || fileHeader.bfType != 0x4d42 || infoHeader.biBitCount != 32 || infoHeader.biCompression != BI_RGB) {
-        return false;
-    }
-    if (infoHeader.biWidth != width || std::abs(infoHeader.biHeight) != height) {
-        return false;
-    }
-
-    std::vector<std::uint32_t> loaded(static_cast<std::size_t>(width) * height, 0xff000000u);
-    in.seekg(fileHeader.bfOffBits, std::ios::beg);
-    if (infoHeader.biHeight < 0) {
-        in.read(reinterpret_cast<char*>(loaded.data()), static_cast<std::streamsize>(loaded.size() * sizeof(std::uint32_t)));
-    } else {
-        for (int y = height - 1; y >= 0; --y) {
-            in.read(
-                reinterpret_cast<char*>(loaded.data() + static_cast<std::size_t>(y) * width),
-                static_cast<std::streamsize>(static_cast<std::size_t>(width) * sizeof(std::uint32_t)));
+std::string normalizePathSeparators(std::string path) {
+    for (char& c : path) {
+        if (c == '/') {
+            c = '\\';
         }
     }
-    if (!in) {
+    while (path.size() > 1 && (path.back() == '\\' || path.back() == '/')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+bool ensureDirectoryTree(const std::string& directory) {
+    if (directory.empty()) {
         return false;
     }
-    pixels.swap(loaded);
+    const std::string path = normalizePathSeparators(directory);
+    std::string partial;
+    std::size_t start = 0;
+    if (path.size() >= 3 && path[1] == ':' && path[2] == '\\') {
+        partial = path.substr(0, 3);
+        start = 3;
+    }
+    while (start < path.size()) {
+        const std::size_t slash = path.find('\\', start);
+        const std::size_t end = slash == std::string::npos ? path.size() : slash;
+        if (end > start) {
+            if (!partial.empty() && partial.back() != '\\') {
+                partial += '\\';
+            }
+            partial += path.substr(start, end - start);
+            if (!CreateDirectoryA(partial.c_str(), nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_ALREADY_EXISTS) {
+                    return false;
+                }
+            }
+        }
+        if (slash == std::string::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
     return true;
 }
 
-void prepareSafeViewportFrame(std::vector<std::uint32_t>& pixels) {
-    if (loadBmp("out\\validation-frame.bmp", pixels, kFrameWidth, kFrameHeight) ||
-        loadBmp("out\\cuda-smoke-test-frame.bmp", pixels, kFrameWidth, kFrameHeight)) {
-        return;
+std::string joinPath(const std::string& directory, const char* filename) {
+    if (directory.empty()) {
+        return filename;
     }
-
-    pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.012f, 0.013f, 0.013f));
-    for (int y = 0; y < kFrameHeight; ++y) {
-        const float v = static_cast<float>(y) / static_cast<float>(std::max(1, kFrameHeight - 1));
-        for (int x = 0; x < kFrameWidth; ++x) {
-            const float u = static_cast<float>(x) / static_cast<float>(std::max(1, kFrameWidth - 1));
-            const float tray = std::exp(-((u - 0.50f) * (u - 0.50f) / 0.070f + (v - 0.76f) * (v - 0.76f) / 0.010f));
-            const float floor = std::max(0.0f, (v - 0.62f) * 0.22f);
-            pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(
-                0.014f + tray * 0.13f + floor,
-                0.015f + tray * 0.050f + floor * 0.80f,
-                0.014f + tray * 0.018f + floor * 0.58f);
-        }
+    std::string path = normalizePathSeparators(directory);
+    if (!path.empty() && path.back() != '\\') {
+        path += '\\';
     }
-}
-
-std::uint32_t sampleSafeFrame(const std::vector<std::uint32_t>& source, float x, float y) {
-    const int ix = static_cast<int>(clampf(x, 0.0f, static_cast<float>(kFrameWidth - 1)));
-    const int iy = static_cast<int>(clampf(y, 0.0f, static_cast<float>(kFrameHeight - 1)));
-    return source[static_cast<std::size_t>(iy) * kFrameWidth + ix];
-}
-
-float hashFloat(int value) {
-    std::uint32_t x = static_cast<std::uint32_t>(value);
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
-}
-
-void renderSafeAnimatedViewport(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& source, const FireSettings& settings, float timeSeconds) {
-    if (source.size() < static_cast<std::size_t>(kFrameWidth * kFrameHeight)) {
-        pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.012f, 0.013f, 0.013f));
-        return;
-    }
-    if (pixels.size() != source.size()) {
-        pixels.resize(source.size());
-    }
-
-    const float wind = clampf(settings.wind, -1.0f, 1.0f);
-    const float turbulence = clampf(settings.turbulence, 0.05f, 1.85f);
-    const float yaw = settings.cameraYaw;
-    const float pitch = settings.cameraPitch;
-    const float zoom = clampf(3.0f / std::max(1.0f, settings.cameraDistance), 0.68f, 1.42f);
-    const float orbitX = std::sin(yaw) * 82.0f;
-    const float orbitY = pitch * 150.0f;
-    const float centerX = static_cast<float>(kFrameWidth) * 0.5f;
-    const float centerY = static_cast<float>(kFrameHeight) * 0.54f;
-    for (int y = 0; y < kFrameHeight; ++y) {
-        const float yf = static_cast<float>(y);
-        const float vertical = static_cast<float>(y) / static_cast<float>(kFrameHeight);
-        for (int x = 0; x < kFrameWidth; ++x) {
-            const float xf = static_cast<float>(x);
-            const float normalizedX = (xf - centerX) / std::max(0.001f, zoom);
-            const float normalizedY = (yf - centerY) / std::max(0.001f, zoom);
-            const float parallax = 0.35f + vertical * 0.85f;
-            const float viewX = centerX + normalizedX - orbitX * parallax;
-            const float viewY = centerY + normalizedY + orbitY;
-
-            float br = 0.0f;
-            float bg = 0.0f;
-            float bb = 0.0f;
-            unpackBgra(sampleSafeFrame(source, viewX, viewY), &br, &bg, &bb);
-            const float luma = br * 0.2126f + bg * 0.7152f + bb * 0.0722f;
-            const float chroma = std::max(br, std::max(bg, bb)) - std::min(br, std::min(bg, bb));
-            const float warm = clamp01((br - bg * 0.82f) * 3.2f + (bg - bb) * 1.1f + luma * 0.32f);
-            const float smoke = clamp01((0.52f - luma) * 1.35f + (0.26f - chroma) * 1.1f);
-            const float hot = clamp01((luma - 0.35f) * 2.8f + warm * 0.28f);
-            const float flameMask = warm * hot * smoothstepf(0.92f, 0.08f, vertical);
-            const float smokeMask = smoke * smoothstepf(0.18f, 0.90f, vertical);
-            const float fireLift = flameMask * (1.0f - vertical) * (1.0f + turbulence * 0.45f);
-
-            const float waveA = std::sin(viewY * 0.060f + timeSeconds * (6.0f + turbulence * 2.2f));
-            const float waveB = std::sin((viewX + viewY) * 0.034f - timeSeconds * (9.0f + turbulence * 2.6f));
-            const float waveC = std::sin(viewX * 0.041f - timeSeconds * (5.2f + turbulence * 1.4f));
-            const float waveD = std::sin((viewX - viewY) * 0.027f + timeSeconds * 13.0f);
-            const float sx =
-                viewX -
-                wind * (flameMask * 18.0f + smokeMask * 22.0f) -
-                waveA * (flameMask * 13.0f + smokeMask * 3.8f) -
-                waveB * flameMask * 9.0f -
-                waveD * fireLift * 5.0f;
-            const float sy =
-                viewY +
-                waveC * (flameMask * 13.5f + smokeMask * 4.0f) +
-                std::sin(timeSeconds * 15.0f + viewX * 0.050f) * flameMask * 5.6f -
-                fireLift * (7.0f + 5.0f * std::sin(timeSeconds * 4.7f + viewX * 0.018f));
-
-            float r = 0.0f;
-            float g = 0.0f;
-            float b = 0.0f;
-            unpackBgra(sampleSafeFrame(source, sx, sy), &r, &g, &b);
-            const float flicker =
-                1.0f +
-                flameMask * (0.14f * std::sin(timeSeconds * 17.0f + viewX * 0.043f) + 0.09f * std::sin(timeSeconds * 25.0f + viewY * 0.067f)) -
-                smokeMask * 0.035f * std::sin(timeSeconds * 2.4f + viewX * 0.012f);
-            r += flameMask * 0.045f * (0.5f + 0.5f * std::sin(timeSeconds * 21.0f + viewY * 0.073f));
-            g += flameMask * 0.018f * (0.5f + 0.5f * std::sin(timeSeconds * 18.0f + viewX * 0.049f));
-            pixels[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(r * flicker, g * flicker, b * flicker);
-        }
-    }
-
-    const int emberCount = 76;
-    for (int i = 0; i < emberCount; ++i) {
-        const float seedA = hashFloat(i * 17 + 3);
-        const float seedB = hashFloat(i * 31 + 9);
-        const float seedC = hashFloat(i * 47 + 15);
-        const float life = std::fmod(timeSeconds * (0.10f + seedC * 0.16f) + seedB, 1.0f);
-        const float emberZoom = clampf(zoom, 0.72f, 1.30f);
-        const int x = static_cast<int>((0.34f + seedA * 0.32f + wind * life * 0.14f + std::sin(timeSeconds * 1.7f + seedA * 9.0f) * 0.018f) * kFrameWidth * emberZoom + orbitX * 0.42f);
-        const int y = static_cast<int>((0.80f - life * (0.58f + seedC * 0.22f)) * kFrameHeight * emberZoom + orbitY * 0.30f + (1.0f - emberZoom) * kFrameHeight * 0.30f);
-        const float alpha = (1.0f - life) * (0.28f + seedC * 0.50f);
-        const int radius = seedC > 0.72f ? 2 : 1;
-        drawCirclePx(pixels, x, y, radius, 1.0f, 0.48f + seedB * 0.28f, 0.08f, alpha);
-    }
+    path += filename;
+    return path;
 }
 
 bool gpuKernelLaunchAllowed(const std::string& args) {
@@ -982,6 +1514,11 @@ int writeGpuSafetyStop(const char* requestedMode) {
 struct ImageStats {
     float meanLuma = 0.0f;
     float maxLuma = 0.0f;
+    float meanSaturation = 0.0f;
+    float warmFireFraction = 0.0f;
+    float tanSmokeFraction = 0.0f;
+    float blackSmokeFraction = 0.0f;
+    float whiteCoreFraction = 0.0f;
     float brightFraction = 0.0f;
     int brightPixels = 0;
 };
@@ -992,19 +1529,47 @@ ImageStats computeImageStats(const std::vector<std::uint32_t>& pixels) {
         return stats;
     }
     double total = 0.0;
+    double totalSaturation = 0.0;
+    int warmFirePixels = 0;
+    int tanSmokePixels = 0;
+    int blackSmokePixels = 0;
+    int whiteCorePixels = 0;
     for (const std::uint32_t pixel : pixels) {
         const float r = static_cast<float>((pixel >> 16) & 0xff) / 255.0f;
         const float g = static_cast<float>((pixel >> 8) & 0xff) / 255.0f;
         const float b = static_cast<float>(pixel & 0xff) / 255.0f;
         const float luma = r * 0.2126f + g * 0.7152f + b * 0.0722f;
+        const float maxChannel = std::max(r, std::max(g, b));
+        const float minChannel = std::min(r, std::min(g, b));
+        const float saturation = maxChannel > 0.0001f ? (maxChannel - minChannel) / maxChannel : 0.0f;
+        const bool warm = r > g * 1.05f && r > b * 1.55f && luma > 0.20f;
         total += luma;
+        totalSaturation += saturation;
         stats.maxLuma = std::max(stats.maxLuma, luma);
         if (luma > 0.68f) {
             ++stats.brightPixels;
         }
+        if (warm) {
+            ++warmFirePixels;
+        }
+        if (r > g * 1.03f && g > b * 1.35f && saturation < 0.58f && luma > 0.20f && luma < 0.68f) {
+            ++tanSmokePixels;
+        }
+        if (luma < 0.16f && saturation < 0.42f) {
+            ++blackSmokePixels;
+        }
+        if (warm && luma > 0.82f && saturation < 0.40f) {
+            ++whiteCorePixels;
+        }
     }
-    stats.meanLuma = static_cast<float>(total / static_cast<double>(pixels.size()));
-    stats.brightFraction = static_cast<float>(static_cast<double>(stats.brightPixels) / static_cast<double>(pixels.size()));
+    const double pixelCount = static_cast<double>(pixels.size());
+    stats.meanLuma = static_cast<float>(total / pixelCount);
+    stats.meanSaturation = static_cast<float>(totalSaturation / pixelCount);
+    stats.warmFireFraction = static_cast<float>(static_cast<double>(warmFirePixels) / pixelCount);
+    stats.tanSmokeFraction = static_cast<float>(static_cast<double>(tanSmokePixels) / pixelCount);
+    stats.blackSmokeFraction = static_cast<float>(static_cast<double>(blackSmokePixels) / pixelCount);
+    stats.whiteCoreFraction = static_cast<float>(static_cast<double>(whiteCorePixels) / pixelCount);
+    stats.brightFraction = static_cast<float>(static_cast<double>(stats.brightPixels) / pixelCount);
     return stats;
 }
 
@@ -1053,12 +1618,32 @@ std::string argumentValue(const std::string& args, const char* prefix) {
         return {};
     }
     const std::size_t valueStart = pos + std::strlen(prefix);
+    if (valueStart >= args.size()) {
+        return {};
+    }
+    if (args[valueStart] == '"') {
+        const std::size_t valueEnd = args.find('"', valueStart + 1);
+        if (valueEnd == std::string::npos) {
+            return args.substr(valueStart + 1);
+        }
+        return args.substr(valueStart + 1, valueEnd - valueStart - 1);
+    }
     const std::size_t valueEnd = args.find(' ', valueStart);
     std::string value = args.substr(valueStart, valueEnd == std::string::npos ? std::string::npos : valueEnd - valueStart);
-    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-        value = value.substr(1, value.size() - 2);
-    }
     return value;
+}
+
+int argumentIntValue(const std::string& args, const char* prefix, int fallback, int minimum, int maximum) {
+    const std::string value = argumentValue(args, prefix);
+    if (value.empty()) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str()) {
+        return fallback;
+    }
+    return static_cast<int>(std::max<long>(minimum, std::min<long>(maximum, parsed)));
 }
 
 void applyCanonicalFireSettings(FireSettings& settings) {
@@ -1071,11 +1656,24 @@ void applyCanonicalFireSettings(FireSettings& settings) {
     settings.intensity = kFireIntensity;
     settings.smoke = kSmokeGain;
     settings.turbulence = kTurbulence;
+    settings.renderDebugMode = 0;
 }
 
 unsigned long long tickMs() {
     return static_cast<unsigned long long>(GetTickCount64());
 }
+
+struct TimerResolutionScope {
+    bool active = false;
+
+    TimerResolutionScope() : active(timeBeginPeriod(1) == TIMERR_NOERROR) {}
+
+    ~TimerResolutionScope() {
+        if (active) {
+            timeEndPeriod(1);
+        }
+    }
+};
 
 void appendRuntimeEvent(const char* event, const char* detail = "") {
     CreateDirectoryA("out", nullptr);
@@ -1109,15 +1707,24 @@ bool initializeSharedViewport(bool reset) {
         return false;
     }
 
-    if (reset || g_sharedViewport->magic != kSharedViewportMagic || g_sharedViewport->version != kSharedViewportVersion) {
+    if (reset ||
+        g_sharedViewport->magic != kSharedViewportMagic ||
+        g_sharedViewport->version != kSharedViewportVersion ||
+        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
+        g_sharedViewport->width != kFrameWidth ||
+        g_sharedViewport->height != kFrameHeight ||
+        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
         std::memset(g_sharedViewport, 0, sizeof(SharedViewportBuffer));
         g_sharedViewport->magic = kSharedViewportMagic;
         g_sharedViewport->version = kSharedViewportVersion;
+        g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
         g_sharedViewport->width = kFrameWidth;
         g_sharedViewport->height = kFrameHeight;
+        g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
         g_sharedViewport->workerStatus = 0;
         g_sharedViewport->workerExitCode = 0;
         g_sharedViewport->workerErrorCount = 0;
+        g_haveLastWorkerSettings = false;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "shared viewport initialized");
     }
     return true;
@@ -1132,12 +1739,18 @@ void closeSharedViewport() {
         CloseHandle(g_sharedViewportMap);
         g_sharedViewportMap = nullptr;
     }
+    g_haveLastWorkerSettings = false;
 }
 
 void writeWorkerSettings(const FireSettings& settings) {
     if (g_sharedViewport == nullptr) {
         return;
     }
+    if (g_haveLastWorkerSettings && sameFireSettings(g_lastWorkerSettings, settings)) {
+        return;
+    }
+    g_lastWorkerSettings = settings;
+    g_haveLastWorkerSettings = true;
     InterlockedIncrement(&g_sharedViewport->settingsSequence);
     g_sharedViewport->settings = settings;
     InterlockedIncrement(&g_sharedViewport->settingsSequence);
@@ -1160,23 +1773,27 @@ FireSettings readStableWorkerSettings(const SharedViewportBuffer* shared) {
     return shared->settings;
 }
 
-bool readWorkerFrame(std::vector<std::uint32_t>& outFrame) {
-    if (g_sharedViewport == nullptr || g_sharedViewport->magic != kSharedViewportMagic) {
-        return false;
-    }
-    const LONG sequenceA = g_sharedViewport->frameSequence;
-    if (sequenceA <= 0 || (sequenceA & 1) != 0) {
+bool workerFrameMetadataFresh() {
+    if (g_sharedViewport == nullptr ||
+        g_sharedViewport->magic != kSharedViewportMagic ||
+        g_sharedViewport->version != kSharedViewportVersion ||
+        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
+        g_sharedViewport->width != kFrameWidth ||
+        g_sharedViewport->height != kFrameHeight ||
+        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
         return false;
     }
     if (tickMs() - g_sharedViewport->lastFrameTickMs > kWorkerFrameStaleMs) {
         return false;
     }
-    if (outFrame.size() != static_cast<std::size_t>(kFrameWidth * kFrameHeight)) {
-        outFrame.resize(static_cast<std::size_t>(kFrameWidth) * kFrameHeight);
+    const LONG latestSlot = g_sharedViewport->latestFrameSlot;
+    if (latestSlot >= 0 && latestSlot < kSharedFrameSlots) {
+        const LONG latestSequence = g_sharedViewport->slotFrameSequences[latestSlot];
+        if (latestSequence > 0 && (latestSequence & 1) == 0) {
+            return true;
+        }
     }
-    std::memcpy(outFrame.data(), g_sharedViewport->pixels, outFrame.size() * sizeof(std::uint32_t));
-    const LONG sequenceB = g_sharedViewport->frameSequence;
-    return sequenceA == sequenceB && (sequenceB & 1) == 0;
+    return g_lastCopiedWorkerSequence > 0;
 }
 
 bool cudaWorkerProcessAlive() {
@@ -1322,7 +1939,21 @@ void serviceCudaWorkerWatchdog() {
     if (status < 0) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker error: %.120s", g_sharedViewport->statusText);
     } else if (g_sharedViewport->lastFrameTickMs != 0 && frameAge <= kWorkerFrameStaleMs) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker live pid %lu frame age %llums", static_cast<unsigned long>(g_sharedViewport->workerPid), frameAge);
+        const double frameMs = static_cast<double>(g_sharedViewport->workerFrameMicros) / 1000.0;
+        const double cudaMs = static_cast<double>(g_sharedViewport->workerCudaMicros) / 1000.0;
+        const double publishMs = static_cast<double>(g_sharedViewport->workerPublishMicros) / 1000.0;
+        const double workerFps = g_sharedViewport->workerFrameMicros == 0 ? 0.0 : 1000000.0 / static_cast<double>(g_sharedViewport->workerFrameMicros);
+        std::snprintf(
+            g_workerUiStatus,
+            sizeof(g_workerUiStatus),
+            "wrk %.0ffps %.1f c%.1f p%.1f ui %.0f copyHz %.0f/%.0f",
+            workerFps,
+            frameMs,
+            cudaMs,
+            publishMs,
+            g_visualFps,
+            g_liveCopiedHz,
+            g_liveCopyCallHz);
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker running; waiting for fresh frame");
     } else {
@@ -1339,10 +1970,297 @@ bool cudaWorkerEnabledByDefault(const std::string& args) {
     return !(disabledSize > 0 && std::string(disabled) == "1");
 }
 
+struct WorkerD3DTarget {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11Texture2D> cudaTexture;
+    std::array<ComPtr<ID3D11Texture2D>, kSharedFrameSlots> sharedTextures;
+    std::array<ComPtr<IDXGIKeyedMutex>, kSharedFrameSlots> sharedMutexes;
+    std::array<HANDLE, kSharedFrameSlots> sharedHandles = {};
+    ComPtr<ID3D11Query> completionQuery;
+};
+
+bool initializeWorkerD3DTarget(WorkerD3DTarget& target) {
+    if (!createD3DDevice(target.device, target.context)) {
+        appendRuntimeEvent("worker-d3d-device-failed", "");
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = kFrameWidth;
+    desc.Height = kFrameHeight;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = 0;
+    desc.MiscFlags = 0;
+    HRESULT hr = target.device->CreateTexture2D(&desc, nullptr, target.cudaTexture.GetAddressOf());
+    if (FAILED(hr)) {
+        char detail[96] = {};
+        std::snprintf(detail, sizeof(detail), "%s", hresultString(hr).c_str());
+        appendRuntimeEvent("worker-d3d-create-cuda-target-failed", detail);
+        return false;
+    }
+
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        hr = target.device->CreateTexture2D(&desc, nullptr, target.sharedTextures[slot].GetAddressOf());
+        if (FAILED(hr)) {
+            char detail[96] = {};
+            std::snprintf(detail, sizeof(detail), "slot=%d %s", slot, hresultString(hr).c_str());
+            appendRuntimeEvent("worker-d3d-create-shared-failed", detail);
+            return false;
+        }
+        if (FAILED(target.sharedTextures[slot].As(&target.sharedMutexes[slot]))) {
+            appendRuntimeEvent("worker-d3d-keyed-mutex-failed", "");
+            return false;
+        }
+        ComPtr<IDXGIResource> sharedResource;
+        if (FAILED(target.sharedTextures[slot].As(&sharedResource)) ||
+            FAILED(sharedResource->GetSharedHandle(&target.sharedHandles[slot])) ||
+            target.sharedHandles[slot] == nullptr) {
+            appendRuntimeEvent("worker-d3d-shared-handle-failed", "");
+            return false;
+        }
+    }
+    D3D11_QUERY_DESC queryDesc = {};
+    queryDesc.Query = D3D11_QUERY_EVENT;
+    hr = target.device->CreateQuery(&queryDesc, target.completionQuery.GetAddressOf());
+    if (FAILED(hr)) {
+        appendRuntimeEvent("worker-d3d-completion-query-failed", hresultString(hr).c_str());
+        return false;
+    }
+    return true;
+}
+
+bool waitForWorkerD3DCompletion(WorkerD3DTarget& target) {
+    return waitForD3DCompletion(target.context.Get(), target.completionQuery.Get());
+}
+
+bool runD3DInteropProbe(std::string& detail) {
+    WorkerD3DTarget target;
+    if (!initializeWorkerD3DTarget(target)) {
+        detail = "D3D FP16 target init failed";
+        return false;
+    }
+    if (!fireCudaSelectDeviceForD3D11(target.device.Get())) {
+        detail = fireCudaLastError();
+        return false;
+    }
+    if (!fireCudaRegisterD3D11Texture(target.cudaTexture.Get())) {
+        detail = fireCudaLastError();
+        return false;
+    }
+    fireCudaUnregisterD3D11Texture();
+    detail = "ok";
+    return true;
+}
+
+int runWorkerBenchmark(const std::string& args) {
+    if (!gpuKernelLaunchAllowed(args)) {
+        return writeGpuSafetyStop("worker-benchmark");
+    }
+    ensureDirectoryTree("out");
+    const std::string outputDirArg = argumentValue(args, "--output-dir=");
+    const std::string outputDir = outputDirArg.empty() ? "out\\worker-benchmark" : outputDirArg;
+    const int benchmarkFrames = argumentIntValue(args, "--benchmark-frames=", 16, 4, 120);
+    const int warmupFrames = argumentIntValue(args, "--warmup-frames=", 8, 0, 120);
+    const int simEveryFrames = argumentIntValue(args, "--sim-every-frames=", 1, 0, 600);
+    const bool renderOnlyMode = args.find("--render-only") != std::string::npos || simEveryFrames == 0;
+    if (!ensureDirectoryTree(outputDir)) {
+        return 3;
+    }
+
+    WorkerD3DTarget target;
+    bool ok = initializeWorkerD3DTarget(target);
+    if (ok) {
+        ok = fireCudaSelectDeviceForD3D11(target.device.Get());
+    }
+    if (ok) {
+        ok = fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight);
+    }
+    if (ok) {
+        ok = fireCudaRegisterD3D11Texture(target.cudaTexture.Get());
+    }
+    if (!ok) {
+        const std::string reportPath = joinPath(outputDir, "worker-benchmark.json");
+        std::ofstream report(reportPath, std::ios::binary);
+        if (report) {
+            report << "{\n";
+            report << "  \"workerBenchmarkOk\": false,\n";
+            report << "  \"error\": \"" << jsonEscape(fireCudaLastError()) << "\"\n";
+            report << "}\n";
+        }
+        fireCudaUnregisterD3D11Texture();
+        fireCudaShutdown();
+        return 4;
+    }
+
+    using Clock = std::chrono::high_resolution_clock;
+    double totalCudaMs = 0.0;
+    double totalPublishMs = 0.0;
+    double totalFrameMs = 0.0;
+    double totalVelocityMs = 0.0;
+    double totalReactionMs = 0.0;
+    double totalProjectionMs = 0.0;
+    double totalLightingMs = 0.0;
+    double totalRaymarchMs = 0.0;
+    double totalPackMs = 0.0;
+    int completedFrames = 0;
+    int metricFrames = 0;
+    int physicsFrames = 0;
+    int renderOnlyFrames = 0;
+    bool stable = true;
+
+    const auto makeBenchmarkSettings = [](int i) {
+        FireSettings settings;
+        settings.width = kFrameWidth;
+        settings.height = kFrameHeight;
+        settings.dt = 1.0f / 60.0f;
+        settings.mouseX = 0.50f + 0.04f * std::sin(static_cast<float>(i) * 0.11f);
+        settings.mouseY = 0.12f + 0.02f * std::sin(static_cast<float>(i) * 0.07f);
+        settings.leftDown = 1;
+        settings.rightDown = 0;
+        settings.showGizmos = 0;
+        settings.activeGizmo = 1;
+        settings.wind = 0.0f;
+        settings.cameraYaw = 0.18f;
+        settings.cameraPitch = 0.08f;
+        settings.cameraDistance = 2.62f;
+        applyCanonicalFireSettings(settings);
+        return settings;
+    };
+
+    if (renderOnlyMode) {
+        FireSettings settings = makeBenchmarkSettings(0);
+        if (!fireCudaStepAndRenderD3D11(settings)) {
+            stable = false;
+        } else {
+            ++physicsFrames;
+        }
+    }
+
+    for (int i = 0; i < warmupFrames + benchmarkFrames; ++i) {
+        if (!stable) {
+            break;
+        }
+        const bool measureFrame = i >= warmupFrames;
+        FireSettings settings = makeBenchmarkSettings(i);
+        const bool advancePhysics = !renderOnlyMode && (i == 0 || (simEveryFrames > 0 && (i % simEveryFrames) == 0));
+        const auto frameStart = Clock::now();
+        if (advancePhysics) {
+            ++physicsFrames;
+        } else {
+            ++renderOnlyFrames;
+        }
+        if (!(advancePhysics ? fireCudaStepAndRenderD3D11(settings) : fireCudaRenderD3D11(settings))) {
+            stable = false;
+            break;
+        }
+        const auto cudaDone = Clock::now();
+        const HRESULT acquire = target.sharedMutexes[0]->AcquireSync(0, 8);
+        if (FAILED(acquire)) {
+            stable = false;
+            break;
+        }
+        target.context->CopyResource(target.sharedTextures[0].Get(), target.cudaTexture.Get());
+        if (!waitForWorkerD3DCompletion(target)) {
+            stable = false;
+            break;
+        }
+        const HRESULT release = target.sharedMutexes[0]->ReleaseSync(0);
+        if (FAILED(release)) {
+            stable = false;
+            break;
+        }
+        const auto published = Clock::now();
+        if (measureFrame) {
+            totalCudaMs += std::chrono::duration<double, std::milli>(cudaDone - frameStart).count();
+            totalPublishMs += std::chrono::duration<double, std::milli>(published - cudaDone).count();
+            totalFrameMs += std::chrono::duration<double, std::milli>(published - frameStart).count();
+            ++completedFrames;
+        }
+    }
+
+    if (stable) {
+        const int requestedMetricFrames = std::min(3, std::max(1, benchmarkFrames));
+        for (int j = 0; j < requestedMetricFrames; ++j) {
+            FireSettings settings = makeBenchmarkSettings(warmupFrames + benchmarkFrames + j);
+            FireCudaFrameMetrics metrics = {};
+            if (!fireCudaStepAndRenderD3D11Measured(settings, &metrics)) {
+                stable = false;
+                break;
+            }
+            totalVelocityMs += metrics.gpuVelocityMs;
+            totalReactionMs += metrics.gpuReactionMs;
+            totalProjectionMs += metrics.gpuProjectionMs;
+            totalLightingMs += metrics.gpuLightingMs;
+            totalRaymarchMs += metrics.gpuRaymarchMs;
+            totalPackMs += metrics.gpuPackMs;
+            ++metricFrames;
+        }
+    }
+
+    fireCudaUnregisterD3D11Texture();
+    fireCudaShutdown();
+
+    stable = stable && completedFrames == benchmarkFrames;
+    const double frames = static_cast<double>(std::max(1, completedFrames));
+    const double measuredMetricFrames = static_cast<double>(std::max(1, metricFrames));
+    const double averageSubmitMs = totalCudaMs / frames;
+    const double averagePublishMs = totalPublishMs / frames;
+    const double averageFrameMs = totalFrameMs / frames;
+    const double averageCudaMs = averageFrameMs;
+    const double averageVelocityMs = totalVelocityMs / measuredMetricFrames;
+    const double averageReactionMs = totalReactionMs / measuredMetricFrames;
+    const double averageProjectionMs = totalProjectionMs / measuredMetricFrames;
+    const double averageLightingMs = totalLightingMs / measuredMetricFrames;
+    const double averageRaymarchMs = totalRaymarchMs / measuredMetricFrames;
+    const double averagePackMs = totalPackMs / measuredMetricFrames;
+    const std::string reportPath = joinPath(outputDir, "worker-benchmark.json");
+    std::ofstream report(reportPath, std::ios::binary);
+    if (!report) {
+        return 3;
+    }
+    report << std::fixed << std::setprecision(6);
+    report << "{\n";
+    report << "  \"workerBenchmarkOk\": " << (stable ? "true" : "false") << ",\n";
+    report << "  \"frames\": " << completedFrames << ",\n";
+    report << "  \"requestedFrames\": " << benchmarkFrames << ",\n";
+    report << "  \"warmupFrames\": " << warmupFrames << ",\n";
+    report << "  \"metricFrames\": " << metricFrames << ",\n";
+    report << "  \"physicsFramesSubmitted\": " << physicsFrames << ",\n";
+    report << "  \"renderOnlyFramesSubmitted\": " << renderOnlyFrames << ",\n";
+    report << "  \"simEveryFrames\": " << simEveryFrames << ",\n";
+    report << "  \"timingMode\": \"live frames timed without metrics; GPU breakdown sampled after live timing\",\n";
+    report << "  \"requestedGrid\": [" << kSimulationGridWidth << ", " << kSimulationGridHeight << "],\n";
+    report << "  \"raymarchSteps\": " << kRaymarchSteps << ",\n";
+    report << "  \"emberCount\": " << kEmberCount << ",\n";
+    report << "  \"pressureIterations\": 40,\n";
+    report << "  \"averageCudaMs\": " << averageCudaMs << ",\n";
+    report << "  \"averageSubmitMs\": " << averageSubmitMs << ",\n";
+    report << "  \"averagePublishMs\": " << averagePublishMs << ",\n";
+    report << "  \"averageFrameMs\": " << averageFrameMs << ",\n";
+    report << "  \"averageGpuVelocityMs\": " << averageVelocityMs << ",\n";
+    report << "  \"averageGpuReactionMs\": " << averageReactionMs << ",\n";
+    report << "  \"averageGpuProjectionMs\": " << averageProjectionMs << ",\n";
+    report << "  \"averageGpuLightingMs\": " << averageLightingMs << ",\n";
+    report << "  \"averageGpuRaymarchMs\": " << averageRaymarchMs << ",\n";
+    report << "  \"averageGpuPackMs\": " << averagePackMs << ",\n";
+    report << "  \"effectiveFps\": " << (averageFrameMs > 0.0 ? 1000.0 / averageFrameMs : 0.0) << ",\n";
+    report << "  \"output\": \"" << jsonEscape(reportPath) << "\"\n";
+    report << "}\n";
+    return stable ? 0 : 4;
+}
+
 int runCudaWorker(const std::string& args) {
     if (!gpuKernelLaunchAllowed(args)) {
         return writeGpuSafetyStop("cuda-worker");
     }
+    TimerResolutionScope timerResolution;
     if (!initializeSharedViewport(false)) {
         return 2;
     }
@@ -1355,13 +2273,41 @@ int runCudaWorker(const std::string& args) {
     }
 
     g_sharedViewport->workerStatus = 1;
+    g_sharedViewport->magic = kSharedViewportMagic;
+    g_sharedViewport->version = kSharedViewportVersion;
+    g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
+    g_sharedViewport->width = kFrameWidth;
+    g_sharedViewport->height = kFrameHeight;
+    g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
     g_sharedViewport->workerPid = GetCurrentProcessId();
     g_sharedViewport->workerStartTickMs = tickMs();
     g_sharedViewport->workerHeartbeatTickMs = tickMs();
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "initializing CUDA worker");
     appendRuntimeEvent("worker-process-entered", "");
 
-    std::vector<std::uint32_t> frame(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, 0xff000000u);
+    WorkerD3DTarget d3dTarget;
+    if (!initializeWorkerD3DTarget(d3dTarget)) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D FP16 target init failed");
+        appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
+    if (!fireCudaSelectDeviceForD3D11(d3dTarget.device.Get())) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D device CUDA selection failed: %.130s", fireCudaLastError());
+        appendRuntimeEvent("worker-cuda-d3d-device-select-failed", g_sharedViewport->statusText);
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
     if (!fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight)) {
         g_sharedViewport->workerStatus = -1;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
@@ -1374,47 +2320,173 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
+    if (!fireCudaRegisterD3D11Texture(d3dTarget.cudaTexture.Get())) {
+        g_sharedViewport->workerStatus = -3;
+        InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+        g_sharedViewport->workerExitCode = 5;
+        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D/CUDA FP16 interop init failed");
+        appendRuntimeEvent("worker-cuda-d3d-register-failed", fireCudaLastError());
+        appendRuntimeEvent("worker-d3d-interop-init-failed", g_sharedViewport->statusText);
+        fireCudaShutdown();
+        if (parentProcess != nullptr) {
+            CloseHandle(parentProcess);
+        }
+        return 5;
+    }
+    g_sharedViewport->sharedTextureHandleValue = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(d3dTarget.sharedHandles[0]));
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        g_sharedViewport->sharedTextureHandleValues[slot] = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(d3dTarget.sharedHandles[slot]));
+        g_sharedViewport->slotFrameSequences[slot] = 0;
+    }
+    g_sharedViewport->latestFrameSlot = -1;
+    appendRuntimeEvent("worker-cuda-d3d-registered", "");
 
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
+    int framesSincePhysics = kWorkerPhysicsFrameInterval;
+    float accumulatedPhysicsDt = 0.0f;
     while (g_sharedViewport->shutdownRequested == 0) {
         if (parentProcess != nullptr && WaitForSingleObject(parentProcess, 0) != WAIT_TIMEOUT) {
             break;
         }
 
+        g_sharedViewport->workerHeartbeatTickMs = tickMs();
+
         const auto now = Clock::now();
         float dt = std::chrono::duration<float>(now - last).count();
         last = now;
         dt = std::max(1.0f / 240.0f, std::min(dt, 1.0f / 30.0f));
-
-        g_sharedViewport->workerHeartbeatTickMs = tickMs();
+        accumulatedPhysicsDt = std::min(accumulatedPhysicsDt + dt, 0.25f);
 
         FireSettings settings = readStableWorkerSettings(g_sharedViewport);
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
-        settings.dt = dt;
-        applyCanonicalFireSettings(settings);
 
-        if (!fireCudaStepAndRender(frame.data(), settings)) {
+        const bool advancePhysics = settings.reset != 0 || framesSincePhysics >= kWorkerPhysicsFrameInterval;
+        settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
+        applyCanonicalFireSettings(settings);
+        const auto frameStart = Clock::now();
+        if (!(advancePhysics ? fireCudaStepAndRenderD3D11(settings) : fireCudaRenderD3D11(settings))) {
             g_sharedViewport->workerStatus = -2;
             InterlockedIncrement(&g_sharedViewport->workerErrorCount);
             g_sharedViewport->workerExitCode = 4;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA render failed: %.150s", fireCudaLastError());
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA/D3D %s failed: %.138s", advancePhysics ? "step" : "render", fireCudaLastError());
             appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
             break;
         }
+        if (advancePhysics) {
+            accumulatedPhysicsDt = 0.0f;
+            framesSincePhysics = 0;
+        } else {
+            framesSincePhysics += 1;
+        }
+        const auto cudaDone = Clock::now();
 
-        InterlockedIncrement(&g_sharedViewport->frameSequence);
-        std::memcpy(g_sharedViewport->pixels, frame.data(), frame.size() * sizeof(std::uint32_t));
+        int publishSlot = -1;
+        HRESULT acquire = static_cast<HRESULT>(WAIT_TIMEOUT);
+        const LONG preferredSlot = (g_sharedViewport->latestFrameSlot + 1 + kSharedFrameSlots) % kSharedFrameSlots;
+        for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
+            const int slot = static_cast<int>((preferredSlot + attempt) % kSharedFrameSlots);
+            acquire = d3dTarget.sharedMutexes[slot]->AcquireSync(0, 0);
+            if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+                continue;
+            }
+            publishSlot = slot;
+            break;
+        }
+        if (publishSlot < 0) {
+            int reclaimedSlots = 0;
+            for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+                const LONG readySequence = g_sharedViewport->slotFrameSequences[slot];
+                if (readySequence <= 0 || (readySequence & 1) != 0) {
+                    continue;
+                }
+                const HRESULT reclaim = d3dTarget.sharedMutexes[slot]->AcquireSync(1, 0);
+                if (reclaim != S_OK) {
+                    continue;
+                }
+                g_sharedViewport->slotFrameSequences[slot] = 0;
+                d3dTarget.sharedMutexes[slot]->ReleaseSync(0);
+                ++reclaimedSlots;
+            }
+            if (reclaimedSlots > 0) {
+                for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
+                    const int slot = static_cast<int>((preferredSlot + attempt) % kSharedFrameSlots);
+                    acquire = d3dTarget.sharedMutexes[slot]->AcquireSync(0, 0);
+                    if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+                        continue;
+                    }
+                    publishSlot = slot;
+                    break;
+                }
+            }
+        }
+        if (publishSlot < 0) {
+            g_sharedViewport->workerHeartbeatTickMs = tickMs();
+            g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
+            g_sharedViewport->workerFrameMicros = g_sharedViewport->workerCudaMicros;
+            g_sharedViewport->workerPublishMicros = 0;
+            g_sharedViewport->workerStatus = 2;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker rendered; publish slot busy");
+            Sleep(0);
+            continue;
+        }
+        if (FAILED(acquire)) {
+            g_sharedViewport->workerStatus = -4;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 6;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D keyed mutex acquire failed: %.80s", hresultString(acquire).c_str());
+            appendRuntimeEvent("worker-d3d-acquire-failed", g_sharedViewport->statusText);
+            break;
+        }
+
+        const LONG writingSequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
+        g_sharedViewport->slotFrameSequences[publishSlot] = writingSequence;
+        d3dTarget.context->CopyResource(d3dTarget.sharedTextures[publishSlot].Get(), d3dTarget.cudaTexture.Get());
+        d3dTarget.context->Flush();
+        const HRESULT release = d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(1);
+        if (FAILED(release)) {
+            g_sharedViewport->workerStatus = -5;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 7;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D keyed mutex release failed: %.80s", hresultString(release).c_str());
+            appendRuntimeEvent("worker-d3d-release-failed", g_sharedViewport->statusText);
+            break;
+        }
+        const auto submitted = Clock::now();
+        const LONG readySequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
+        g_sharedViewport->slotFrameSequences[publishSlot] = readySequence;
+        g_sharedViewport->latestFrameSlot = publishSlot;
+
+        const auto targetFrameDuration = std::chrono::duration<double>(1.0 / static_cast<double>(kWorkerMaxPublishFps));
+        const auto nextPublishTime = frameStart + std::chrono::duration_cast<Clock::duration>(targetFrameDuration);
+        while (Clock::now() < nextPublishTime) {
+            const auto remaining = std::chrono::duration<double, std::milli>(nextPublishTime - Clock::now()).count();
+            Sleep(remaining > 1.8 ? 1 : 0);
+        }
+        const auto published = Clock::now();
+
         g_sharedViewport->lastFrameTickMs = tickMs();
+        g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
+        g_sharedViewport->workerFrameMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(published - frameStart).count());
+        g_sharedViewport->workerPublishMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(submitted - cudaDone).count());
         g_sharedViewport->workerStatus = 2;
-        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker streaming");
-        InterlockedIncrement(&g_sharedViewport->frameSequence);
-
-        Sleep(1);
+        std::snprintf(
+            g_sharedViewport->statusText,
+            sizeof(g_sharedViewport->statusText),
+            "CUDA worker streaming FP16 D3D11 ring slot %d %s",
+            publishSlot,
+            advancePhysics ? "physics" : "render");
     }
 
+    fireCudaUnregisterD3D11Texture();
     fireCudaShutdown();
+    g_sharedViewport->sharedTextureHandleValue = 0;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        g_sharedViewport->sharedTextureHandleValues[slot] = 0;
+        g_sharedViewport->slotFrameSequences[slot] = 0;
+    }
+    g_sharedViewport->latestFrameSlot = -1;
     g_sharedViewport->workerStatus = 0;
     g_sharedViewport->workerStopTickMs = tickMs();
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker stopped");
@@ -1462,12 +2534,18 @@ struct CalibrationSample {
     float timeSeconds = 0.0f;
     float hrrKw = 0.0f;
     float massRemainingKg = 0.0f;
+    float smokeOpticalDepth = 0.0f;
+    float smokeExtinctionCoefficientPerM = 0.0f;
+    float radiantHeatFluxKwPerM2 = 0.0f;
     float thermocoupleMeanC = 0.0f;
     float irMeanC = 0.0f;
     float irMaxC = 0.0f;
     float plumeHeightMeters = 0.0f;
     bool hasHrr = false;
     bool hasMass = false;
+    bool hasSmokeOpticalDepth = false;
+    bool hasSmokeExtinctionCoefficient = false;
+    bool hasRadiantHeatFlux = false;
     bool hasThermocouple = false;
     bool hasIrMean = false;
     bool hasIrMax = false;
@@ -1486,6 +2564,14 @@ struct CalibrationReport {
     float irMeanShapeRmse = -1.0f;
     float irMaxShapeRmse = -1.0f;
     float plumeHeightRmseMeters = -1.0f;
+    float smokeOpticalDepthShapeRmse = -1.0f;
+    float smokeExtinctionShapeRmse = -1.0f;
+    float radiantHeatFluxShapeRmse = -1.0f;
+    int hrrSamplesCompared = 0;
+    int massSamplesCompared = 0;
+    int smokeOpticalDepthSamplesCompared = 0;
+    int smokeExtinctionSamplesCompared = 0;
+    int radiantHeatFluxSamplesCompared = 0;
 };
 
 std::vector<std::string> splitCsvLine(const std::string& line) {
@@ -1568,6 +2654,15 @@ std::vector<CalibrationSample> loadCalibrationSamples(const std::string& path) {
             } else if (header == "massRemainingKg") {
                 sample.massRemainingKg = parsed;
                 sample.hasMass = true;
+            } else if (header == "smokeOpticalDepth") {
+                sample.smokeOpticalDepth = parsed;
+                sample.hasSmokeOpticalDepth = true;
+            } else if (header == "smokeExtinctionCoefficientPerM") {
+                sample.smokeExtinctionCoefficientPerM = parsed;
+                sample.hasSmokeExtinctionCoefficient = true;
+            } else if (header == "radiantHeatFluxKWPerM2") {
+                sample.radiantHeatFluxKwPerM2 = parsed;
+                sample.hasRadiantHeatFlux = true;
             } else if (header == "irMeanC") {
                 sample.irMeanC = parsed;
                 sample.hasIrMean = true;
@@ -1597,6 +2692,15 @@ float normalizedValue(float value, float minValue, float maxValue) {
         return 0.0f;
     }
     return (value - minValue) / span;
+}
+
+float simMassProxy(const FireCudaFrameMetrics& frame) {
+    return frame.fuelSum + frame.charSum;
+}
+
+float simRadiantEnergyProxy(const FireCudaFrameMetrics& frame) {
+    const float cellCount = static_cast<float>(std::max(1, frame.gridX * frame.gridY * frame.gridZ));
+    return frame.heatSum / cellCount;
 }
 
 CalibrationReport compareCalibrationSeries(
@@ -1638,6 +2742,18 @@ CalibrationReport compareCalibrationSeries(
     float irMaxMax = -FLT_MAX;
     float simIrMaxMin = FLT_MAX;
     float simIrMaxMax = -FLT_MAX;
+    float smokeOpticalDepthMin = FLT_MAX;
+    float smokeOpticalDepthMax = -FLT_MAX;
+    float simSmokeOpticalDepthMin = FLT_MAX;
+    float simSmokeOpticalDepthMax = -FLT_MAX;
+    float smokeExtinctionMin = FLT_MAX;
+    float smokeExtinctionMax = -FLT_MAX;
+    float simSmokeExtinctionMin = FLT_MAX;
+    float simSmokeExtinctionMax = -FLT_MAX;
+    float radiantHeatFluxMin = FLT_MAX;
+    float radiantHeatFluxMax = -FLT_MAX;
+    float simRadiantHeatFluxMin = FLT_MAX;
+    float simRadiantHeatFluxMax = -FLT_MAX;
 
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
@@ -1652,8 +2768,8 @@ CalibrationReport compareCalibrationSeries(
         if (samples[i].hasMass) {
             massMin = std::min(massMin, samples[i].massRemainingKg);
             massMax = std::max(massMax, samples[i].massRemainingKg);
-            simMassMin = std::min(simMassMin, frame.charSum);
-            simMassMax = std::max(simMassMax, frame.charSum);
+            simMassMin = std::min(simMassMin, simMassProxy(frame));
+            simMassMax = std::max(simMassMax, simMassProxy(frame));
         }
         if (samples[i].hasThermocouple) {
             tcMin = std::min(tcMin, samples[i].thermocoupleMeanC);
@@ -1673,6 +2789,24 @@ CalibrationReport compareCalibrationSeries(
             simIrMaxMin = std::min(simIrMaxMin, frame.maxHeat);
             simIrMaxMax = std::max(simIrMaxMax, frame.maxHeat);
         }
+        if (samples[i].hasSmokeOpticalDepth) {
+            smokeOpticalDepthMin = std::min(smokeOpticalDepthMin, samples[i].smokeOpticalDepth);
+            smokeOpticalDepthMax = std::max(smokeOpticalDepthMax, samples[i].smokeOpticalDepth);
+            simSmokeOpticalDepthMin = std::min(simSmokeOpticalDepthMin, frame.meanOpticalDepth);
+            simSmokeOpticalDepthMax = std::max(simSmokeOpticalDepthMax, frame.meanOpticalDepth);
+        }
+        if (samples[i].hasSmokeExtinctionCoefficient) {
+            smokeExtinctionMin = std::min(smokeExtinctionMin, samples[i].smokeExtinctionCoefficientPerM);
+            smokeExtinctionMax = std::max(smokeExtinctionMax, samples[i].smokeExtinctionCoefficientPerM);
+            simSmokeExtinctionMin = std::min(simSmokeExtinctionMin, frame.meanOpticalDepth);
+            simSmokeExtinctionMax = std::max(simSmokeExtinctionMax, frame.meanOpticalDepth);
+        }
+        if (samples[i].hasRadiantHeatFlux) {
+            radiantHeatFluxMin = std::min(radiantHeatFluxMin, samples[i].radiantHeatFluxKwPerM2);
+            radiantHeatFluxMax = std::max(radiantHeatFluxMax, samples[i].radiantHeatFluxKwPerM2);
+            simRadiantHeatFluxMin = std::min(simRadiantHeatFluxMin, simRadiantEnergyProxy(frame));
+            simRadiantHeatFluxMax = std::max(simRadiantHeatFluxMax, simRadiantEnergyProxy(frame));
+        }
     }
 
     double hrrError = 0.0;
@@ -1681,12 +2815,18 @@ CalibrationReport compareCalibrationSeries(
     double irMeanError = 0.0;
     double irMaxError = 0.0;
     double plumeError = 0.0;
+    double smokeOpticalDepthError = 0.0;
+    double smokeExtinctionError = 0.0;
+    double radiantHeatFluxError = 0.0;
     int hrrCount = 0;
     int massCount = 0;
     int tcCount = 0;
     int irMeanCount = 0;
     int irMaxCount = 0;
     int plumeCount = 0;
+    int smokeOpticalDepthCount = 0;
+    int smokeExtinctionCount = 0;
+    int radiantHeatFluxCount = 0;
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
         const FireCudaFrameMetrics& frame = frames[frameIndex];
@@ -1697,7 +2837,7 @@ CalibrationReport compareCalibrationSeries(
             ++hrrCount;
         }
         if (samples[i].hasMass && massMax > massMin && simMassMax > simMassMin) {
-            const float d = normalizedValue(frame.charSum, simMassMin, simMassMax) - normalizedValue(samples[i].massRemainingKg, massMin, massMax);
+            const float d = normalizedValue(simMassProxy(frame), simMassMin, simMassMax) - normalizedValue(samples[i].massRemainingKg, massMin, massMax);
             massError += static_cast<double>(d * d);
             ++massCount;
         }
@@ -1723,6 +2863,27 @@ CalibrationReport compareCalibrationSeries(
             plumeError += static_cast<double>(d * d);
             ++plumeCount;
         }
+        if (samples[i].hasSmokeOpticalDepth && smokeOpticalDepthMax > smokeOpticalDepthMin && simSmokeOpticalDepthMax > simSmokeOpticalDepthMin) {
+            const float d =
+                normalizedValue(frame.meanOpticalDepth, simSmokeOpticalDepthMin, simSmokeOpticalDepthMax) -
+                normalizedValue(samples[i].smokeOpticalDepth, smokeOpticalDepthMin, smokeOpticalDepthMax);
+            smokeOpticalDepthError += static_cast<double>(d * d);
+            ++smokeOpticalDepthCount;
+        }
+        if (samples[i].hasSmokeExtinctionCoefficient && smokeExtinctionMax > smokeExtinctionMin && simSmokeExtinctionMax > simSmokeExtinctionMin) {
+            const float d =
+                normalizedValue(frame.meanOpticalDepth, simSmokeExtinctionMin, simSmokeExtinctionMax) -
+                normalizedValue(samples[i].smokeExtinctionCoefficientPerM, smokeExtinctionMin, smokeExtinctionMax);
+            smokeExtinctionError += static_cast<double>(d * d);
+            ++smokeExtinctionCount;
+        }
+        if (samples[i].hasRadiantHeatFlux && radiantHeatFluxMax > radiantHeatFluxMin && simRadiantHeatFluxMax > simRadiantHeatFluxMin) {
+            const float d =
+                normalizedValue(simRadiantEnergyProxy(frame), simRadiantHeatFluxMin, simRadiantHeatFluxMax) -
+                normalizedValue(samples[i].radiantHeatFluxKwPerM2, radiantHeatFluxMin, radiantHeatFluxMax);
+            radiantHeatFluxError += static_cast<double>(d * d);
+            ++radiantHeatFluxCount;
+        }
     }
 
     if (hrrCount > 0) {
@@ -1743,7 +2904,68 @@ CalibrationReport compareCalibrationSeries(
     if (plumeCount > 0) {
         report.plumeHeightRmseMeters = static_cast<float>(std::sqrt(plumeError / static_cast<double>(plumeCount)));
     }
+    if (smokeOpticalDepthCount > 0) {
+        report.smokeOpticalDepthShapeRmse = static_cast<float>(std::sqrt(smokeOpticalDepthError / static_cast<double>(smokeOpticalDepthCount)));
+    }
+    if (smokeExtinctionCount > 0) {
+        report.smokeExtinctionShapeRmse = static_cast<float>(std::sqrt(smokeExtinctionError / static_cast<double>(smokeExtinctionCount)));
+    }
+    if (radiantHeatFluxCount > 0) {
+        report.radiantHeatFluxShapeRmse = static_cast<float>(std::sqrt(radiantHeatFluxError / static_cast<double>(radiantHeatFluxCount)));
+    }
+    report.hrrSamplesCompared = hrrCount;
+    report.massSamplesCompared = massCount;
+    report.smokeOpticalDepthSamplesCompared = smokeOpticalDepthCount;
+    report.smokeExtinctionSamplesCompared = smokeExtinctionCount;
+    report.radiantHeatFluxSamplesCompared = radiantHeatFluxCount;
     return report;
+}
+
+void writeOptionalCsvFloat(std::ofstream& out, bool hasValue, float value) {
+    if (hasValue) {
+        out << value;
+    }
+}
+
+bool writeCalibrationComparisonCsv(
+    const std::string& outputPath,
+    const std::string& calibrationPath,
+    const std::vector<FireCudaFrameMetrics>& frames) {
+    if (calibrationPath.empty()) {
+        return true;
+    }
+    const std::vector<CalibrationSample> samples = loadCalibrationSamples(calibrationPath);
+    if (samples.empty() || frames.empty()) {
+        return false;
+    }
+    std::ofstream out(outputPath, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << std::fixed << std::setprecision(6);
+    out << "sampleIndex,measuredTimeSeconds,simFrameIndex,simTimeSeconds,"
+           "measuredHrrKW,simHrrProxy,"
+           "measuredMassRemainingKg,simMassProxy,"
+           "measuredSmokeOpticalDepth,simSmokeOpticalDepthProxy,"
+           "measuredSmokeExtinctionCoefficientPerM,simSmokeExtinctionProxy,"
+           "measuredRadiantHeatFluxKWPerM2,simRadiantEnergyProxy\n";
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const std::size_t frameIndex = samples.size() <= 1 ? 0 : (i * (frames.size() - 1)) / (samples.size() - 1);
+        const CalibrationSample& sample = samples[i];
+        const FireCudaFrameMetrics& frame = frames[frameIndex];
+        out << i << "," << sample.timeSeconds << "," << frame.frameIndex << "," << frame.timeSeconds << ",";
+        writeOptionalCsvFloat(out, sample.hasHrr, sample.hrrKw);
+        out << "," << frame.heatReleaseProxy << ",";
+        writeOptionalCsvFloat(out, sample.hasMass, sample.massRemainingKg);
+        out << "," << simMassProxy(frame) << ",";
+        writeOptionalCsvFloat(out, sample.hasSmokeOpticalDepth, sample.smokeOpticalDepth);
+        out << "," << frame.meanOpticalDepth << ",";
+        writeOptionalCsvFloat(out, sample.hasSmokeExtinctionCoefficient, sample.smokeExtinctionCoefficientPerM);
+        out << "," << frame.meanOpticalDepth << ",";
+        writeOptionalCsvFloat(out, sample.hasRadiantHeatFlux, sample.radiantHeatFluxKwPerM2);
+        out << "," << simRadiantEnergyProxy(frame) << "\n";
+    }
+    return out.good();
 }
 
 int runInputStressTest() {
@@ -1813,10 +3035,24 @@ int runCudaSmokeTest() {
 }
 
 int runValidation(const std::string& args) {
-    CreateDirectoryA("out", nullptr);
+    ensureDirectoryTree("out");
     const std::string targetPath = argumentValue(args, "--targets=");
     const std::string calibrationPath = argumentValue(args, "--calibration=");
     const std::string geometryPath = argumentValue(args, "--geometry=");
+    const std::string manifestPath = argumentValue(args, "--manifest=");
+    const std::string datasetId = argumentValue(args, "--dataset-id=");
+    const std::string outputDirArg = argumentValue(args, "--output-dir=");
+    const std::string outputDir = outputDirArg.empty() ? "out" : outputDirArg;
+    const int validationFrames = argumentIntValue(args, "--validation-frames=", 96, 8, 240);
+    const bool poolFireCalibration = args.find("--pool-fire-calibration") != std::string::npos;
+    if (!ensureDirectoryTree(outputDir)) {
+        return 3;
+    }
+    const std::string metricsPath = joinPath(outputDir, "validation-metrics.csv");
+    const std::string comparisonPath = joinPath(outputDir, "calibration-comparison.csv");
+    const std::string reportPath = joinPath(outputDir, "validation-report.json");
+    const std::string rawFramePath = joinPath(outputDir, "validation-frame.bmp");
+    const std::string appFramePath = joinPath(outputDir, "validation-app-frame.bmp");
     std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, 0xff000000u);
     std::vector<std::uint32_t> appFrame(kFrameWidth * kFrameHeight, 0xff000000u);
 
@@ -1824,26 +3060,32 @@ int runValidation(const std::string& args) {
         return 2;
     }
 
-    std::ofstream csv("out\\validation-metrics.csv", std::ios::binary);
+    std::ofstream csv(metricsPath, std::ios::binary);
     if (!csv) {
         fireCudaShutdown();
         return 3;
     }
 
     csv << "frame,timeSeconds,gridX,gridY,gridZ,pressureIterations,gpuSolveMs,gpuRenderMs,"
+           "gpuVelocityMs,gpuReactionMs,gpuProjectionMs,gpuLightingMs,gpuRaymarchMs,gpuPackMs,"
            "heatSum,fuelSum,oxygenSum,sootSum,charSum,ashSum,pyrolysisSum,progressSum,"
            "turbulenceEnergySum,sootOpticalDepthSum,maxHeat,maxFuel,maxSoot,maxPyrolysis,"
            "maxProgress,maxTurbulenceEnergy,flameHeightMeters,"
-           "meanOpticalDepth,heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
+           "meanOpticalDepth,meanSceneLight,meanSceneShadow,heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
            "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,invalidCells\n";
     csv << std::fixed << std::setprecision(6);
 
-    constexpr int kValidationFrames = 96;
     FireCudaFrameMetrics finalMetrics = {};
     FireSettings finalSettings = {};
     bool stable = true;
     double totalSolveMs = 0.0;
     double totalRenderMs = 0.0;
+    double totalVelocityMs = 0.0;
+    double totalReactionMs = 0.0;
+    double totalProjectionMs = 0.0;
+    double totalLightingMs = 0.0;
+    double totalRaymarchMs = 0.0;
+    double totalPackMs = 0.0;
     double totalReduction = 0.0;
     float worstAfterL2 = 0.0f;
     float worstAfterMax = 0.0f;
@@ -1851,20 +3093,25 @@ int runValidation(const std::string& args) {
     float maxHeat = 0.0f;
     float maxFlameHeight = 0.0f;
     std::vector<FireCudaFrameMetrics> metricFrames;
-    metricFrames.reserve(kValidationFrames);
+    metricFrames.reserve(static_cast<std::size_t>(validationFrames));
 
-    for (int i = 0; i < kValidationFrames; ++i) {
+    for (int i = 0; i < validationFrames; ++i) {
         FireSettings settings;
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
-        settings.mouseX = 0.50f + 0.07f * std::sin(static_cast<float>(i) * 0.071f);
-        settings.mouseY = 0.12f + 0.035f * std::sin(static_cast<float>(i) * 0.053f);
+        if (poolFireCalibration) {
+            settings.mouseX = 0.50f;
+            settings.mouseY = 0.12f;
+        } else {
+            settings.mouseX = 0.50f + 0.07f * std::sin(static_cast<float>(i) * 0.071f);
+            settings.mouseY = 0.12f + 0.035f * std::sin(static_cast<float>(i) * 0.053f);
+        }
         settings.leftDown = 0;
         settings.rightDown = 0;
         settings.showGizmos = 0;
         settings.activeGizmo = 1;
-        settings.wind = 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
+        settings.wind = poolFireCalibration ? 0.0f : 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
         settings.detail = 0.98f;
         applyCanonicalFireSettings(settings);
         settings.turbulence = std::max(settings.turbulence, 1.08f);
@@ -1882,12 +3129,14 @@ int runValidation(const std::string& args) {
 
         csv << metrics.frameIndex << "," << metrics.timeSeconds << "," << metrics.gridX << "," << metrics.gridY << ","
             << metrics.gridZ << "," << metrics.pressureIterations << "," << metrics.gpuSolveMs << "," << metrics.gpuRenderMs << ","
+            << metrics.gpuVelocityMs << "," << metrics.gpuReactionMs << "," << metrics.gpuProjectionMs << ","
+            << metrics.gpuLightingMs << "," << metrics.gpuRaymarchMs << "," << metrics.gpuPackMs << ","
             << metrics.heatSum << "," << metrics.fuelSum << "," << metrics.oxygenSum << "," << metrics.sootSum << ","
             << metrics.charSum << "," << metrics.ashSum << "," << metrics.pyrolysisSum << "," << metrics.progressSum << ","
             << metrics.turbulenceEnergySum << "," << metrics.sootOpticalDepthSum << ","
             << metrics.maxHeat << "," << metrics.maxFuel << "," << metrics.maxSoot << "," << metrics.maxPyrolysis << ","
             << metrics.maxProgress << "," << metrics.maxTurbulenceEnergy << "," << metrics.flameHeightMeters << ","
-            << metrics.meanOpticalDepth << "," << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
+            << metrics.meanOpticalDepth << "," << metrics.meanSceneLight << "," << metrics.meanSceneShadow << "," << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
             << metrics.divergenceAfterL2 << "," << metrics.divergenceBeforeMax << "," << metrics.divergenceAfterMax << ","
             << metrics.divergenceReduction << "," << metrics.invalidCells << "\n";
 
@@ -1896,6 +3145,12 @@ int runValidation(const std::string& args) {
         stable = stable && metrics.divergenceAfterMax < 8.0f;
         totalSolveMs += metrics.gpuSolveMs;
         totalRenderMs += metrics.gpuRenderMs;
+        totalVelocityMs += metrics.gpuVelocityMs;
+        totalReactionMs += metrics.gpuReactionMs;
+        totalProjectionMs += metrics.gpuProjectionMs;
+        totalLightingMs += metrics.gpuLightingMs;
+        totalRaymarchMs += metrics.gpuRaymarchMs;
+        totalPackMs += metrics.gpuPackMs;
         totalReduction += metrics.divergenceReduction;
         worstAfterL2 = std::max(worstAfterL2, metrics.divergenceAfterL2);
         worstAfterMax = std::max(worstAfterMax, metrics.divergenceAfterMax);
@@ -1911,6 +3166,12 @@ int runValidation(const std::string& args) {
     const double frames = std::max(1, finalMetrics.frameIndex + 1);
     const double averageSolveMs = totalSolveMs / frames;
     const double averageRenderMs = totalRenderMs / frames;
+    const double averageVelocityMs = totalVelocityMs / frames;
+    const double averageReactionMs = totalReactionMs / frames;
+    const double averageProjectionMs = totalProjectionMs / frames;
+    const double averageLightingMs = totalLightingMs / frames;
+    const double averageRaymarchMs = totalRaymarchMs / frames;
+    const double averagePackMs = totalPackMs / frames;
     const double averageReduction = totalReduction / frames;
     std::vector<TargetEnvelope> targets = loadTargetEnvelopes(targetPath);
     const CalibrationReport calibration = compareCalibrationSeries(calibrationPath, geometryPath, metricFrames);
@@ -1930,6 +3191,10 @@ int runValidation(const std::string& args) {
             target.observed = maxFlameHeight;
         } else if (target.metric == "finalMeanOpticalDepth") {
             target.observed = finalMetrics.meanOpticalDepth;
+        } else if (target.metric == "finalMeanSceneLight") {
+            target.observed = finalMetrics.meanSceneLight;
+        } else if (target.metric == "finalMeanSceneShadow") {
+            target.observed = finalMetrics.meanSceneShadow;
         } else if (target.metric == "finalHeatReleaseProxy") {
             target.observed = finalMetrics.heatReleaseProxy;
         } else if (target.metric == "finalCharSum") {
@@ -1956,6 +3221,16 @@ int runValidation(const std::string& args) {
             target.observed = imageStats.meanLuma;
         } else if (target.metric == "imageMaxLuma") {
             target.observed = imageStats.maxLuma;
+        } else if (target.metric == "imageMeanSaturation") {
+            target.observed = imageStats.meanSaturation;
+        } else if (target.metric == "imageWarmFireFraction") {
+            target.observed = imageStats.warmFireFraction;
+        } else if (target.metric == "imageTanSmokeFraction") {
+            target.observed = imageStats.tanSmokeFraction;
+        } else if (target.metric == "imageBlackSmokeFraction") {
+            target.observed = imageStats.blackSmokeFraction;
+        } else if (target.metric == "imageWhiteCoreFraction") {
+            target.observed = imageStats.whiteCoreFraction;
         } else if (target.metric == "imageBrightPixels") {
             target.observed = static_cast<float>(imageStats.brightPixels);
         } else if (target.metric == "imageBrightFraction") {
@@ -1964,6 +3239,8 @@ int runValidation(const std::string& args) {
             target.observed = static_cast<float>(averageSolveMs);
         } else if (target.metric == "averageGpuRenderMs") {
             target.observed = static_cast<float>(averageRenderMs);
+        } else if (target.metric == "averageGpuLightingMs") {
+            target.observed = static_cast<float>(averageLightingMs);
         } else if (target.metric == "calibrationHrrShapeRmse") {
             target.observed = calibration.hrrShapeRmse;
         } else if (target.metric == "calibrationMassShapeRmse") {
@@ -1976,6 +3253,12 @@ int runValidation(const std::string& args) {
             target.observed = calibration.irMaxShapeRmse;
         } else if (target.metric == "calibrationPlumeHeightRmseMeters") {
             target.observed = calibration.plumeHeightRmseMeters;
+        } else if (target.metric == "calibrationSmokeOpticalDepthShapeRmse") {
+            target.observed = calibration.smokeOpticalDepthShapeRmse;
+        } else if (target.metric == "calibrationSmokeExtinctionShapeRmse") {
+            target.observed = calibration.smokeExtinctionShapeRmse;
+        } else if (target.metric == "calibrationRadiantHeatFluxShapeRmse") {
+            target.observed = calibration.radiantHeatFluxShapeRmse;
         } else {
             target.matched = false;
         }
@@ -1983,7 +3266,9 @@ int runValidation(const std::string& args) {
         stable = stable && target.passed;
     }
 
-    stable = stable && finalMetrics.frameIndex >= kValidationFrames - 1;
+    const bool wroteComparison = writeCalibrationComparisonCsv(comparisonPath, calibrationPath, metricFrames);
+
+    stable = stable && finalMetrics.frameIndex >= validationFrames - 1;
     stable = stable && maxHeat > 0.50f;
     stable = stable && maxFlameHeight > 0.20f;
     stable = stable && imageStats.maxLuma > 0.12f;
@@ -1991,10 +3276,10 @@ int runValidation(const std::string& args) {
     stable = stable && (averageReduction > 0.02 || worstAfterL2 < 0.02f);
 
     composeAppFrame(appFrame, simFrame, finalSettings, true);
-    const bool wroteRaw = writeBmp("out\\validation-frame.bmp", simFrame, kFrameWidth, kFrameHeight);
-    const bool wroteApp = writeBmp("out\\validation-app-frame.bmp", appFrame, kFrameWidth, kFrameHeight);
+    const bool wroteRaw = writeBmp(rawFramePath.c_str(), simFrame, kFrameWidth, kFrameHeight);
+    const bool wroteApp = writeBmp(appFramePath.c_str(), appFrame, kFrameWidth, kFrameHeight);
 
-    std::ofstream json("out\\validation-report.json", std::ios::binary);
+    std::ofstream json(reportPath, std::ios::binary);
     if (!json) {
         fireCudaShutdown();
         return 3;
@@ -2010,13 +3295,16 @@ int runValidation(const std::string& args) {
     json << "    \"combustion\": \"fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable\",\n";
     json << "    \"turbulence\": \"LES-style scalar turbulence-energy closure\",\n";
     json << "    \"soot\": \"soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\",\n";
-    json << "    \"renderer\": \"linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\"\n";
+    json << "    \"renderer\": \"linear HDR blackbody Beer-Lambert participating media with scene radiance volume GI, volume shadowing, emitter scattering, and ACES display tonemapping\"\n";
     json << "  },\n";
-    json << "  \"runtimeConfig\": \"canonical\",\n";
+    json << "  \"runtimeConfig\": \"" << (poolFireCalibration ? "nist-pool-fire-calibration" : "canonical") << "\",\n";
+    json << "  \"datasetId\": \"" << jsonEscape(datasetId) << "\",\n";
+    json << "  \"manifestPath\": \"" << jsonEscape(manifestPath) << "\",\n";
+    json << "  \"outputDir\": \"" << jsonEscape(outputDir) << "\",\n";
     json << "  \"requestedGrid\": [" << kSimulationGridWidth << ", " << kSimulationGridHeight << "],\n";
     json << "  \"raymarchSteps\": " << kRaymarchSteps << ",\n";
     json << "  \"emberCount\": " << kEmberCount << ",\n";
-    json << "  \"frames\": " << kValidationFrames << ",\n";
+    json << "  \"frames\": " << validationFrames << ",\n";
     json << "  \"grid\": [" << finalMetrics.gridX << ", " << finalMetrics.gridY << ", " << finalMetrics.gridZ << "],\n";
     json << "  \"pressureIterations\": " << finalMetrics.pressureIterations << ",\n";
     json << "  \"targetEnvelopePath\": \"" << jsonEscape(targetPath) << "\",\n";
@@ -2033,15 +3321,31 @@ int runValidation(const std::string& args) {
     json << "    \"thermocoupleShapeRmse\": " << calibration.thermocoupleShapeRmse << ",\n";
     json << "    \"irMeanShapeRmse\": " << calibration.irMeanShapeRmse << ",\n";
     json << "    \"irMaxShapeRmse\": " << calibration.irMaxShapeRmse << ",\n";
-    json << "    \"plumeHeightRmseMeters\": " << calibration.plumeHeightRmseMeters << "\n";
+    json << "    \"plumeHeightRmseMeters\": " << calibration.plumeHeightRmseMeters << ",\n";
+    json << "    \"smokeOpticalDepthShapeRmse\": " << calibration.smokeOpticalDepthShapeRmse << ",\n";
+    json << "    \"smokeExtinctionShapeRmse\": " << calibration.smokeExtinctionShapeRmse << ",\n";
+    json << "    \"radiantHeatFluxShapeRmse\": " << calibration.radiantHeatFluxShapeRmse << ",\n";
+    json << "    \"hrrSamplesCompared\": " << calibration.hrrSamplesCompared << ",\n";
+    json << "    \"massSamplesCompared\": " << calibration.massSamplesCompared << ",\n";
+    json << "    \"smokeOpticalDepthSamplesCompared\": " << calibration.smokeOpticalDepthSamplesCompared << ",\n";
+    json << "    \"smokeExtinctionSamplesCompared\": " << calibration.smokeExtinctionSamplesCompared << ",\n";
+    json << "    \"radiantHeatFluxSamplesCompared\": " << calibration.radiantHeatFluxSamplesCompared << "\n";
     json << "  },\n";
     json << "  \"averageGpuSolveMs\": " << averageSolveMs << ",\n";
     json << "  \"averageGpuRenderMs\": " << averageRenderMs << ",\n";
+    json << "  \"averageGpuVelocityMs\": " << averageVelocityMs << ",\n";
+    json << "  \"averageGpuReactionMs\": " << averageReactionMs << ",\n";
+    json << "  \"averageGpuProjectionMs\": " << averageProjectionMs << ",\n";
+    json << "  \"averageGpuLightingMs\": " << averageLightingMs << ",\n";
+    json << "  \"averageGpuRaymarchMs\": " << averageRaymarchMs << ",\n";
+    json << "  \"averageGpuPackMs\": " << averagePackMs << ",\n";
     json << "  \"averageDivergenceReduction\": " << averageReduction << ",\n";
     json << "  \"minimumDivergenceReduction\": " << minReduction << ",\n";
     json << "  \"worstDivergenceAfterL2\": " << worstAfterL2 << ",\n";
     json << "  \"worstDivergenceAfterMax\": " << worstAfterMax << ",\n";
     json << "  \"finalMeanOpticalDepth\": " << finalMetrics.meanOpticalDepth << ",\n";
+    json << "  \"finalMeanSceneLight\": " << finalMetrics.meanSceneLight << ",\n";
+    json << "  \"finalMeanSceneShadow\": " << finalMetrics.meanSceneShadow << ",\n";
     json << "  \"finalHeatReleaseProxy\": " << finalMetrics.heatReleaseProxy << ",\n";
     json << "  \"finalCharSum\": " << finalMetrics.charSum << ",\n";
     json << "  \"finalAshSum\": " << finalMetrics.ashSum << ",\n";
@@ -2056,6 +3360,11 @@ int runValidation(const std::string& args) {
     json << "  \"maxFlameHeightMeters\": " << maxFlameHeight << ",\n";
     json << "  \"imageMeanLuma\": " << imageStats.meanLuma << ",\n";
     json << "  \"imageMaxLuma\": " << imageStats.maxLuma << ",\n";
+    json << "  \"imageMeanSaturation\": " << imageStats.meanSaturation << ",\n";
+    json << "  \"imageWarmFireFraction\": " << imageStats.warmFireFraction << ",\n";
+    json << "  \"imageTanSmokeFraction\": " << imageStats.tanSmokeFraction << ",\n";
+    json << "  \"imageBlackSmokeFraction\": " << imageStats.blackSmokeFraction << ",\n";
+    json << "  \"imageWhiteCoreFraction\": " << imageStats.whiteCoreFraction << ",\n";
     json << "  \"imageBrightPixels\": " << imageStats.brightPixels << ",\n";
     json << "  \"imageBrightFraction\": " << imageStats.brightFraction << ",\n";
     json << "  \"targetEnvelopes\": [\n";
@@ -2068,10 +3377,11 @@ int runValidation(const std::string& args) {
         json << (i + 1 == targets.size() ? "\n" : ",\n");
     }
     json << "  ],\n";
-    json << "  \"outputs\": [\"out/validation-metrics.csv\", \"out/validation-report.json\", \"out/validation-frame.bmp\", \"out/validation-app-frame.bmp\"]\n";
+    json << "  \"outputs\": [\"" << jsonEscape(metricsPath) << "\", \"" << jsonEscape(comparisonPath) << "\", \"" << jsonEscape(reportPath)
+         << "\", \"" << jsonEscape(rawFramePath) << "\", \"" << jsonEscape(appFramePath) << "\"]\n";
     json << "}\n";
 
-    const bool ok = stable && wroteRaw && wroteApp && json.good() && csv.good();
+    const bool ok = stable && wroteComparison && wroteRaw && wroteApp && json.good() && csv.good();
     fireCudaShutdown();
     return ok ? 0 : 4;
 }
@@ -2080,6 +3390,8 @@ int runDiagnostics() {
     CreateDirectoryA("out", nullptr);
     FireCudaDiagnostics diagnostics;
     const bool cudaOk = fireCudaGetDiagnostics(&diagnostics);
+    std::string interopDetail = "skipped";
+    const bool d3dInteropOk = cudaOk && runD3DInteropProbe(interopDetail);
 
     std::ofstream out("out\\diagnostics.txt", std::ios::binary);
     if (!out) {
@@ -2103,30 +3415,36 @@ int runDiagnostics() {
     out << "runtimeBackend=CUDA\n";
     out << "liveCudaDefault=isolated-worker\n";
     out << "mainViewportKernelLaunches=false\n";
-    out << "interactiveCudaViewport=shared-memory worker frames\n";
-    out << "mainViewportMode=real CUDA worker volume with safe animated fallback\n";
+    out << "interactiveCudaViewport=FP16 D3D11 shared texture from isolated CUDA worker\n";
+    out << "d3dCudaInteropOk=" << (d3dInteropOk ? "true" : "false") << "\n";
+    out << "d3dCudaInteropDetail=" << interopDetail << "\n";
+    out << "mainViewportMode=real CUDA worker volume; no animated simulation fallback\n";
     out << "workerProcessIsolation=true\n";
     out << "sharedFrameTransport=" << kSharedViewportName << "\n";
     out << "workerFrameStaleMs=" << kWorkerFrameStaleMs << "\n";
     out << "workerHeartbeatStaleMs=" << kWorkerHeartbeatStaleMs << "\n";
     out << "workerKillStaleMs=" << kWorkerKillStaleMs << "\n";
     out << "workerRestartLimitPerMinute=" << kWorkerRestartLimit << "\n";
+    out << "presentationTargetFps=300\n";
+    out << "presentVsync=false\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
-    out << "pressureIterations=24\n";
+    out << "pressureIterations=40\n";
     out << "combustionModel=fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable\n";
     out << "turbulenceModel=LES-style scalar turbulence-energy closure\n";
     out << "sootModel=soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\n";
-    out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with volume shadowing, emitter scattering, and ACES display tonemapping\n";
-    out << "rendererStorage=CUDA float4 HDR radiance before final BGRA display pack\n";
+    out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with scene radiance volume GI, volume shadowing, emitter scattering, and ACES display tonemapping\n";
+    out << "rendererStorage=CUDA float4 HDR radiance written directly to mapped FP16 D3D11 surface for live display\n";
+    out << "renderDebugModes=final,flame,soot,transmittance,temperature,fuel-char,velocity\n";
+    out << "cleanViewportMode=C key hides app chrome and CUDA gizmos for visual judging\n";
     out << "scalarTransport=clamped MacCormack/BFECC correction for transported scalar fields\n";
     out << "calibrationInputs=HRR,mass loss,thermocouple,IR,video-derived plume height,geometry sidecar\n";
     out << "runtimeConfig=canonical\n";
     out << "requestedGrid=" << kSimulationGridWidth << "x" << kSimulationGridHeight << "\n";
     out << "raymarchSteps=" << kRaymarchSteps << "\n";
     out << "emberCount=" << kEmberCount << "\n";
-    return out.good() && cudaOk ? 0 : 2;
+    return out.good() && cudaOk && d3dInteropOk ? 0 : 2;
 }
 
 } // namespace
@@ -2135,6 +3453,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     const std::string args = commandLine != nullptr ? commandLine : "";
     if (args.find("--diagnostics") != std::string::npos) {
         return runDiagnostics();
+    }
+    if (args.find("--worker-benchmark") != std::string::npos) {
+        return runWorkerBenchmark(args);
     }
     if (args.find("--cuda-worker") != std::string::npos) {
         return runCudaWorker(args);
@@ -2159,13 +3480,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
 
     timeBeginPeriod(1);
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
-    prepareSafeViewportFrame(g_safeBaseFrame);
-    g_simFrame = g_safeBaseFrame;
+    clearSimulationFrame(g_simFrame);
     initializeSharedViewport(true);
-    initializeBitmapInfo();
 
     if (!createMainWindow(instance)) {
         MessageBoxA(nullptr, "Failed to create the Native FireSim window.", "Native FireSim", MB_ICONERROR);
+        return 1;
+    }
+    if (!initializeD3D(g_window)) {
+        MessageBoxA(nullptr, g_workerUiStatus, "Native FireSim D3D11", MB_ICONERROR);
         return 1;
     }
     if (g_cudaWorkerRequested) {
@@ -2177,7 +3500,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
     auto fpsLast = last;
-    int frames = 0;
+    unsigned long long lastProfileCopyCalls = 0;
+    unsigned long long lastProfileCopiedFrames = 0;
+    unsigned long long lastProfilePresentCalls = 0;
+    unsigned long long lastProfileCopyMicros = 0;
+    unsigned long long lastProfilePresentMicros = 0;
+    int visualFrames = 0;
     float fps = 0.0f;
 
     MSG msg = {};
@@ -2201,40 +3529,98 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.leftDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 1) ? 1 : 0;
         settings.rightDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 2) ? 1 : 0;
         settings.reset = g_needsReset ? 1 : 0;
-        settings.showGizmos = g_showGizmos ? 1 : 0;
+        settings.showGizmos = (g_showGizmos && !g_cleanViewportMode) ? 1 : 0;
         settings.activeGizmo = g_activeGizmo;
         settings.wind = g_wind;
         applyCanonicalFireSettings(settings);
+        settings.renderDebugMode = g_renderDebugMode;
         settings.turbulence = std::max(g_turbulence, kTurbulence);
         settings.detail = 0.92f;
         settings.cameraYaw = g_cameraYaw;
         settings.cameraPitch = g_cameraPitch;
         settings.cameraDistance = g_cameraDistance;
         if (g_needsReset) {
-            prepareSafeViewportFrame(g_safeBaseFrame);
-            g_safePreviewTime = 0.0f;
+            clearSimulationFrame(g_simFrame);
             g_needsReset = false;
         }
 
-        writeWorkerSettings(settings);
+        FireSettings workerSettings = settings;
+        workerSettings.showGizmos = 0;
+        writeWorkerSettings(workerSettings);
         serviceCudaWorkerWatchdog();
-        g_cudaWorkerFrameLive = g_cudaWorkerRequested && readWorkerFrame(g_simFrame);
-        g_useCudaBackend = g_cudaWorkerFrameLive;
-        if (!g_cudaWorkerFrameLive) {
-            g_safePreviewTime += dt;
-            renderSafeAnimatedViewport(g_simFrame, g_safeBaseFrame, settings, g_safePreviewTime);
+        const auto copyStart = Clock::now();
+        ++g_liveCopyCalls;
+        const bool copiedWorkerFrame = g_cudaWorkerRequested && copyD3DWorkerFrame();
+        g_liveCopyMicros += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - copyStart).count());
+        if (copiedWorkerFrame) {
+            ++g_liveCopiedFrames;
         }
-        composeAppFrame(g_frame, g_simFrame, settings, g_useCudaBackend);
+        const bool workerTimestampFresh = workerFrameMetadataFresh();
+        g_cudaWorkerFrameLive = (copiedWorkerFrame || workerTimestampFresh) && g_d3d.hasSimFrame;
+        g_useCudaBackend = g_cudaWorkerFrameLive;
+        if (!g_cudaWorkerFrameLive && !copiedWorkerFrame) {
+            clearSimulationFrame(g_simFrame);
+        }
+        g_displayExposure = settings.exposure;
+        const bool overlayDirty = overlayStateDirty(settings, g_useCudaBackend, g_cleanViewportMode);
+        const bool displayTick = g_cudaWorkerFrameLive && g_d3d.hasSimFrame;
+        const bool presentDirty = displayTick || overlayDirty || !g_cudaWorkerFrameLive;
+        bool presented = false;
+        if (presentDirty) {
+            if (g_useCudaBackend) {
+                composeD3DOverlayFrame(g_frame, settings, true, g_cleanViewportMode);
+            } else {
+                composeAppFrame(g_frame, g_simFrame, settings, false, g_cleanViewportMode);
+            }
+            rememberOverlayState(settings, g_useCudaBackend, g_cleanViewportMode);
+            const auto presentStart = Clock::now();
+            presented = renderD3DFrame(g_useCudaBackend, g_displayExposure);
+            g_livePresentMicros += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - presentStart).count());
+            ++g_livePresentCalls;
+            if (!presented) {
+                ++g_livePresentFailures;
+            }
+        }
 
-        InvalidateRect(g_window, nullptr, FALSE);
-        UpdateWindow(g_window);
-
-        ++frames;
-        const float fpsElapsed = std::chrono::duration<float>(now - fpsLast).count();
+        if (presented) {
+            ++visualFrames;
+        }
+        const auto frameEnd = Clock::now();
+        const float fpsElapsed = std::chrono::duration<float>(frameEnd - fpsLast).count();
         if (fpsElapsed >= 0.5f) {
-            fps = static_cast<float>(frames) / fpsElapsed;
-            frames = 0;
-            fpsLast = now;
+            fps = static_cast<float>(visualFrames) / fpsElapsed;
+            visualFrames = 0;
+            fpsLast = frameEnd;
+            g_visualFps = fps;
+            const unsigned long long copyCallsDelta = g_liveCopyCalls - lastProfileCopyCalls;
+            const unsigned long long copiedDelta = g_liveCopiedFrames - lastProfileCopiedFrames;
+            const unsigned long long presentDelta = g_livePresentCalls - lastProfilePresentCalls;
+            const unsigned long long copyMicrosDelta = g_liveCopyMicros - lastProfileCopyMicros;
+            const unsigned long long presentMicrosDelta = g_livePresentMicros - lastProfilePresentMicros;
+            g_liveCopyCallHz = static_cast<double>(copyCallsDelta) / static_cast<double>(fpsElapsed);
+            g_liveCopiedHz = static_cast<double>(copiedDelta) / static_cast<double>(fpsElapsed);
+            g_livePresentHz = static_cast<double>(presentDelta) / static_cast<double>(fpsElapsed);
+            g_liveIntervalCopyMs = copyCallsDelta == 0 ? 0.0 : static_cast<double>(copyMicrosDelta) / (1000.0 * static_cast<double>(copyCallsDelta));
+            g_liveIntervalPresentMs = presentDelta == 0 ? 0.0 : static_cast<double>(presentMicrosDelta) / (1000.0 * static_cast<double>(presentDelta));
+            lastProfileCopyCalls = g_liveCopyCalls;
+            lastProfileCopiedFrames = g_liveCopiedFrames;
+            lastProfilePresentCalls = g_livePresentCalls;
+            lastProfileCopyMicros = g_liveCopyMicros;
+            lastProfilePresentMicros = g_livePresentMicros;
+            char profileDetail[256] = {};
+            std::snprintf(
+                profileDetail,
+                sizeof(profileDetail),
+                "uiFps=%.1f copyCallsHz=%.1f copiedHz=%.1f presentHz=%.1f copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
+                g_visualFps,
+                g_liveCopyCallHz,
+                g_liveCopiedHz,
+                g_livePresentHz,
+                g_liveIntervalCopyMs,
+                g_liveIntervalPresentMs,
+                static_cast<long>(g_lastCopiedWorkerSequence),
+                g_sharedViewport == nullptr ? -1L : static_cast<long>(g_sharedViewport->latestFrameSlot));
+            appendRuntimeEvent("live-profile", profileDetail);
             updateTitle(fps);
         }
 
@@ -2245,7 +3631,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 Sleep(sleepMs);
             }
         } else {
-            Sleep(1);
+            Sleep(0);
         }
     }
 

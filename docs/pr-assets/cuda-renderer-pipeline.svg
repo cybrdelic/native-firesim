@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">CUDA fire simulation and validation pipeline</title>
+  <desc id="desc">Diagram showing how fuel state enters CUDA fields, pressure projection, soot optics, volume raymarching, debug channels, and validation reports.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#08090b"/>
+      <stop offset="1" stop-color="#17120f"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff7c2"/>
+      <stop offset="0.45" stop-color="#ffb22a"/>
+      <stop offset="1" stop-color="#c63d13"/>
+    </linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f2a84c"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="url(#bg)"/>
+  <text x="60" y="70" fill="#f7f2e7" font-family="Consolas, monospace" font-size="31" font-weight="700">Native FireSim CUDA renderer proof path</text>
+  <text x="60" y="105" fill="#9fb3bd" font-family="Consolas, monospace" font-size="17">Simulation, rendering, diagnostics, and lab-grade validation are now connected instead of being separate guesses.</text>
+
+  <g font-family="Consolas, monospace" font-size="18">
+    <rect x="70" y="185" width="180" height="112" rx="10" fill="#141516" stroke="#765238" stroke-width="2"/>
+    <text x="100" y="226" fill="#f7f2e7">Fuel bed</text>
+    <text x="100" y="256" fill="#8f9aa0" font-size="14">fuel, char, ash</text>
+
+    <rect x="320" y="185" width="190" height="112" rx="10" fill="#141516" stroke="#334d62" stroke-width="2"/>
+    <text x="350" y="226" fill="#f7f2e7">CUDA MAC grid</text>
+    <text x="350" y="256" fill="#8f9aa0" font-size="14">velocity + scalar fields</text>
+
+    <rect x="580" y="185" width="190" height="112" rx="10" fill="#141516" stroke="#415866" stroke-width="2"/>
+    <text x="610" y="226" fill="#f7f2e7">Projection</text>
+    <text x="610" y="256" fill="#8f9aa0" font-size="14">pressure iterations</text>
+
+    <rect x="840" y="185" width="220" height="112" rx="10" fill="#141516" stroke="#784825" stroke-width="2"/>
+    <text x="870" y="226" fill="#f7f2e7">Soot optics</text>
+    <text x="870" y="256" fill="#8f9aa0" font-size="14">absorb + scatter</text>
+
+    <path d="M250 241 H310" stroke="#f2a84c" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M510 241 H570" stroke="#f2a84c" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M770 241 H830" stroke="#f2a84c" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="320" y="395" width="210" height="118" rx="10" fill="#141516" stroke="#806730" stroke-width="2"/>
+    <text x="350" y="437" fill="#f7f2e7">Volume raymarch</text>
+    <text x="350" y="468" fill="#8f9aa0" font-size="14">domain fade + HDR logic</text>
+
+    <rect x="610" y="395" width="190" height="118" rx="10" fill="#141516" stroke="#36506a" stroke-width="2"/>
+    <text x="640" y="437" fill="#f7f2e7">Debug modes</text>
+    <text x="640" y="468" fill="#8f9aa0" font-size="14">flame, soot, temp, fuel</text>
+
+    <rect x="875" y="395" width="220" height="118" rx="10" fill="#141516" stroke="#55614c" stroke-width="2"/>
+    <text x="905" y="437" fill="#f7f2e7">Validation report</text>
+    <text x="905" y="468" fill="#8f9aa0" font-size="14">NIST targets + color metrics</text>
+
+    <path d="M950 297 C950 348 425 334 425 386" stroke="#f2a84c" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+    <path d="M530 454 H600" stroke="#f2a84c" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M800 454 H865" stroke="#f2a84c" stroke-width="3" marker-end="url(#arrow)"/>
+  </g>
+
+  <g filter="url(#softGlow)">
+    <circle cx="155" cy="365" r="46" fill="url(#hot)" opacity="0.72"/>
+    <path d="M129 386 C140 325 185 315 170 252 C211 305 226 357 190 411 C171 434 132 424 129 386 z" fill="url(#hot)" opacity="0.52"/>
+  </g>
+  <text x="72" y="592" fill="#c9d5d9" font-family="Consolas, monospace" font-size="15">PR evidence asset: docs/pr-assets/cuda-renderer-pipeline.svg</text>
+</svg>

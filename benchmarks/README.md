@@ -25,6 +25,14 @@ The first checked-in real dataset is `nist-fcd/methanol-1m-pool-r1`. Rebuild it 
 
 That dataset has direct HRR, gas, radiant heat-flux, and smoke-extinction channels plus derived fuel-mass and optical-depth columns. It does not claim IR-frame, thermocouple, or plume-height calibration because those are not numeric channels in the FCD CSV export.
 
+Run the CUDA-vs-NIST calibration path with:
+
+```powershell
+.\scripts\run-nist-calibration.ps1 -RunGpuKernels -AcceptBugcheckRisk
+```
+
+The runner resolves the manifest, verifies provenance and hashes, passes geometry/calibration/target envelopes to the native CUDA validation harness, and writes comparison artifacts under `out/validation/NIST_FCD_Methanol_1m_Pool_R1`.
+
 Run the no-GPU lab-grade preflight:
 
 ```powershell
@@ -37,11 +45,13 @@ Use this before admitting a real measured burn dataset:
 .\scripts\verify-lab-grade.ps1 -RequireRealDataset
 ```
 
-Current validation compares normalized curve shapes for HRR, mass loss, thermocouples, and IR because no real dataset is checked in. Once a measured dataset exists, replace the proxy envelopes with experiment-specific tolerances and add target rows such as:
+Current validation compares normalized curve shapes for the real NIST dataset channels that the CUDA metrics can currently proxy: HRR, derived fuel mass, smoke optical depth, and radiant heat flux. Thermocouple, IR, and plume-height rows remain templates until a dataset or sidecar extraction path supplies those channels. Target rows look like:
 
 ```csv
 calibrationHrrShapeRmse,0.00,0.18
 calibrationMassShapeRmse,0.00,0.18
+calibrationSmokeOpticalDepthShapeRmse,0.00,0.22
+calibrationRadiantHeatFluxShapeRmse,0.00,0.25
 calibrationThermocoupleShapeRmse,0.00,0.22
 calibrationIrMeanShapeRmse,0.00,0.22
 calibrationIrMaxShapeRmse,0.00,0.22

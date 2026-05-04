@@ -23,6 +23,12 @@ struct FireCudaFrameMetrics {
     float timeSeconds = 0.0f;
     float gpuSolveMs = 0.0f;
     float gpuRenderMs = 0.0f;
+    float gpuVelocityMs = 0.0f;
+    float gpuReactionMs = 0.0f;
+    float gpuProjectionMs = 0.0f;
+    float gpuLightingMs = 0.0f;
+    float gpuRaymarchMs = 0.0f;
+    float gpuPackMs = 0.0f;
     float heatSum = 0.0f;
     float fuelSum = 0.0f;
     float oxygenSum = 0.0f;
@@ -41,6 +47,8 @@ struct FireCudaFrameMetrics {
     float maxTurbulenceEnergy = 0.0f;
     float flameHeightMeters = 0.0f;
     float meanOpticalDepth = 0.0f;
+    float meanSceneLight = 0.0f;
+    float meanSceneShadow = 0.0f;
     float heatReleaseProxy = 0.0f;
     float divergenceBeforeL2 = 0.0f;
     float divergenceBeforeMax = 0.0f;
@@ -71,6 +79,7 @@ struct FireSettings {
     int cinematicMode = 0;
     int raymarchSteps = 56;
     int emberCount = 96;
+    int renderDebugMode = 0;
     float exposure = 1.0f;
     float reflectionGain = 1.0f;
     float smokeDarkness = 1.0f;
@@ -79,6 +88,12 @@ struct FireSettings {
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);
 bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settings);
 bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics);
+bool fireCudaSelectDeviceForD3D11(void* d3d11Device);
+bool fireCudaRegisterD3D11Texture(void* d3d11Texture);
+bool fireCudaStepAndRenderD3D11(const FireSettings& settings);
+bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFrameMetrics* metrics);
+bool fireCudaRenderD3D11(const FireSettings& settings);
+void fireCudaUnregisterD3D11Texture();
 bool fireCudaReset();
 bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics);
 void fireCudaShutdown();
