@@ -90,6 +90,7 @@ bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settin
 bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics);
 bool fireCudaSelectDeviceForD3D11(void* d3d11Device);
 bool fireCudaRegisterD3D11Texture(void* d3d11Texture);
+bool fireCudaStepD3D11(const FireSettings& settings);
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings);
 bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFrameMetrics* metrics);
 bool fireCudaRenderD3D11(const FireSettings& settings);

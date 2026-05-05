@@ -724,7 +724,7 @@ void updateMouseFromLParam(LPARAM lParam) {
 void updateTitle(float fps) {
     char title[256] = {};
     const double headlineFps = g_useCudaBackend
-        ? (g_liveCopiedHz > 0.0 ? g_liveCopiedHz : static_cast<double>(fps))
+        ? (g_visualFps > 0.0f ? static_cast<double>(g_visualFps) : static_cast<double>(fps))
         : static_cast<double>(fps);
     std::snprintf(
         title,
@@ -2372,11 +2372,12 @@ int runCudaWorker(const std::string& args) {
         settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
         applyCanonicalFireSettings(settings);
         const auto frameStart = Clock::now();
-        if (!(advancePhysics ? fireCudaStepAndRenderD3D11(settings) : fireCudaRenderD3D11(settings))) {
+        const bool producedFrame = !advancePhysics;
+        if (!(advancePhysics ? fireCudaStepD3D11(settings) : fireCudaRenderD3D11(settings))) {
             g_sharedViewport->workerStatus = -2;
             InterlockedIncrement(&g_sharedViewport->workerErrorCount);
             g_sharedViewport->workerExitCode = 4;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA/D3D %s failed: %.138s", advancePhysics ? "step" : "render", fireCudaLastError());
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA %s failed: %.142s", advancePhysics ? "step" : "render", fireCudaLastError());
             appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
             break;
         }
@@ -2387,6 +2388,16 @@ int runCudaWorker(const std::string& args) {
             framesSincePhysics += 1;
         }
         const auto cudaDone = Clock::now();
+        if (!producedFrame) {
+            g_sharedViewport->workerHeartbeatTickMs = tickMs();
+            g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
+            g_sharedViewport->workerFrameMicros = g_sharedViewport->workerCudaMicros;
+            g_sharedViewport->workerPublishMicros = 0;
+            g_sharedViewport->workerStatus = 2;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker stepped physics; rendering next frame");
+            Sleep(0);
+            continue;
+        }
 
         int publishSlot = -1;
         HRESULT acquire = static_cast<HRESULT>(WAIT_TIMEOUT);

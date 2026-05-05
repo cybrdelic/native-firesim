@@ -1777,8 +1777,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
         return;
     }
-    if (p.renderSubsample == 32) {
-        if ((y & 31) != (p.renderPhase & 31)) {
+    if (p.renderSubsample > 1) {
+        if ((y % p.renderSubsample) != (p.renderPhase % p.renderSubsample)) {
             return;
         }
     }
@@ -2090,8 +2090,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16SurfaceKernel(
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
         return;
     }
-    if (p.renderSubsample == 32) {
-        if ((y & 31) != (p.renderPhase & 31)) {
+    if (p.renderSubsample > 1) {
+        if ((y % p.renderSubsample) != (p.renderPhase % p.renderSubsample)) {
             return;
         }
     }
@@ -2587,17 +2587,27 @@ bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics) {
     return true;
 }
 
-bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics, bool writeD3DInterop, bool advanceSimulation) {
+bool stepAndRenderInternal(
+    std::uint32_t* bgraPixels,
+    const FireSettings& settings,
+    FireCudaFrameMetrics* metrics,
+    bool writeD3DInterop,
+    bool advanceSimulation,
+    bool renderOutput) {
     if (g_heat == nullptr || g_frameDevice == nullptr || g_hdrFrameDevice == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "CUDA renderer is not initialized.");
         return false;
     }
-    if (!writeD3DInterop && bgraPixels == nullptr) {
+    if (renderOutput && !writeD3DInterop && bgraPixels == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "Output pixel pointer was null.");
         return false;
     }
-    if (writeD3DInterop && g_d3dFp16Resource == nullptr) {
+    if (renderOutput && writeD3DInterop && g_d3dFp16Resource == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 FP16 interop texture is not registered.");
+        return false;
+    }
+    if (!renderOutput && !advanceSimulation) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "Step-only path requires simulation advancement.");
         return false;
     }
 
@@ -2631,7 +2641,7 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
     updateCameraCache(params);
     const bool renderViewChanged = consumeRenderViewChanged(params);
     params.renderSubsample = advanceSimulation || renderViewChanged || params.renderDebugMode != 0 ? 1 : 32;
-    params.renderPhase = g_frameIndex & 31;
+    params.renderPhase = g_frameIndex % std::max(1, params.renderSubsample);
 
     if (settings.reset != 0 && !fireCudaReset()) {
         return false;
@@ -2778,6 +2788,11 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
             std::snprintf(g_lastError, sizeof(g_lastError), "Render-only measured path is not supported.");
             return false;
         }
+    }
+
+    if (!renderOutput) {
+        ++g_frameIndex;
+        return true;
     }
 
     const dim3 frameBlock(16, 16);
@@ -2978,7 +2993,7 @@ bool stepAndRenderInternal(std::uint32_t* bgraPixels, const FireSettings& settin
 }
 
 bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settings) {
-    return stepAndRenderInternal(bgraPixels, settings, nullptr, false, true);
+    return stepAndRenderInternal(bgraPixels, settings, nullptr, false, true, true);
 }
 
 bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics) {
@@ -2986,7 +3001,7 @@ bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings
         std::snprintf(g_lastError, sizeof(g_lastError), "Metrics output pointer was null.");
         return false;
     }
-    return stepAndRenderInternal(bgraPixels, settings, metrics, false, true);
+    return stepAndRenderInternal(bgraPixels, settings, metrics, false, true, true);
 }
 
 bool fireCudaSelectDeviceForD3D11(void* d3d11Device) {
@@ -3019,7 +3034,7 @@ bool fireCudaRegisterD3D11Texture(void* d3d11Texture) {
 }
 
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings) {
-    return stepAndRenderInternal(nullptr, settings, nullptr, true, true);
+    return stepAndRenderInternal(nullptr, settings, nullptr, true, true, true);
 }
 
 bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFrameMetrics* metrics) {
@@ -3027,11 +3042,15 @@ bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFr
         std::snprintf(g_lastError, sizeof(g_lastError), "Metrics output pointer was null.");
         return false;
     }
-    return stepAndRenderInternal(nullptr, settings, metrics, true, true);
+    return stepAndRenderInternal(nullptr, settings, metrics, true, true, true);
+}
+
+bool fireCudaStepD3D11(const FireSettings& settings) {
+    return stepAndRenderInternal(nullptr, settings, nullptr, false, true, false);
 }
 
 bool fireCudaRenderD3D11(const FireSettings& settings) {
-    return stepAndRenderInternal(nullptr, settings, nullptr, true, false);
+    return stepAndRenderInternal(nullptr, settings, nullptr, true, false, true);
 }
 
 void fireCudaUnregisterD3D11Texture() {
