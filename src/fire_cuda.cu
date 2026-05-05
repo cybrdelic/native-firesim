@@ -1574,18 +1574,18 @@ __device__ float3 roomBackgroundRay(
         }
     }
 
-    float3 color = make_float3(0.062f, 0.062f, 0.061f);
-    float3 materialAlbedo = make_float3(0.62f, 0.62f, 0.60f);
-    float materialGiScale = 0.58f;
+    float3 color = make_float3(0.026f, 0.026f, 0.025f);
+    float3 materialAlbedo = make_float3(0.42f, 0.42f, 0.40f);
+    float materialGiScale = 0.34f;
     if (surface == 1) {
         const float panelSeam = floorGrid(hit.x, hit.z, 1.18f, 0.010f);
         const float fineSeam = floorGrid(hit.x + 0.09f, hit.z - 0.04f, 5.6f, 0.006f);
         const float slabTone = sinf(hit.x * 2.20f + hit.z * 1.40f) * 0.50f + sinf(hit.z * 3.10f - hit.x * 0.80f) * 0.50f;
-        color = cinematic ? make_float3(0.050f, 0.050f, 0.049f) : make_float3(0.046f, 0.046f, 0.045f);
-        color = add3(color, mul3(make_float3(0.020f, 0.020f, 0.019f), slabTone * 0.020f));
-        color = lerp3(color, make_float3(0.026f, 0.026f, 0.025f), saturate(panelSeam * 0.52f + fineSeam * 0.18f));
-        materialAlbedo = make_float3(0.54f, 0.54f, 0.52f);
-        materialGiScale = 0.42f;
+        color = cinematic ? make_float3(0.027f, 0.027f, 0.026f) : make_float3(0.024f, 0.024f, 0.023f);
+        color = add3(color, mul3(make_float3(0.014f, 0.014f, 0.013f), slabTone * 0.018f));
+        color = lerp3(color, make_float3(0.014f, 0.014f, 0.013f), saturate(panelSeam * 0.52f + fineSeam * 0.18f));
+        materialAlbedo = make_float3(0.38f, 0.38f, 0.36f);
+        materialGiScale = 0.30f;
 
         const float trayBody = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(1.08f, 0.58f), 0.022f);
         const float trayInner = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(0.96f, 0.47f), 0.020f);
@@ -1607,34 +1607,34 @@ __device__ float3 roomBackgroundRay(
         materialAlbedo = lerp3(materialAlbedo, make_float3(0.030f, 0.024f, 0.020f), trayBody * 0.75f);
         materialGiScale = lerpf(materialGiScale, 0.48f, trayBody * 0.85f);
     } else if (surface == 2) {
-        color = cinematic ? make_float3(0.042f, 0.042f, 0.041f) : make_float3(0.038f, 0.038f, 0.038f);
-        materialAlbedo = make_float3(0.55f, 0.55f, 0.53f);
-        materialGiScale = 0.42f;
+        color = cinematic ? make_float3(0.021f, 0.021f, 0.020f) : make_float3(0.019f, 0.019f, 0.018f);
+        materialAlbedo = make_float3(0.36f, 0.36f, 0.34f);
+        materialGiScale = 0.26f;
         const float panelA = lineMask(make_float2(hit.x, hit.z), make_float2(-1.2f, -2.0f), make_float2(-1.2f, 2.0f), 0.010f);
         const float panelB = lineMask(make_float2(hit.x, hit.z), make_float2(0.0f, -2.0f), make_float2(0.0f, 2.0f), 0.008f);
         const float ceilingGrid = floorGrid(hit.x + 0.18f, hit.z - 0.10f, 1.02f, 0.007f);
         const float ceilingRib = floorGrid(hit.x - 0.08f, hit.z + 0.22f, 0.42f, 0.004f);
         const float fixtureL = expf(-((hit.x + 1.50f) * (hit.x + 1.50f) + (hit.z - 0.92f) * (hit.z - 0.92f)) * 120.0f);
         const float fixtureR = expf(-((hit.x - 1.72f) * (hit.x - 1.72f) + (hit.z - 0.80f) * (hit.z - 0.80f)) * 120.0f);
-        color = lerp3(color, make_float3(0.025f, 0.025f, 0.024f), saturate(ceilingGrid * 0.34f + ceilingRib * 0.13f));
-        color = add3(color, mul3(make_float3(0.16f, 0.155f, 0.145f), (panelA + panelB) * 0.10f));
-        color = add3(color, mul3(make_float3(0.46f, 0.39f, 0.30f), (fixtureL + fixtureR) * 0.18f));
+        color = lerp3(color, make_float3(0.011f, 0.011f, 0.010f), saturate(ceilingGrid * 0.34f + ceilingRib * 0.13f));
+        color = add3(color, mul3(make_float3(0.10f, 0.096f, 0.088f), (panelA + panelB) * 0.08f));
+        color = add3(color, mul3(make_float3(0.26f, 0.20f, 0.13f), (fixtureL + fixtureR) * 0.10f));
     } else {
-        color = cinematic ? make_float3(0.058f, 0.058f, 0.056f) : color;
-        materialAlbedo = make_float3(0.60f, 0.60f, 0.58f);
-        materialGiScale = 0.64f;
+        color = cinematic ? make_float3(0.028f, 0.028f, 0.027f) : color;
+        materialAlbedo = make_float3(0.40f, 0.40f, 0.38f);
+        materialGiScale = 0.36f;
         const float wallU = surface == 3 ? hit.z : hit.x;
         const float panelSeam = floorGrid(wallU + 0.10f, hit.y - 0.06f, 1.08f, 0.007f);
         const float baseShadow = smoothstepf(0.34f, 0.02f, hit.y);
         const float crownShadow = smoothstepf(ceilingY - 0.32f, ceilingY - 0.02f, hit.y);
-        color = lerp3(color, make_float3(0.037f, 0.037f, 0.036f), panelSeam * 0.34f);
-        color = lerp3(color, make_float3(0.026f, 0.026f, 0.025f), saturate(baseShadow * 0.30f + crownShadow * 0.20f));
+        color = lerp3(color, make_float3(0.017f, 0.017f, 0.016f), panelSeam * 0.34f);
+        color = lerp3(color, make_float3(0.012f, 0.012f, 0.011f), saturate(baseShadow * 0.30f + crownShadow * 0.20f));
         if (surface == 4 && hit.z > 0.0f) {
             const float recess = rectMask(make_float2(hit.x, hit.y), make_float2(0.0f, 1.00f), make_float2(0.92f, 0.72f), 0.055f);
             const float recessEdge = lineMask(make_float2(hit.x, hit.y), make_float2(-0.92f, 0.28f), make_float2(-0.92f, 1.72f), 0.010f) +
                 lineMask(make_float2(hit.x, hit.y), make_float2(0.92f, 0.28f), make_float2(0.92f, 1.72f), 0.010f);
-            color = lerp3(color, make_float3(0.034f, 0.034f, 0.033f), recess * 0.42f);
-            color = add3(color, mul3(make_float3(0.080f, 0.076f, 0.066f), recessEdge * 0.040f));
+            color = lerp3(color, make_float3(0.015f, 0.015f, 0.014f), recess * 0.42f);
+            color = add3(color, mul3(make_float3(0.050f, 0.046f, 0.038f), recessEdge * 0.030f));
         }
         const float soot = expf(-(hit.x * hit.x * 0.82f + hit.z * hit.z * 1.12f)) * smoothstepf(0.36f, 1.92f, hit.y);
         color = lerp3(color, make_float3(0.010f, 0.011f, 0.012f), soot * 0.82f * p.smokeDarkness);
@@ -1668,7 +1668,7 @@ __device__ float3 roomBackgroundRay(
     color = add3(color, make_float3(grain, grain, grain));
     const float fog = smoothstepf(3.8f, 0.2f, bestT);
     const float vignette = smoothstepf(0.78f, 0.20f, sqrtf((uv.x - 0.50f) * (uv.x - 0.50f) + (uv.y - 0.46f) * (uv.y - 0.46f)));
-    return mul3(color, (0.34f + fog * 0.66f) * (0.76f + vignette * 0.24f));
+    return mul3(color, (0.22f + fog * 0.68f) * (0.70f + vignette * 0.30f));
 }
 
 __device__ bool intersectBox(float3 ro, float3 rd, float3 bmin, float3 bmax, float* outNear, float* outFar) {

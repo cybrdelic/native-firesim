@@ -205,6 +205,7 @@ double g_livePresentHz = 0.0;
 double g_liveIntervalCopyMs = 0.0;
 double g_liveIntervalPresentMs = 0.0;
 bool g_useNonBlockingPresent = true;
+bool g_uiTextureUploaded = false;
 
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
     return a.width == b.width &&
@@ -722,7 +723,9 @@ void updateMouseFromLParam(LPARAM lParam) {
 
 void updateTitle(float fps) {
     char title[256] = {};
-    const double headlineFps = (g_useCudaBackend && g_livePresentHz > 0.0) ? g_livePresentHz : static_cast<double>(fps);
+    const double headlineFps = g_useCudaBackend
+        ? (g_liveCopiedHz > 0.0 ? g_liveCopiedHz : static_cast<double>(fps))
+        : static_cast<double>(fps);
     std::snprintf(
         title,
         sizeof(title),
@@ -1174,11 +1177,14 @@ bool copyD3DWorkerFrame() {
     return true;
 }
 
-bool renderD3DFrame(bool drawSim, float exposure) {
+bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
     if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
         return false;
     }
-    g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
+    if (uploadUi || !g_uiTextureUploaded) {
+        g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
+        g_uiTextureUploaded = true;
+    }
 
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
@@ -1354,7 +1360,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_PAINT: {
         PAINTSTRUCT ps = {};
         BeginPaint(hwnd, &ps);
-        renderD3DFrame(g_useCudaBackend, g_displayExposure);
+        renderD3DFrame(g_useCudaBackend, g_displayExposure, true);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -3562,18 +3568,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         }
         g_displayExposure = settings.exposure;
         const bool overlayDirty = overlayStateDirty(settings, g_useCudaBackend, g_cleanViewportMode);
-        const bool displayTick = g_cudaWorkerFrameLive && g_d3d.hasSimFrame;
-        const bool presentDirty = displayTick || overlayDirty || !g_cudaWorkerFrameLive;
+        const bool presentDirty = copiedWorkerFrame || overlayDirty || !g_cudaWorkerFrameLive;
         bool presented = false;
         if (presentDirty) {
+            const bool uploadUi = overlayDirty || !g_useCudaBackend || !g_uiTextureUploaded;
             if (g_useCudaBackend) {
-                composeD3DOverlayFrame(g_frame, settings, true, g_cleanViewportMode);
+                if (uploadUi) {
+                    composeD3DOverlayFrame(g_frame, settings, true, g_cleanViewportMode);
+                }
             } else {
                 composeAppFrame(g_frame, g_simFrame, settings, false, g_cleanViewportMode);
             }
-            rememberOverlayState(settings, g_useCudaBackend, g_cleanViewportMode);
+            if (uploadUi) {
+                rememberOverlayState(settings, g_useCudaBackend, g_cleanViewportMode);
+            }
             const auto presentStart = Clock::now();
-            presented = renderD3DFrame(g_useCudaBackend, g_displayExposure);
+            presented = renderD3DFrame(g_useCudaBackend, g_displayExposure, uploadUi);
             g_livePresentMicros += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - presentStart).count());
             ++g_livePresentCalls;
             if (!presented) {

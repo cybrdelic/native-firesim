@@ -56,6 +56,17 @@ Use this only when intentionally testing the NVIDIA driver path:
 .\scripts\verify.ps1 -RunGpuKernels -AcceptBugcheckRisk
 ```
 
+Use this when optimizing CUDA kernels instead of guessing from screenshots:
+
+```powershell
+.\scripts\profile-cuda-kernels.ps1 -Mode Benchmark -AcceptBugcheckRisk
+.\scripts\profile-cuda-kernels.ps1 -Mode NsightCompute -AcceptBugcheckRisk -LaunchCount 64
+```
+
+The first command records FireSim's built-in CUDA event timings. The second wraps the same canonical worker benchmark in Nsight Compute and writes an `.ncu-rep` with the `basic` section set: launch stats, occupancy, Speed Of Light, and workload distribution for matched FireSim kernels. Use `-NsightSet detailed` or `-NsightSet full` only for a small `-LaunchCount`, because those profiles replay kernels and can be slow. Nsight Systems is still not a repo dependency; use it separately when timeline/presentation tracing is needed.
+
+If Nsight Compute fails with `ERR_NVGPUCTRPERM`, the profiler is installed but the driver is blocking hardware performance counter access for non-admin users. The benchmark still works, but occupancy, SM throughput, and memory throughput will not collect until the command runs elevated or NVIDIA Control Panel enables Developer > Manage GPU Performance Counters > allow access for all users.
+
 After any risky run, query recent system events for `BugCheck`, `Display`, `nvlddmkm`, `NVIDIA`, `WHEA`, `Kernel-Power`, and event IDs `41`, `1001`, `4101`, `17`, `18`, and `19`.
 
 ## Next Hardening Targets
@@ -65,4 +76,4 @@ After any risky run, query recent system events for `BugCheck`, `Display`, `nvld
 3. Replace atomic velocity forcing with staged force buffers.
 4. Replace red/black SOR with a bounded multigrid or PCG pressure solve.
 5. Add optional per-kernel synchronization for crash reproduction sessions only.
-6. Add Nsight Compute resource snapshots for registers, local memory, occupancy, and spills.
+6. Promote the new Nsight Compute script into CI/artifact packaging once the report size and runtime are acceptable.

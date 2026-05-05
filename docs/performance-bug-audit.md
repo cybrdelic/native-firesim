@@ -236,3 +236,31 @@ Compared with the previous post-merge evidence:
 
 - Full physics improved from `71.28 ms` / `14.03 FPS` to `60.21 ms` / `16.61 FPS` on the kept rerun.
 - Live-like decoupled frames improved from `15.02 ms` / `66.57 FPS` to `5.88 ms` / `170.00 FPS`.
+
+## Profiling And Fresh-Frame Pacing Pass
+
+Date: 2026-05-05
+
+The Pulse CUDA profiling checklist maps directly to this repo, but FireSim had only coarse CUDA event timings before this pass:
+
+- Existing coverage: `--worker-benchmark` records section timings for velocity, reaction, projection, lighting, raymarch, and pack.
+- New coverage: `scripts/profile-cuda-kernels.ps1` runs the canonical worker benchmark and can wrap it in Nsight Compute with launch filters, launch counts, imported source, and `basic`/`detailed`/`full` section sets.
+- Current local blocker: Nsight Compute is installed, but hardware performance counters are restricted for this user. `-NsightSet basic` reaches the target process and then fails with `ERR_NVGPUCTRPERM` until the command runs elevated or NVIDIA Control Panel allows GPU performance counters for all users.
+
+Frame pacing fix:
+
+- The window title now reports fresh copied CUDA frames instead of duplicate D3D presents. This prevents a misleading `250 FPS` title when the host is only copying a much lower number of worker frames.
+- The host presents on copied worker frames or overlay changes, not on every fresh metadata tick.
+- The D3D UI texture is uploaded only when the overlay changes or the CPU fallback is active. Fresh CUDA frames no longer pay a full 960x540 CPU overlay upload when the chrome is unchanged.
+
+Room lighting fix:
+
+- The room ambient/material response was too bright and gray. Room albedo, GI scale, ceiling/floor/wall base values, and the final room distance multiplier are darker now so the fire reads as the room's primary light source.
+
+Validation evidence:
+
+- `out/profile-room-pacing-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `5.81 ms`, `172.02 FPS`.
+- `out/profile-room-pacing-full-workerbench/worker-benchmark.json`: full physics benchmark passed at `60.55 ms`, `16.52 FPS`.
+- `out/cuda-profile-smoke/worker-benchmark/worker-benchmark.json`: profiling script benchmark mode passed and wrote `profile-commands.md`.
+- `out/cuda-profile-ncu-smoke/firesim-speedoflight.ncu-rep`: Nsight Compute command path connected and captured launch-level data with the initial no-metric set.
+- `out/cuda-profile-ncu-smoke-basic`: confirmed the useful `basic` set is blocked by `ERR_NVGPUCTRPERM` on this Windows user session.
