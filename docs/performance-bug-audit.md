@@ -214,3 +214,25 @@ Remaining blockers:
 
 - The dense full-grid pressure solve is still the largest physics-side blocker. Compact parity reduces wasted work, but a real jump still needs a bounded multigrid/PCG pressure path or sparse active projection tiles.
 - The render-only/live-like path is now more limited by raymarch/pack/publish cadence than UI sleep, so the next exact pass should target persistent CUDA surface ownership or direct shared-slot rendering before changing visual quality.
+
+## Room-Aware Render Performance Pass
+
+Date: 2026-05-05
+
+This pass keeps the same CUDA quality settings and improves the room without increasing the visible-frame cost:
+
+- `renderKernel` now raymarches the fire volume before shading the room. If accumulated smoke/fire opacity makes the background contribution negligible, the room shader is skipped for that pixel.
+- `roomBackgroundRay` no longer uses FBM for floor marble, reflection streak offsets, window grain, or final room grain. Those were expensive per-pixel procedural calls that made the room read synthetic.
+- The room now uses analytic panel seams, ceiling ribs, wall base/crown shadow, a back-wall recess, tray contact darkening, and a cooler floor scorch. These are cheap masks, not extra volume samples.
+- Scene irradiance gathering now uses the three lower flame probes instead of four probes, avoiding a warm upper-plume probe that made the room wash out.
+
+Validation evidence:
+
+- `out/room-perf-pass-final-workerbench-rerun/worker-benchmark.json`: full physics benchmark passed at `60.21 ms`, `16.61 FPS`.
+- `out/room-perf-pass-final-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `5.88 ms`, `170.00 FPS`.
+- `docs/pr-assets/screenshot-room-performance-pass.png`: live viewport capture showed visible room panels/scorch, worker around `119 FPS` in the sustained capture, and frames still visible through the FP16 path.
+
+Compared with the previous post-merge evidence:
+
+- Full physics improved from `71.28 ms` / `14.03 FPS` to `60.21 ms` / `16.61 FPS` on the kept rerun.
+- Live-like decoupled frames improved from `15.02 ms` / `66.57 FPS` to `5.88 ms` / `170.00 FPS`.
