@@ -51,6 +51,10 @@ constexpr int kSharedFrameSlots = 3;
 constexpr int kDisplayFrameSlots = 3;
 constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV9";
 constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
+constexpr DXGI_FORMAT kSceneRadianceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr const char* kRenderGraphPasses = "clear,volume-hdr-camera,lit-scene-mesh,ui-overlay,present";
+constexpr const char* kHdrCameraPipeline =
+    "CUDA float4 scene radiance -> FP16 D3D texture -> single ACES camera response -> FP16 swapchain -> UI overlay";
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
 }
@@ -199,10 +203,24 @@ struct D3DDisplayState {
     bool hasSimFrame = false;
 };
 
+struct RenderGraphStats {
+    unsigned long long frameIndex = 0;
+    unsigned long long clearPasses = 0;
+    unsigned long long volumeCameraPasses = 0;
+    unsigned long long sceneMeshPasses = 0;
+    unsigned long long uiOverlayPasses = 0;
+    unsigned long long presentPasses = 0;
+    unsigned long long skippedPresentPasses = 0;
+    bool lastFrameHadVolume = false;
+    bool lastFrameHadMesh = false;
+    bool lastFrameHadUi = false;
+};
+
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
 D3DDisplayState g_d3d;
+RenderGraphStats g_renderGraphStats;
 std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
 std::array<SceneEmitterParams, kSceneCount> g_sceneEmitters;
 HANDLE g_sharedViewportMap = nullptr;
@@ -1328,6 +1346,7 @@ float3 ToneMapPreserveHue(float3 c) {
 }
 
 float3 CameraResponse(float3 radiance) {
+    // This is the only display transform. UI and mesh passes stay outside this response.
     float3 color = ToneMapPreserveHue(max(radiance, 0.0) * Exposure);
     float l = Luma(color);
     float toe = smoothstep(0.000, 0.055, l);
@@ -1932,20 +1951,16 @@ void renderRuntimeSceneMesh(float exposure) {
     g_d3d.context->IASetInputLayout(nullptr);
 }
 
-bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
-    g_lastPresentSkippedWouldBlock = false;
-    if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
-        return false;
-    }
-    if (uploadUi || !g_uiTextureUploaded) {
-        g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
-        g_uiTextureUploaded = true;
-    }
-
+void beginD3DRenderGraphFrame() {
+    ++g_renderGraphStats.frameIndex;
+    g_renderGraphStats.lastFrameHadVolume = false;
+    g_renderGraphStats.lastFrameHadMesh = false;
+    g_renderGraphStats.lastFrameHadUi = false;
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
     g_d3d.context->OMSetRenderTargets(1, renderTargets, nullptr);
     g_d3d.context->ClearRenderTargetView(g_d3d.renderTargetView.Get(), clearColor);
+    ++g_renderGraphStats.clearPasses;
 
     D3D11_VIEWPORT viewport = {};
     viewport.Width = static_cast<float>(kFrameWidth);
@@ -1958,47 +1973,94 @@ bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
     g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
     ID3D11SamplerState* samplers[] = {g_d3d.sampler.Get()};
     g_d3d.context->PSSetSamplers(0, 1, samplers);
+}
 
-    if (drawSim && g_d3d.hasSimFrame) {
-        DisplayConstants constants = {};
-        constants.exposure = exposure;
-        g_d3d.context->UpdateSubresource(g_d3d.displayConstants.Get(), 0, nullptr, &constants, 0, 0);
-        ID3D11Buffer* constantBuffers[] = {g_d3d.displayConstants.Get()};
-        ID3D11ShaderResourceView* simView =
-            g_d3d.activeDisplaySimSlot >= 0 && g_d3d.activeDisplaySimSlot < kDisplayFrameSlots
-                ? g_d3d.displaySimSrvs[g_d3d.activeDisplaySimSlot].Get()
-                : nullptr;
-        ID3D11ShaderResourceView* simSrvs[] = {simView};
-        g_d3d.context->PSSetConstantBuffers(0, 1, constantBuffers);
-        g_d3d.context->PSSetShaderResources(0, 1, simSrvs);
-        g_d3d.context->PSSetShader(g_d3d.simPixelShader.Get(), nullptr, 0);
-        g_d3d.context->Draw(3, 0);
-    }
+void renderD3DVolumeCameraPass(float exposure) {
+    DisplayConstants constants = {};
+    constants.exposure = exposure;
+    g_d3d.context->UpdateSubresource(g_d3d.displayConstants.Get(), 0, nullptr, &constants, 0, 0);
+    ID3D11Buffer* constantBuffers[] = {g_d3d.displayConstants.Get()};
+    ID3D11ShaderResourceView* simView =
+        g_d3d.activeDisplaySimSlot >= 0 && g_d3d.activeDisplaySimSlot < kDisplayFrameSlots
+            ? g_d3d.displaySimSrvs[g_d3d.activeDisplaySimSlot].Get()
+            : nullptr;
+    ID3D11ShaderResourceView* simSrvs[] = {simView};
+    g_d3d.context->PSSetConstantBuffers(0, 1, constantBuffers);
+    g_d3d.context->PSSetShaderResources(0, 1, simSrvs);
+    g_d3d.context->PSSetShader(g_d3d.simPixelShader.Get(), nullptr, 0);
+    g_d3d.context->Draw(3, 0);
+    ++g_renderGraphStats.volumeCameraPasses;
+    g_renderGraphStats.lastFrameHadVolume = simView != nullptr;
+}
 
-    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
-    renderRuntimeSceneMesh(exposure);
+void bindD3DFullscreenPass() {
     ID3D11Buffer* nullVertexBuffers[] = {nullptr};
     UINT nullStride = 0;
     UINT nullOffset = 0;
     g_d3d.context->IASetInputLayout(nullptr);
     g_d3d.context->IASetVertexBuffers(0, 1, nullVertexBuffers, &nullStride, &nullOffset);
     g_d3d.context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+    g_d3d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
+}
+
+void renderD3DSceneMeshPass(float exposure) {
+    const bool hasMesh =
+        g_activeScene >= 0 &&
+        g_activeScene < kSceneCount &&
+        g_sceneMeshes[g_activeScene].loaded &&
+        g_sceneMeshes[g_activeScene].vertexBuffer != nullptr &&
+        g_sceneMeshes[g_activeScene].indexBuffer != nullptr &&
+        !g_sceneMeshes[g_activeScene].indices.empty();
+    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
+    renderRuntimeSceneMesh(exposure);
+    ++g_renderGraphStats.sceneMeshPasses;
+    g_renderGraphStats.lastFrameHadMesh = hasMesh;
+    bindD3DFullscreenPass();
+}
+
+void renderD3DUiOverlayPass() {
     ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
     g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
     g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
     g_d3d.context->Draw(3, 0);
     ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
+    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
+    ++g_renderGraphStats.uiOverlayPasses;
+    g_renderGraphStats.lastFrameHadUi = true;
+}
 
+bool presentD3DRenderGraphFrame() {
     HRESULT present = g_d3d.swapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
     if (present == DXGI_ERROR_WAS_STILL_DRAWING) {
         g_lastPresentSkippedWouldBlock = true;
+        ++g_renderGraphStats.skippedPresentPasses;
         return false;
     }
+    ++g_renderGraphStats.presentPasses;
     return SUCCEEDED(present);
+}
+
+bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
+    g_lastPresentSkippedWouldBlock = false;
+    if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
+        return false;
+    }
+    if (uploadUi || !g_uiTextureUploaded) {
+        g_d3d.context->UpdateSubresource(g_d3d.uiTexture.Get(), 0, nullptr, g_frame.data(), kFrameWidth * sizeof(std::uint32_t), 0);
+        g_uiTextureUploaded = true;
+    }
+
+    beginD3DRenderGraphFrame();
+    if (drawSim && g_d3d.hasSimFrame) {
+        renderD3DVolumeCameraPass(exposure);
+    }
+    renderD3DSceneMeshPass(exposure);
+    renderD3DUiOverlayPass();
+    return presentD3DRenderGraphFrame();
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -4203,6 +4265,13 @@ int runDiagnostics() {
     out << "workerRestartLimitPerMinute=" << kWorkerRestartLimit << "\n";
     out << "presentationTargetFps=300\n";
     out << "presentVsync=false\n";
+    out << "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
+    out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
+    out << "renderGraphPasses=" << kRenderGraphPasses << "\n";
+    out << "renderGraphOwnsCameraResponse=true\n";
+    out << "hdrCameraPipeline=" << kHdrCameraPipeline << "\n";
+    out << "uiOverlayAfterCameraResponse=true\n";
+    out << "meshLightingPass=lit-scene-mesh\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
