@@ -2257,34 +2257,59 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     const float h1 = hash21(make_float2(seed, 9.1f));
     const float h2 = hash21(make_float2(seed, 19.4f));
     const float h3 = hash21(make_float2(seed, 31.6f));
-    const float life = fracf(p.time * (0.42f + h2 * 0.34f) + h0);
-    const float t = life * 1.42f;
+    if (p.sceneId == 2 && h0 > 0.14f) {
+        return;
+    }
+    const float sceneLift = p.sceneId == 1 ? 1.18f : (p.sceneId == 2 ? 0.38f : 0.86f);
+    const float life = fracf(p.time * (0.36f + h2 * 0.28f + (p.sceneId == 2 ? 0.42f : 0.0f)) + h0);
+    const float t = life * (p.sceneId == 1 ? 1.72f : (p.sceneId == 2 ? 0.54f : 1.18f));
+    const float spawnRadius = p.sceneId == 1 ? 0.62f : (p.sceneId == 2 ? 0.34f : 0.48f);
+    const float spawnAngle = h0 * 6.2831853f;
+    const float ringBias = p.sceneId == 2 ? 0.82f + h1 * 0.26f : sqrtf(h1);
+    const float startX = cosf(spawnAngle) * spawnRadius * ringBias;
+    const float startZ = sinf(spawnAngle) * spawnRadius * ringBias * (p.sceneId == 1 ? 0.72f : 1.0f);
     const float3 sparkWorld = make_float3(
-        (h0 - 0.5f) * 1.10f + ((h1 - 0.5f) * 0.38f + p.wind * 0.58f) * t,
-        0.04f + (0.92f + h3 * 1.42f) * t - 0.30f * t * t,
-        (h1 - 0.5f) * 0.72f + (h2 - 0.5f) * 0.34f * t);
+        startX + ((h1 - 0.5f) * 0.28f + p.wind * 0.44f) * t,
+        0.035f + (0.55f + h3 * 1.18f) * t * sceneLift - (0.23f + h2 * 0.11f) * t * t,
+        startZ + (h2 - 0.5f) * 0.24f * t);
+    const float3 prevWorld = make_float3(
+        startX + ((h1 - 0.5f) * 0.28f + p.wind * 0.44f) * fmaxf(0.0f, t - 0.045f),
+        0.035f + (0.55f + h3 * 1.18f) * fmaxf(0.0f, t - 0.045f) * sceneLift - (0.23f + h2 * 0.11f) * fmaxf(0.0f, t - 0.045f) * fmaxf(0.0f, t - 0.045f),
+        startZ + (h2 - 0.5f) * 0.24f * fmaxf(0.0f, t - 0.045f));
     const float3 sparkScreen = projectPoint(cam, sparkWorld);
+    const float3 prevScreen = projectPoint(cam, prevWorld);
     if (sparkScreen.z <= 0.0f || sparkScreen.x < -0.05f || sparkScreen.x > 1.05f || sparkScreen.y < -0.05f || sparkScreen.y > 1.05f) {
         return;
     }
 
-    const float radius = (0.0015f + h3 * 0.0021f) / fmaxf(0.55f, sparkScreen.z);
+    const float radius = ((p.sceneId == 2 ? 0.00065f : 0.0011f) + h3 * (p.sceneId == 2 ? 0.00065f : 0.0018f)) / fmaxf(0.55f, sparkScreen.z);
     const float centerX = sparkScreen.x * static_cast<float>(p.frameW) - 0.5f;
     const float centerY = sparkScreen.y * static_cast<float>(p.frameH) - 0.5f;
-    const int pad = max(2, static_cast<int>(ceilf(radius * static_cast<float>(max(p.frameW, p.frameH)) * 3.5f)));
+    const float2 trail = sub2(make_float2(sparkScreen.x, sparkScreen.y), make_float2(prevScreen.x, prevScreen.y));
+    const float trailLen = sqrtf(dot2(trail, trail));
+    const float2 trailDir = trailLen > 0.000001f ? mul2(trail, 1.0f / trailLen) : make_float2(0.0f, -1.0f);
+    const int pad = max(2, static_cast<int>(ceilf((radius + trailLen) * static_cast<float>(max(p.frameW, p.frameH)) * 4.0f)));
     const int minX = max(0, static_cast<int>(floorf(centerX)) - pad);
     const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
     const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
     const int maxY = min(p.frameH - 1, static_cast<int>(ceilf(centerY)) + pad);
-    const float3 sparkColor = lerp3(make_float3(1.0f, 0.42f, 0.08f), make_float3(0.62f, 0.10f, 0.025f), life);
-    const float lifeFade = smoothstepf(1.0f, 0.10f, life) * sparkGate * 1.20f;
+    const float3 hotCore = p.sceneId == 2 ? make_float3(0.55f, 0.72f, 1.0f) : make_float3(1.0f, 0.62f, 0.18f);
+    const float3 cooled = p.sceneId == 2 ? make_float3(0.20f, 0.30f, 0.48f) : make_float3(0.42f, 0.055f, 0.014f);
+    const float3 sparkColor = lerp3(hotCore, cooled, smoothstepf(0.18f, 0.88f, life));
+    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.20f, life) * sparkGate * (p.sceneId == 2 ? 0.34f : 0.98f);
 
     for (int y = minY; y <= maxY; ++y) {
         const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH);
         for (int x = minX; x <= maxX; ++x) {
             const float ux = (static_cast<float>(x) + 0.5f) / static_cast<float>(p.frameW);
             const float2 d = sub2(make_float2(ux, uy), make_float2(sparkScreen.x, sparkScreen.y));
-            const float spark = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius)) * lifeFade;
+            const float along = dot2(d, trailDir);
+            const float2 acrossVec = sub2(d, mul2(trailDir, along));
+            const float across2 = dot2(acrossVec, acrossVec);
+            const float streakRadius = radius * (1.0f + trailLen * 160.0f);
+            const float emberCore = expf(-(across2 / fmaxf(0.0000002f, radius * radius) + along * along / fmaxf(0.0000002f, streakRadius * streakRadius)));
+            const float emberHalo = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius * 8.0f)) * 0.16f;
+            const float spark = (emberCore + emberHalo) * lifeFade;
             if (spark > 0.00001f) {
                 const int pixelIndex = y * p.frameW + x;
                 atomicAdd(&hdr[pixelIndex].x, sparkColor.x * spark);

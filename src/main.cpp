@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -125,6 +126,29 @@ struct DisplayConstants {
     float padding[3];
 };
 
+struct MeshVertex {
+    float px;
+    float py;
+    float pz;
+    float nx;
+    float ny;
+    float nz;
+};
+
+struct MeshConstants {
+    float viewProj[16];
+    float lightPos[4];
+    float baseColor[4];
+};
+
+struct RuntimeSceneMesh {
+    std::vector<MeshVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    ComPtr<ID3D11Buffer> vertexBuffer;
+    ComPtr<ID3D11Buffer> indexBuffer;
+    bool loaded = false;
+};
+
 struct D3DDisplayState {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -139,10 +163,16 @@ struct D3DDisplayState {
     ComPtr<ID3D11ShaderResourceView> uiSrv;
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11VertexShader> vertexShader;
+    ComPtr<ID3D11VertexShader> meshVertexShader;
     ComPtr<ID3D11PixelShader> simPixelShader;
     ComPtr<ID3D11PixelShader> uiPixelShader;
+    ComPtr<ID3D11PixelShader> meshPixelShader;
+    ComPtr<ID3D11InputLayout> meshInputLayout;
     ComPtr<ID3D11Buffer> displayConstants;
+    ComPtr<ID3D11Buffer> meshConstants;
     ComPtr<ID3D11BlendState> alphaBlend;
+    ComPtr<ID3D11DepthStencilState> meshDepthState;
+    ComPtr<ID3D11RasterizerState> meshRasterizerState;
     ComPtr<ID3D11Query> copyCompletionQuery;
     int activeDisplaySimSlot = -1;
     int nextDisplaySimSlot = 0;
@@ -154,6 +184,7 @@ HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
 D3DDisplayState g_d3d;
+std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
 HANDLE g_cudaWorkerProcess = nullptr;
@@ -884,11 +915,166 @@ bool compileShader(const char* source, const char* entry, const char* target, Co
     return true;
 }
 
+std::string readTextFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return {};
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+std::string jsonArrayForKey(const std::string& text, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const std::size_t keyPos = text.find(needle);
+    if (keyPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t start = text.find('[', keyPos);
+    if (start == std::string::npos) {
+        return {};
+    }
+    int depth = 0;
+    for (std::size_t i = start; i < text.size(); ++i) {
+        if (text[i] == '[') {
+            ++depth;
+        } else if (text[i] == ']') {
+            --depth;
+            if (depth == 0) {
+                return text.substr(start, i - start + 1);
+            }
+        }
+    }
+    return {};
+}
+
+std::vector<float> parseJsonFloats(const std::string& text) {
+    std::vector<float> values;
+    const char* ptr = text.c_str();
+    char* end = nullptr;
+    while (*ptr != '\0') {
+        const float value = std::strtof(ptr, &end);
+        if (end != ptr) {
+            values.push_back(value);
+            ptr = end;
+        } else {
+            ++ptr;
+        }
+    }
+    return values;
+}
+
+std::vector<std::uint32_t> parseJsonUInts(const std::string& text) {
+    std::vector<std::uint32_t> values;
+    const char* ptr = text.c_str();
+    char* end = nullptr;
+    while (*ptr != '\0') {
+        const unsigned long value = std::strtoul(ptr, &end, 10);
+        if (end != ptr) {
+            values.push_back(static_cast<std::uint32_t>(value));
+            ptr = end;
+        } else {
+            ++ptr;
+        }
+    }
+    return values;
+}
+
+const char* runtimeMeshAssetId(int sceneId) {
+    switch (sceneId) {
+    case 1: return "fb573067b02f49e193e293b6112e7712";
+    case 2: return "9d24aac8a4c444a1b440647aa6f96438";
+    default: return "";
+    }
+}
+
+bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
+    mesh = {};
+    const char* assetId = runtimeMeshAssetId(sceneId);
+    if (assetId[0] == '\0') {
+        return false;
+    }
+    const std::filesystem::path path = std::filesystem::path("assets") / "fire-scenes" / assetId / "runtime-mesh.json";
+    const std::string text = readTextFile(path);
+    if (text.empty()) {
+        return false;
+    }
+    const std::vector<float> positions = parseJsonFloats(jsonArrayForKey(text, "vertices"));
+    const std::vector<float> normals = parseJsonFloats(jsonArrayForKey(text, "normals"));
+    const std::vector<std::uint32_t> indices = parseJsonUInts(jsonArrayForKey(text, "triangles"));
+    if (positions.size() < 9 || positions.size() % 3 != 0 || indices.size() < 3 || indices.size() % 3 != 0) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "runtime mesh parse failed for scene %d", sceneId);
+        return false;
+    }
+    const std::size_t vertexCount = positions.size() / 3;
+    mesh.vertices.resize(vertexCount);
+    for (std::size_t i = 0; i < vertexCount; ++i) {
+        mesh.vertices[i].px = positions[i * 3 + 0];
+        mesh.vertices[i].py = positions[i * 3 + 1];
+        mesh.vertices[i].pz = positions[i * 3 + 2];
+        mesh.vertices[i].nx = normals.size() >= positions.size() ? normals[i * 3 + 0] : 0.0f;
+        mesh.vertices[i].ny = normals.size() >= positions.size() ? normals[i * 3 + 1] : 1.0f;
+        mesh.vertices[i].nz = normals.size() >= positions.size() ? normals[i * 3 + 2] : 0.0f;
+    }
+    mesh.indices = indices;
+    mesh.loaded = true;
+    return true;
+}
+
+bool createMeshBuffers(RuntimeSceneMesh& mesh) {
+    if (!mesh.loaded || mesh.vertices.empty() || mesh.indices.empty()) {
+        return false;
+    }
+    D3D11_BUFFER_DESC vbDesc = {};
+    vbDesc.ByteWidth = static_cast<UINT>(mesh.vertices.size() * sizeof(MeshVertex));
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
+    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA vbData = {};
+    vbData.pSysMem = mesh.vertices.data();
+    if (FAILED(g_d3d.device->CreateBuffer(&vbDesc, &vbData, mesh.vertexBuffer.GetAddressOf()))) {
+        return false;
+    }
+    D3D11_BUFFER_DESC ibDesc = {};
+    ibDesc.ByteWidth = static_cast<UINT>(mesh.indices.size() * sizeof(std::uint32_t));
+    ibDesc.Usage = D3D11_USAGE_DEFAULT;
+    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA ibData = {};
+    ibData.pSysMem = mesh.indices.data();
+    if (FAILED(g_d3d.device->CreateBuffer(&ibDesc, &ibData, mesh.indexBuffer.GetAddressOf()))) {
+        mesh.vertexBuffer.Reset();
+        return false;
+    }
+    return true;
+}
+
+void loadRuntimeSceneMeshes() {
+    for (int scene = 0; scene < kSceneCount; ++scene) {
+        RuntimeSceneMesh mesh;
+        if (loadRuntimeSceneMesh(scene, mesh) && createMeshBuffers(mesh)) {
+            g_sceneMeshes[scene] = std::move(mesh);
+        }
+    }
+}
+
 const char* d3dShaderSource() {
     return R"HLSL(
+#pragma pack_matrix(row_major)
+
 struct VSOut {
     float4 pos : SV_POSITION;
     float2 uv : TEXCOORD0;
+};
+
+struct MeshVSIn {
+    float3 pos : POSITION;
+    float3 normal : NORMAL;
+};
+
+struct MeshVSOut {
+    float4 pos : SV_POSITION;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
 };
 
 VSOut FullscreenVS(uint id : SV_VertexID) {
@@ -909,6 +1095,12 @@ SamplerState LinearSampler : register(s0);
 cbuffer DisplayConstants : register(b0) {
     float Exposure;
     float3 _Padding;
+}
+
+cbuffer MeshConstants : register(b1) {
+    float4x4 MeshViewProj;
+    float4 MeshLightPos;
+    float4 MeshBaseColor;
 }
 
 float Luma(float3 c) {
@@ -941,6 +1133,27 @@ float4 SimPS(VSOut input) : SV_TARGET {
 
 float4 UiPS(VSOut input) : SV_TARGET {
     return FrameTex.Sample(LinearSampler, input.uv);
+}
+
+MeshVSOut MeshVS(MeshVSIn input) {
+    MeshVSOut outp;
+    float4 wp = float4(input.pos, 1.0);
+    outp.pos = mul(wp, MeshViewProj);
+    outp.worldPos = input.pos;
+    outp.normal = normalize(input.normal);
+    return outp;
+}
+
+float4 MeshPS(MeshVSOut input) : SV_TARGET {
+    float3 n = normalize(input.normal);
+    float3 l = normalize(MeshLightPos.xyz - input.worldPos);
+    float3 v = normalize(float3(0.0, 0.85, 2.4) - input.worldPos);
+    float ndl = saturate(dot(n, l));
+    float rim = pow(saturate(1.0 - dot(n, v)), 2.2);
+    float3 fireBounce = float3(1.0, 0.35, 0.08) * (0.08 + ndl * 0.22);
+    float3 coolFill = float3(0.018, 0.021, 0.026) * (0.35 + rim * 0.70);
+    float3 color = MeshBaseColor.rgb * (0.10 + ndl * 0.62) + fireBounce + coolFill;
+    return float4(color, MeshBaseColor.a);
 }
 )HLSL";
 }
@@ -1061,17 +1274,36 @@ bool initializeD3D(HWND hwnd) {
     }
 
     ComPtr<ID3DBlob> vsBlob;
+    ComPtr<ID3DBlob> meshVsBlob;
     ComPtr<ID3DBlob> simPsBlob;
     ComPtr<ID3DBlob> uiPsBlob;
+    ComPtr<ID3DBlob> meshPsBlob;
     if (!compileShader(d3dShaderSource(), "FullscreenVS", "vs_5_0", vsBlob) ||
+        !compileShader(d3dShaderSource(), "MeshVS", "vs_5_0", meshVsBlob) ||
         !compileShader(d3dShaderSource(), "SimPS", "ps_5_0", simPsBlob) ||
-        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob)) {
+        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob) ||
+        !compileShader(d3dShaderSource(), "MeshPS", "ps_5_0", meshPsBlob)) {
         return false;
     }
     if (FAILED(g_d3d.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, g_d3d.vertexShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreateVertexShader(meshVsBlob->GetBufferPointer(), meshVsBlob->GetBufferSize(), nullptr, g_d3d.meshVertexShader.GetAddressOf())) ||
         FAILED(g_d3d.device->CreatePixelShader(simPsBlob->GetBufferPointer(), simPsBlob->GetBufferSize(), nullptr, g_d3d.simPixelShader.GetAddressOf())) ||
-        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf()))) {
+        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf())) ||
+        FAILED(g_d3d.device->CreatePixelShader(meshPsBlob->GetBufferPointer(), meshPsBlob->GetBufferSize(), nullptr, g_d3d.meshPixelShader.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader creation failed");
+        return false;
+    }
+    const D3D11_INPUT_ELEMENT_DESC meshInput[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    if (FAILED(g_d3d.device->CreateInputLayout(
+            meshInput,
+            static_cast<UINT>(sizeof(meshInput) / sizeof(meshInput[0])),
+            meshVsBlob->GetBufferPointer(),
+            meshVsBlob->GetBufferSize(),
+            g_d3d.meshInputLayout.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh input layout failed");
         return false;
     }
 
@@ -1081,6 +1313,14 @@ bool initializeD3D(HWND hwnd) {
     constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(g_d3d.device->CreateBuffer(&constantsDesc, nullptr, g_d3d.displayConstants.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D constants buffer failed");
+        return false;
+    }
+    D3D11_BUFFER_DESC meshConstantsDesc = {};
+    meshConstantsDesc.ByteWidth = sizeof(MeshConstants);
+    meshConstantsDesc.Usage = D3D11_USAGE_DEFAULT;
+    meshConstantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(g_d3d.device->CreateBuffer(&meshConstantsDesc, nullptr, g_d3d.meshConstants.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh constants buffer failed");
         return false;
     }
 
@@ -1097,6 +1337,22 @@ bool initializeD3D(HWND hwnd) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D alpha blend creation failed");
         return false;
     }
+    D3D11_DEPTH_STENCIL_DESC depthDesc = {};
+    depthDesc.DepthEnable = FALSE;
+    depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    if (FAILED(g_d3d.device->CreateDepthStencilState(&depthDesc, g_d3d.meshDepthState.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh depth state failed");
+        return false;
+    }
+    D3D11_RASTERIZER_DESC rasterDesc = {};
+    rasterDesc.FillMode = D3D11_FILL_SOLID;
+    rasterDesc.CullMode = D3D11_CULL_BACK;
+    rasterDesc.DepthClipEnable = TRUE;
+    if (FAILED(g_d3d.device->CreateRasterizerState(&rasterDesc, g_d3d.meshRasterizerState.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh rasterizer state failed");
+        return false;
+    }
 
     D3D11_QUERY_DESC queryDesc = {};
     queryDesc.Query = D3D11_QUERY_EVENT;
@@ -1106,6 +1362,7 @@ bool initializeD3D(HWND hwnd) {
     }
 
     g_d3d.initialized = true;
+    loadRuntimeSceneMeshes();
     return true;
 }
 
@@ -1214,6 +1471,117 @@ bool copyD3DWorkerFrame() {
     return true;
 }
 
+struct Vec3 {
+    float x;
+    float y;
+    float z;
+};
+
+Vec3 sub3(Vec3 a, Vec3 b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+Vec3 cross3(Vec3 a, Vec3 b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+float dot3(Vec3 a, Vec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+Vec3 normalize3(Vec3 v) {
+    const float invLen = 1.0f / std::max(0.000001f, std::sqrt(dot3(v, v)));
+    return {v.x * invLen, v.y * invLen, v.z * invLen};
+}
+
+void mulMat4(const float a[16], const float b[16], float out[16]) {
+    float r[16] = {};
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            r[row * 4 + col] =
+                a[row * 4 + 0] * b[0 * 4 + col] +
+                a[row * 4 + 1] * b[1 * 4 + col] +
+                a[row * 4 + 2] * b[2 * 4 + col] +
+                a[row * 4 + 3] * b[3 * 4 + col];
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+MeshConstants meshConstantsForScene(int sceneId, float exposure) {
+    MeshConstants constants = {};
+    const Vec3 target = {0.0f, 0.48f, 0.0f};
+    const float cp = std::cos(g_cameraPitch);
+    const Vec3 eye = {
+        std::sin(g_cameraYaw) * g_cameraDistance * cp,
+        target.y + std::sin(g_cameraPitch) * g_cameraDistance,
+        std::cos(g_cameraYaw) * g_cameraDistance * cp};
+    const Vec3 z = normalize3(sub3(eye, target));
+    const Vec3 x = normalize3(cross3({0.0f, 1.0f, 0.0f}, z));
+    const Vec3 y = cross3(z, x);
+    const float view[16] = {
+        x.x, y.x, z.x, 0.0f,
+        x.y, y.y, z.y, 0.0f,
+        x.z, y.z, z.z, 0.0f,
+        -dot3(x, eye), -dot3(y, eye), -dot3(z, eye), 1.0f};
+    const float fovY = 50.0f * 3.1415926535f / 180.0f;
+    const float aspect = static_cast<float>(kFrameWidth) / static_cast<float>(kFrameHeight);
+    const float f = 1.0f / std::tan(fovY * 0.5f);
+    const float zn = 0.03f;
+    const float zf = 18.0f;
+    const float proj[16] = {
+        f / aspect, 0.0f, 0.0f, 0.0f,
+        0.0f, f, 0.0f, 0.0f,
+        0.0f, 0.0f, zf / (zn - zf), -1.0f,
+        0.0f, 0.0f, (zn * zf) / (zn - zf), 0.0f};
+    mulMat4(view, proj, constants.viewProj);
+    constants.lightPos[0] = 0.0f;
+    constants.lightPos[1] = sceneId == 2 ? 0.20f : 0.50f;
+    constants.lightPos[2] = 0.0f;
+    constants.lightPos[3] = 1.0f;
+    if (sceneId == 1) {
+        constants.baseColor[0] = 0.060f * exposure;
+        constants.baseColor[1] = 0.036f * exposure;
+        constants.baseColor[2] = 0.020f * exposure;
+        constants.baseColor[3] = 0.92f;
+    } else {
+        constants.baseColor[0] = 0.020f * exposure;
+        constants.baseColor[1] = 0.022f * exposure;
+        constants.baseColor[2] = 0.024f * exposure;
+        constants.baseColor[3] = 0.88f;
+    }
+    return constants;
+}
+
+void renderRuntimeSceneMesh(float exposure) {
+    if (g_activeScene < 0 || g_activeScene >= kSceneCount) {
+        return;
+    }
+    RuntimeSceneMesh& mesh = g_sceneMeshes[g_activeScene];
+    if (!mesh.loaded || mesh.vertexBuffer == nullptr || mesh.indexBuffer == nullptr || mesh.indices.empty()) {
+        return;
+    }
+    MeshConstants constants = meshConstantsForScene(g_activeScene, exposure);
+    g_d3d.context->UpdateSubresource(g_d3d.meshConstants.Get(), 0, nullptr, &constants, 0, 0);
+    const UINT stride = sizeof(MeshVertex);
+    const UINT offset = 0;
+    ID3D11Buffer* vertexBuffers[] = {mesh.vertexBuffer.Get()};
+    ID3D11Buffer* constantBuffers[] = {g_d3d.meshConstants.Get()};
+    g_d3d.context->IASetInputLayout(g_d3d.meshInputLayout.Get());
+    g_d3d.context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+    g_d3d.context->IASetIndexBuffer(mesh.indexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+    g_d3d.context->VSSetShader(g_d3d.meshVertexShader.Get(), nullptr, 0);
+    g_d3d.context->VSSetConstantBuffers(1, 1, constantBuffers);
+    g_d3d.context->PSSetShader(g_d3d.meshPixelShader.Get(), nullptr, 0);
+    g_d3d.context->PSSetConstantBuffers(1, 1, constantBuffers);
+    g_d3d.context->RSSetState(g_d3d.meshRasterizerState.Get());
+    g_d3d.context->OMSetDepthStencilState(g_d3d.meshDepthState.Get(), 0);
+    g_d3d.context->DrawIndexed(static_cast<UINT>(mesh.indices.size()), 0, 0);
+    g_d3d.context->RSSetState(nullptr);
+    g_d3d.context->OMSetDepthStencilState(nullptr, 0);
+    g_d3d.context->IASetInputLayout(nullptr);
+}
+
 bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
     if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
         return false;
@@ -1260,6 +1628,7 @@ bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
 
     const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
+    renderRuntimeSceneMesh(exposure);
     ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
     g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
     g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
