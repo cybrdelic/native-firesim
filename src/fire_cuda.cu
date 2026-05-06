@@ -2285,10 +2285,11 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     const float radius = ((p.sceneId == 2 ? 0.00065f : 0.0011f) + h3 * (p.sceneId == 2 ? 0.00065f : 0.0018f)) / fmaxf(0.55f, sparkScreen.z);
     const float centerX = sparkScreen.x * static_cast<float>(p.frameW) - 0.5f;
     const float centerY = sparkScreen.y * static_cast<float>(p.frameH) - 0.5f;
-    const float2 trail = sub2(make_float2(sparkScreen.x, sparkScreen.y), make_float2(prevScreen.x, prevScreen.y));
-    const float trailLen = sqrtf(dot2(trail, trail));
-    const float2 trailDir = trailLen > 0.000001f ? mul2(trail, 1.0f / trailLen) : make_float2(0.0f, -1.0f);
-    const int pad = max(2, static_cast<int>(ceilf((radius + trailLen) * static_cast<float>(max(p.frameW, p.frameH)) * 4.0f)));
+    const float2 rawTrail = sub2(make_float2(sparkScreen.x, sparkScreen.y), make_float2(prevScreen.x, prevScreen.y));
+    const float rawTrailLen = sqrtf(dot2(rawTrail, rawTrail));
+    const float cappedTrailLen = fminf(rawTrailLen, p.sceneId == 1 ? 0.010f : 0.006f);
+    const float2 trailDir = rawTrailLen > 0.000001f ? mul2(rawTrail, 1.0f / rawTrailLen) : make_float2(0.0f, -1.0f);
+    const int pad = max(2, static_cast<int>(ceilf((radius + cappedTrailLen) * static_cast<float>(max(p.frameW, p.frameH)) * 3.0f)));
     const int minX = max(0, static_cast<int>(floorf(centerX)) - pad);
     const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
     const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
@@ -2306,7 +2307,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
             const float along = dot2(d, trailDir);
             const float2 acrossVec = sub2(d, mul2(trailDir, along));
             const float across2 = dot2(acrossVec, acrossVec);
-            const float streakRadius = radius * (1.0f + trailLen * 160.0f);
+            const float streakRadius = radius * (1.0f + cappedTrailLen * 130.0f);
             const float emberCore = expf(-(across2 / fmaxf(0.0000002f, radius * radius) + along * along / fmaxf(0.0000002f, streakRadius * streakRadius)));
             const float emberHalo = expf(-dot2(d, d) / fmaxf(0.0000002f, radius * radius * 8.0f)) * 0.16f;
             const float spark = (emberCore + emberHalo) * lifeFade;

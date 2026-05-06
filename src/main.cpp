@@ -194,6 +194,7 @@ bool g_leftInViewport = false;
 bool g_rightDown = false;
 bool g_orbiting = false;
 bool g_needsReset = false;
+int g_resetFramesRemaining = 0;
 bool g_showGizmos = true;
 bool g_cleanViewportMode = false;
 bool g_useCudaBackend = false;
@@ -238,6 +239,7 @@ unsigned long long g_liveCopyCalls = 0;
 unsigned long long g_liveCopiedFrames = 0;
 unsigned long long g_livePresentCalls = 0;
 unsigned long long g_livePresentFailures = 0;
+bool g_lastPresentSkippedWouldBlock = false;
 unsigned long long g_liveCopyMicros = 0;
 unsigned long long g_livePresentMicros = 0;
 double g_liveCopyCallHz = 0.0;
@@ -569,6 +571,19 @@ const char* sceneName(int scene) {
     case 2: return "GAS BURNER";
     default: return "ROOM";
     }
+}
+
+void requestSimulationReset() {
+    g_needsReset = true;
+    g_resetFramesRemaining = 8;
+    clearSimulationFrame(g_simFrame);
+    g_d3d.hasSimFrame = false;
+    g_cudaWorkerFrameLive = false;
+    g_useCudaBackend = false;
+    g_lastCopiedWorkerSequence = g_sharedViewport == nullptr ? 0 : g_sharedViewport->frameSequence;
+    g_haveLastWorkerSettings = false;
+    g_haveLastOverlaySettings = false;
+    g_uiTextureUploaded = false;
 }
 
 void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
@@ -1583,6 +1598,7 @@ void renderRuntimeSceneMesh(float exposure) {
 }
 
 bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
+    g_lastPresentSkippedWouldBlock = false;
     if (!g_d3d.initialized || g_d3d.context == nullptr || g_d3d.swapChain == nullptr) {
         return false;
     }
@@ -1637,7 +1653,11 @@ bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
     g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
 
-    HRESULT present = g_d3d.swapChain->Present(0, 0);
+    HRESULT present = g_d3d.swapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    if (present == DXGI_ERROR_WAS_STILL_DRAWING) {
+        g_lastPresentSkippedWouldBlock = true;
+        return false;
+    }
     return SUCCEEDED(present);
 }
 
@@ -1660,7 +1680,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (const int scene = hitTestSceneButton(g_pointerFrameX, g_pointerFrameY); scene >= 0) {
             if (g_activeScene != scene) {
                 g_activeScene = scene;
-                g_needsReset = true;
+                requestSimulationReset();
             }
             return 0;
         }
@@ -1668,7 +1688,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (command == 1) {
                 g_showGizmos = !g_showGizmos;
             } else {
-                g_needsReset = true;
+                requestSimulationReset();
             }
             return 0;
         }
@@ -1730,7 +1750,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (wParam == 'R') {
-            g_needsReset = true;
+            requestSimulationReset();
             return 0;
         }
         if (wParam == 'G') {
@@ -1747,7 +1767,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == 'S') {
             g_activeScene = (g_activeScene + 1) % kSceneCount;
-            g_needsReset = true;
+            requestSimulationReset();
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
@@ -3934,7 +3954,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.mouseY = g_mouseY;
         settings.leftDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 1) ? 1 : 0;
         settings.rightDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 2) ? 1 : 0;
-        settings.reset = g_needsReset ? 1 : 0;
+        settings.reset = (g_needsReset || g_resetFramesRemaining > 0) ? 1 : 0;
         settings.showGizmos = (g_showGizmos && !g_cleanViewportMode) ? 1 : 0;
         settings.activeGizmo = g_activeGizmo;
         settings.sceneId = g_activeScene;
@@ -3946,9 +3966,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.cameraYaw = g_cameraYaw;
         settings.cameraPitch = g_cameraPitch;
         settings.cameraDistance = g_cameraDistance;
-        if (g_needsReset) {
-            clearSimulationFrame(g_simFrame);
+        if (settings.reset != 0) {
+            if (g_needsReset) {
+                clearSimulationFrame(g_simFrame);
+                g_d3d.hasSimFrame = false;
+                g_cudaWorkerFrameLive = false;
+            }
             g_needsReset = false;
+            if (g_resetFramesRemaining > 0) {
+                --g_resetFramesRemaining;
+            }
         }
 
         FireSettings workerSettings = settings;
@@ -3997,7 +4024,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             presentMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - presentStart).count());
             g_livePresentMicros += presentMicros;
             ++g_livePresentCalls;
-            if (!presented) {
+            if (!presented && !g_lastPresentSkippedWouldBlock) {
                 ++g_livePresentFailures;
             }
             nextDisplayPresent = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / kDisplayMaxPresentFps));
