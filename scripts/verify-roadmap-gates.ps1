@@ -32,6 +32,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: scene source models"
+    & (Join-Path $PSScriptRoot "verify-scene-source-models.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: imported scene assets"
     & (Join-Path $PSScriptRoot "verify-scene-assets.ps1")
     if ($LASTEXITCODE -ne 0) {
