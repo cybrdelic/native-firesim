@@ -97,6 +97,7 @@ constexpr int kMaxRaymarchSteps = 120;
 constexpr int kMaxEmberCount = 192;
 constexpr int kVolumeLaunchDepth = 256;
 constexpr int kRenderLaunchRows = 1024;
+constexpr int kRenderSnapshotSlots = 2;
 
 float* g_heat = nullptr;
 float* g_heatNext = nullptr;
@@ -134,6 +135,21 @@ float4* g_hdrFrameDevice = nullptr;
 float4* g_sceneLight = nullptr;
 float4* g_sceneLightNext = nullptr;
 float* g_sceneShadow = nullptr;
+float* g_renderHeat[kRenderSnapshotSlots] = {};
+float* g_renderFuel[kRenderSnapshotSlots] = {};
+float* g_renderOxygen[kRenderSnapshotSlots] = {};
+float* g_renderSoot[kRenderSnapshotSlots] = {};
+float* g_renderChar[kRenderSnapshotSlots] = {};
+float* g_renderAsh[kRenderSnapshotSlots] = {};
+float* g_renderPyrolysis[kRenderSnapshotSlots] = {};
+float* g_renderProgress[kRenderSnapshotSlots] = {};
+float* g_renderTurbulenceEnergy[kRenderSnapshotSlots] = {};
+float* g_renderSootOptics[kRenderSnapshotSlots] = {};
+float* g_renderU[kRenderSnapshotSlots] = {};
+float* g_renderV[kRenderSnapshotSlots] = {};
+float* g_renderW[kRenderSnapshotSlots] = {};
+float4* g_renderSceneLight[kRenderSnapshotSlots] = {};
+float* g_renderSceneShadow[kRenderSnapshotSlots] = {};
 cudaGraphicsResource* g_d3dFp16Resource = nullptr;
 cudaEvent_t g_stepStartEvent = nullptr;
 cudaEvent_t g_afterVelocityEvent = nullptr;
@@ -155,6 +171,12 @@ int g_lightNy = 0;
 int g_lightNz = 0;
 int g_frameIndex = 0;
 float g_time = 0.0f;
+float g_renderTime = 0.0f;
+int g_renderSnapshotFront = 0;
+int g_renderSnapshotBack = 1;
+unsigned long long g_renderSnapshotVersion = 0;
+unsigned long long g_lastRenderedSnapshotVersion = 0;
+bool g_haveRenderSnapshot = false;
 bool g_haveLastRenderView = false;
 float g_lastRenderYaw = 0.0f;
 float g_lastRenderPitch = 0.0f;
@@ -1735,6 +1757,18 @@ __device__ void blendGizmo(float3* color, float3 gizmoColor, float alpha) {
     *color = lerp3(*color, gizmoColor, saturate(alpha));
 }
 
+__device__ bool shouldRenderPixelThisPhase(int x, int y, const SimParams& p) {
+    if (p.renderSubsample <= 1) {
+        return true;
+    }
+
+    const int phaseCount = max(1, p.renderSubsample);
+    const int tileX = x >> 4;
+    const int tileY = y >> 4;
+    const int tiledPhase = tileX * 13 + tileY * 29 + ((tileX ^ tileY) * 7);
+    return (tiledPhase % phaseCount) == (p.renderPhase % phaseCount);
+}
+
 __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, const SimParams& p) {
     if (p.showGizmos == 0) {
         return;
@@ -1777,10 +1811,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
         return;
     }
-    if (p.renderSubsample > 1) {
-        if ((y % p.renderSubsample) != (p.renderPhase % p.renderSubsample)) {
-            return;
-        }
+    if (!shouldRenderPixelThisPhase(x, y, p)) {
+        return;
     }
 
     const float2 uv = make_float2(
@@ -2090,10 +2122,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16SurfaceKernel(
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
         return;
     }
-    if (p.renderSubsample > 1) {
-        if ((y % p.renderSubsample) != (p.renderPhase % p.renderSubsample)) {
-            return;
-        }
+    if (!shouldRenderPixelThisPhase(x, y, p)) {
+        return;
     }
 
     const int pixelIndex = y * p.frameW + x;
@@ -2249,6 +2279,23 @@ void freeDeviceMemory() {
     cudaFree(g_sceneLight);
     cudaFree(g_sceneLightNext);
     cudaFree(g_sceneShadow);
+    for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
+        cudaFree(g_renderHeat[slot]);
+        cudaFree(g_renderFuel[slot]);
+        cudaFree(g_renderOxygen[slot]);
+        cudaFree(g_renderSoot[slot]);
+        cudaFree(g_renderChar[slot]);
+        cudaFree(g_renderAsh[slot]);
+        cudaFree(g_renderPyrolysis[slot]);
+        cudaFree(g_renderProgress[slot]);
+        cudaFree(g_renderTurbulenceEnergy[slot]);
+        cudaFree(g_renderSootOptics[slot]);
+        cudaFree(g_renderU[slot]);
+        cudaFree(g_renderV[slot]);
+        cudaFree(g_renderW[slot]);
+        cudaFree(g_renderSceneLight[slot]);
+        cudaFree(g_renderSceneShadow[slot]);
+    }
     if (g_stepStartEvent != nullptr) {
         cudaEventDestroy(g_stepStartEvent);
     }
@@ -2312,6 +2359,29 @@ void freeDeviceMemory() {
     g_sceneLight = nullptr;
     g_sceneLightNext = nullptr;
     g_sceneShadow = nullptr;
+    for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
+        g_renderHeat[slot] = nullptr;
+        g_renderFuel[slot] = nullptr;
+        g_renderOxygen[slot] = nullptr;
+        g_renderSoot[slot] = nullptr;
+        g_renderChar[slot] = nullptr;
+        g_renderAsh[slot] = nullptr;
+        g_renderPyrolysis[slot] = nullptr;
+        g_renderProgress[slot] = nullptr;
+        g_renderTurbulenceEnergy[slot] = nullptr;
+        g_renderSootOptics[slot] = nullptr;
+        g_renderU[slot] = nullptr;
+        g_renderV[slot] = nullptr;
+        g_renderW[slot] = nullptr;
+        g_renderSceneLight[slot] = nullptr;
+        g_renderSceneShadow[slot] = nullptr;
+    }
+    g_renderSnapshotFront = 0;
+    g_renderSnapshotBack = 1;
+    g_renderSnapshotVersion = 0;
+    g_lastRenderedSnapshotVersion = 0;
+    g_haveRenderSnapshot = false;
+    g_renderTime = g_time;
     g_stepStartEvent = nullptr;
     g_afterVelocityEvent = nullptr;
     g_afterReactionEvent = nullptr;
@@ -2321,6 +2391,8 @@ void freeDeviceMemory() {
     g_afterPackEvent = nullptr;
     g_afterSolveEvent = nullptr;
     g_afterRenderEvent = nullptr;
+    g_time = 0.0f;
+    g_renderTime = 0.0f;
 }
 
 SimParams makeParams(float dt = 1.0f / 60.0f) {
@@ -2409,6 +2481,92 @@ dim3 gridForFrameRows(int width, int rowCount, dim3 block) {
         (rowCount + block.y - 1) / block.y);
 }
 
+std::size_t scalarByteCount() {
+    return static_cast<std::size_t>(g_nx) * static_cast<std::size_t>(g_ny) * static_cast<std::size_t>(g_nz) * sizeof(float);
+}
+
+std::size_t uByteCount() {
+    return static_cast<std::size_t>(g_nx + 1) * static_cast<std::size_t>(g_ny) * static_cast<std::size_t>(g_nz) * sizeof(float);
+}
+
+std::size_t vByteCount() {
+    return static_cast<std::size_t>(g_nx) * static_cast<std::size_t>(g_ny + 1) * static_cast<std::size_t>(g_nz) * sizeof(float);
+}
+
+std::size_t wByteCount() {
+    return static_cast<std::size_t>(g_nx) * static_cast<std::size_t>(g_ny) * static_cast<std::size_t>(g_nz + 1) * sizeof(float);
+}
+
+std::size_t lightByteCount() {
+    return static_cast<std::size_t>(g_lightNx) * static_cast<std::size_t>(g_lightNy) * static_cast<std::size_t>(g_lightNz) * sizeof(float4);
+}
+
+std::size_t shadowByteCount() {
+    return static_cast<std::size_t>(g_lightNx) * static_cast<std::size_t>(g_lightNy) * static_cast<std::size_t>(g_lightNz) * sizeof(float);
+}
+
+bool copyRenderSnapshotField(const char* label, void* dst, const void* src, std::size_t bytes) {
+    return check(label, cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, 0));
+}
+
+bool allocateRenderSnapshotSlot(
+    int slot,
+    std::size_t scalarBytes,
+    std::size_t uBytes,
+    std::size_t vBytes,
+    std::size_t wBytes,
+    std::size_t lightBytes,
+    std::size_t shadowBytes) {
+    return check("cudaMalloc render snapshot heat", cudaMalloc(&g_renderHeat[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot fuel", cudaMalloc(&g_renderFuel[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot oxygen", cudaMalloc(&g_renderOxygen[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot soot", cudaMalloc(&g_renderSoot[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot char", cudaMalloc(&g_renderChar[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot ash", cudaMalloc(&g_renderAsh[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot pyrolysis", cudaMalloc(&g_renderPyrolysis[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot progress", cudaMalloc(&g_renderProgress[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot turbulence energy", cudaMalloc(&g_renderTurbulenceEnergy[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot soot optics", cudaMalloc(&g_renderSootOptics[slot], scalarBytes)) &&
+        check("cudaMalloc render snapshot u", cudaMalloc(&g_renderU[slot], uBytes)) &&
+        check("cudaMalloc render snapshot v", cudaMalloc(&g_renderV[slot], vBytes)) &&
+        check("cudaMalloc render snapshot w", cudaMalloc(&g_renderW[slot], wBytes)) &&
+        check("cudaMalloc render snapshot scene light", cudaMalloc(&g_renderSceneLight[slot], lightBytes)) &&
+        check("cudaMalloc render snapshot scene shadow", cudaMalloc(&g_renderSceneShadow[slot], shadowBytes));
+}
+
+bool publishRenderSnapshot() {
+    const int slot = g_renderSnapshotBack;
+    if (g_renderHeat[slot] == nullptr || g_renderSceneLight[slot] == nullptr) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "CUDA render snapshot buffers are not initialized.");
+        return false;
+    }
+
+    const std::size_t scalarBytes = scalarByteCount();
+    if (!copyRenderSnapshotField("snapshot heat", g_renderHeat[slot], g_heat, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot fuel", g_renderFuel[slot], g_fuel, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot oxygen", g_renderOxygen[slot], g_oxygen, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot soot", g_renderSoot[slot], g_soot, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot char", g_renderChar[slot], g_char, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot ash", g_renderAsh[slot], g_ash, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot pyrolysis", g_renderPyrolysis[slot], g_pyrolysis, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot progress", g_renderProgress[slot], g_progress, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot turbulence energy", g_renderTurbulenceEnergy[slot], g_turbulenceEnergy, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot soot optics", g_renderSootOptics[slot], g_sootOptics, scalarBytes) ||
+        !copyRenderSnapshotField("snapshot u", g_renderU[slot], g_u, uByteCount()) ||
+        !copyRenderSnapshotField("snapshot v", g_renderV[slot], g_v, vByteCount()) ||
+        !copyRenderSnapshotField("snapshot w", g_renderW[slot], g_w, wByteCount()) ||
+        !copyRenderSnapshotField("snapshot scene light", g_renderSceneLight[slot], g_sceneLight, lightByteCount()) ||
+        !copyRenderSnapshotField("snapshot scene shadow", g_renderSceneShadow[slot], g_sceneShadow, shadowByteCount())) {
+        return false;
+    }
+
+    g_renderSnapshotFront = slot;
+    g_renderSnapshotBack = 1 - slot;
+    g_haveRenderSnapshot = true;
+    ++g_renderSnapshotVersion;
+    return true;
+}
+
 } // namespace
 
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight) {
@@ -2423,6 +2581,7 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
     g_lightNy = clampHost((g_ny + 3) / 4, 20, 56);
     g_lightNz = clampHost((g_nz + 3) / 4, 16, 36);
     g_time = 0.0f;
+    g_renderTime = 0.0f;
     g_frameIndex = 0;
     std::strcpy(g_lastError, "No CUDA error.");
 
@@ -2482,6 +2641,12 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
         freeDeviceMemory();
         return false;
     }
+    for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
+        if (!allocateRenderSnapshotSlot(slot, scalarBytes, uBytes, vBytes, wBytes, lightBytes, shadowBytes)) {
+            freeDeviceMemory();
+            return false;
+        }
+    }
     if (!check("cudaEventCreate stepStart", cudaEventCreate(&g_stepStartEvent)) ||
         !check("cudaEventCreate afterVelocity", cudaEventCreate(&g_afterVelocityEvent)) ||
         !check("cudaEventCreate afterReaction", cudaEventCreate(&g_afterReactionEvent)) ||
@@ -2540,6 +2705,17 @@ bool fireCudaReset() {
     if (!check("reset scene light", cudaMemset(g_sceneLight, 0, lightCount * sizeof(float4))) ||
         !check("reset scene light next", cudaMemset(g_sceneLightNext, 0, lightCount * sizeof(float4))) ||
         !check("reset scene shadow", cudaMemset(g_sceneShadow, 0, lightCount * sizeof(float)))) {
+        return false;
+    }
+    g_renderSnapshotFront = 0;
+    g_renderSnapshotBack = 1;
+    g_renderSnapshotVersion = 0;
+    g_lastRenderedSnapshotVersion = 0;
+    g_haveRenderSnapshot = false;
+    g_time = 0.0f;
+    g_renderTime = 0.0f;
+    g_frameIndex = 0;
+    if (!publishRenderSnapshot()) {
         return false;
     }
     g_haveLastRenderView = false;
@@ -2613,10 +2789,13 @@ bool stepAndRenderInternal(
 
     const bool collectMetrics = metrics != nullptr;
     const float stepDt = std::max(0.001f, std::min(settings.dt, 1.0f / 30.0f));
-    g_time += stepDt;
+    g_renderTime += stepDt;
+    if (advanceSimulation) {
+        g_time += stepDt;
+    }
 
     SimParams params = makeParams(stepDt);
-    params.time = g_time;
+    params.time = advanceSimulation ? g_time : g_renderTime;
     params.mouseX = std::max(0.0f, std::min(1.0f, settings.mouseX));
     params.mouseY = std::max(0.0f, std::min(1.0f, settings.mouseY));
     params.leftDown = settings.leftDown;
@@ -2780,6 +2959,9 @@ bool stepAndRenderInternal(
         if (!check("scene lighting launch", cudaGetLastError())) {
             return false;
         }
+        if (!publishRenderSnapshot()) {
+            return false;
+        }
         if (collectMetrics && !check("cudaEventRecord after lighting", cudaEventRecord(g_afterLightingEvent))) {
             return false;
         }
@@ -2791,38 +2973,42 @@ bool stepAndRenderInternal(
     }
 
     if (!renderOutput) {
-        ++g_frameIndex;
         return true;
     }
 
+    if (!g_haveRenderSnapshot && !publishRenderSnapshot()) {
+        return false;
+    }
+    params.time = g_renderTime;
+    const int renderSlot = g_renderSnapshotFront;
     const dim3 frameBlock(16, 16);
     for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
         const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
         const SimParams slice = withFrameWindow(params, yStart, yEnd);
         renderKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(
             g_hdrFrameDevice,
-            g_heat,
-            g_fuel,
-            g_oxygen,
-            g_soot,
-            g_char,
-            g_ash,
-            g_pyrolysis,
-            g_progress,
-            g_turbulenceEnergy,
-            g_sootOptics,
-            g_sceneLight,
-            g_sceneShadow,
-            g_u,
-            g_v,
-            g_w,
+            g_renderHeat[renderSlot],
+            g_renderFuel[renderSlot],
+            g_renderOxygen[renderSlot],
+            g_renderSoot[renderSlot],
+            g_renderChar[renderSlot],
+            g_renderAsh[renderSlot],
+            g_renderPyrolysis[renderSlot],
+            g_renderProgress[renderSlot],
+            g_renderTurbulenceEnergy[renderSlot],
+            g_renderSootOptics[renderSlot],
+            g_renderSceneLight[renderSlot],
+            g_renderSceneShadow[renderSlot],
+            g_renderU[renderSlot],
+            g_renderV[renderSlot],
+            g_renderW[renderSlot],
             slice);
     }
     if (!check("renderKernel launch", cudaGetLastError())) {
         return false;
     }
-    if (advanceSimulation && params.emberCount > 0 && params.renderDebugMode == 0) {
-        emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_hdrFrameDevice, g_heat, params);
+    if (params.emberCount > 0 && params.renderDebugMode == 0) {
+        emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_hdrFrameDevice, g_renderHeat[renderSlot], params);
         if (!check("emberHdrKernel launch", cudaGetLastError())) {
             return false;
         }
@@ -2870,7 +3056,7 @@ bool stepAndRenderInternal(
         for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
             const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
             const SimParams slice = withFrameWindow(params, yStart, yEnd);
-            overlayKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_frameDevice, g_heat, slice);
+            overlayKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_frameDevice, g_renderHeat[renderSlot], slice);
         }
         if (!check("overlayKernel launch", cudaGetLastError())) {
             return false;
@@ -2988,6 +3174,7 @@ bool stepAndRenderInternal(
         out.divergenceReduction = divBeforeL2 > 0.000001f ? 1.0f - divAfterL2 / divBeforeL2 : 0.0f;
         *metrics = out;
     }
+    g_lastRenderedSnapshotVersion = g_renderSnapshotVersion;
     ++g_frameIndex;
     return true;
 }

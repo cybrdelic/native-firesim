@@ -295,3 +295,28 @@ Validation evidence:
 Remaining architectural fix:
 
 - This shortens the periodic hitch; it does not eliminate the underlying single-state coupling. The complete fix is a double-buffered/asynchronous simulation-render split: physics writes a back simulation state, render samples the latest complete front state every display frame, and the front/back fields swap only at simulation barriers.
+
+## Double-Buffered Render-State Split
+
+Date: 2026-05-05
+
+The remaining coupling was inside CUDA state ownership:
+
+- Render-only frames still sampled the solver's current `g_heat`, `g_fuel`, `g_soot`, velocity, and scene-light pointers.
+- Step-only physics frames incremented the render phase even though no pixels were rendered, so the temporal renderer skipped a phase on a fixed cadence.
+- The original temporal budget selected rows. That made partial-frame reuse show up as horizontal bands; a naive per-pixel phase removed bands but broke warp coherence and regressed live-like rendering to `12.76 ms` / `78.37 FPS`.
+
+Kept fix:
+
+- Added two CUDA render snapshot slots for all render-visible scalar fields, MAC velocity fields, scene radiance, and scene shadow.
+- Physics writes the normal solver buffers, then publishes a complete back snapshot and swaps it to front only after advection, reaction, projection, and scene-lighting finish.
+- Render and pack kernels now read only the current front snapshot, not solver-owned mutable fields.
+- Step-only physics no longer increments the render phase. Only actual rendered frames advance the temporal phase.
+- Replaced row-only temporal phasing with coherent 16x16 tile phasing. This removes hard horizontal/vertical/diagonal update lines while keeping whole CUDA blocks coherent.
+- Split simulation time from render time so render-only visual motion does not advance the solver clock.
+
+Validation evidence:
+
+- `verify.ps1 -DiagnosticsOnly`: passed after the render-state split.
+- `out/snapshot-tilephase-sim30/worker-benchmark/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `3.55 ms`, `281.40 FPS`.
+- `out/snapshot-tilephase-full/worker-benchmark/worker-benchmark.json`: full-physics benchmark passed at `55.38 ms`, `18.06 FPS`.
