@@ -22,6 +22,10 @@ def number_triplet(value: object, name: str) -> None:
 
 def main() -> None:
     schema = json.loads((SCENES / "scene.schema.json").read_text(encoding="utf-8"))
+    baselines_path = SCENES / "visual-baselines.json"
+    require(baselines_path.exists(), "missing visual-baselines.json")
+    baselines = json.loads(baselines_path.read_text(encoding="utf-8"))
+    require(baselines["schemaVersion"] == 1, "visual baseline schemaVersion mismatch")
     required = schema["required"]
     for scene_dir in SCENE_DIRS:
         path = SCENES / scene_dir / "scene.json"
@@ -57,6 +61,9 @@ def main() -> None:
         require(scene["lighting"]["temperatureKelvin"] > 1000, f"{scene_dir} lighting temperature is not fire-like")
         require(scene["material"]["fuelClass"], f"{scene_dir} material fuelClass is empty")
         require(scene["expectedBehavior"]["mustAvoidBlackFrame"] is True, f"{scene_dir} must guard black frames")
+        baseline_key = "burner" if scene_dir == "gas-burner-aver1" else scene_dir
+        require(baseline_key in baselines["scenes"], f"{scene_dir} missing visual baseline entry")
+        require(len(baselines["scenes"][baseline_key]["mustHave"]) >= 3, f"{scene_dir} baseline is under-specified")
 
     print("scene contract check: scene manifests are present and valid")
 
