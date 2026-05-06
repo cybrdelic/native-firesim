@@ -20,6 +20,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: visual regression audit"
+    & (Join-Path $PSScriptRoot "verify-visual-regression.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     if ($RunGpuKernels) {
         Write-Host "roadmap gate: gpu validation"
         $args = @("-RunGpuKernels")
