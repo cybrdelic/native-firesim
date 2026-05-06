@@ -10,3 +10,6 @@ out/
 *.exe
 *.log
 __pycache__/
+assets/sketchfab-fire-sources/_downloads/
+assets/sketchfab-fire-sources/_extracted/
+assets/fire-scenes/*/raw/
