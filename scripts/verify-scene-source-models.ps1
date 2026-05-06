@@ -38,6 +38,7 @@ Require-Text $cuda "cosf(angle * 32.0f)" "gas burner source no longer uses narro
 Require-Text $cuda "sceneBuoyancyScale = p.sceneId == 2 ? 0.42f" "stove/gas burner buoyancy is no longer constrained"
 Require-Text $cuda "contactPyrolysis" "campfire source no longer emphasizes log-contact pyrolysis"
 Require-Text $cuda "p.sceneId == 1 ? 0.245f" "campfire source no longer has an expanded fuel-bed height band"
+Require-Text $cuda "campTongueBias = p.sceneId == 1 ? smoothstepf(0.035f, 0.72f" "campfire raymarch no longer has an expanded warm tongue body"
 Require-Text $cuda "scenePyrolysisGain = p.sceneId == 2 ? 0.42f : (p.sceneId == 1 ? 1.34f" "scene-specific pyrolysis gains are missing"
 Require-Text $main "sceneSourceModels=gas selected low-soot burner ring; campfire log-contact char bed; room tray fuel bed" "diagnostics source model string is missing from source"
 
