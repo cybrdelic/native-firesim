@@ -46,10 +46,10 @@ constexpr float kWorkerMaxPublishFps = 180.0f;
 constexpr double kDisplayMaxPresentFps = 180.0;
 constexpr unsigned long long kWorkerStatusUiUpdateMs = 250ull;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 8u;
+constexpr DWORD kSharedViewportVersion = 9u;
 constexpr int kSharedFrameSlots = 3;
 constexpr int kDisplayFrameSlots = 3;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV8";
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV9";
 constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
@@ -105,6 +105,9 @@ struct SharedViewportBuffer {
     volatile LONG workerStatus;
     volatile LONG workerExitCode;
     volatile LONG workerErrorCount;
+    volatile LONG workerPublishedFrames;
+    volatile LONG workerPhysicsFrames;
+    volatile LONG workerRenderOnlyFrames;
     DWORD workerPid;
     unsigned long long lastFrameTickMs;
     unsigned long long workerHeartbeatTickMs;
@@ -264,6 +267,10 @@ double g_liveCopiedHz = 0.0;
 double g_livePresentHz = 0.0;
 double g_liveIntervalCopyMs = 0.0;
 double g_liveIntervalPresentMs = 0.0;
+double g_workerPublishedHz = 0.0;
+double g_workerPhysicsHz = 0.0;
+double g_workerRenderOnlyHz = 0.0;
+unsigned long long g_displayFrameAgeMs = 0;
 bool g_uiTextureUploaded = false;
 
 void stopCudaWorker();
@@ -863,20 +870,19 @@ void updateMouseFromLParam(LPARAM lParam) {
 
 void updateTitle(float fps) {
     char title[256] = {};
-    const double headlineFps = g_useCudaBackend
+    const double displayedFps = g_useCudaBackend
         ? (g_visualFps > 0.0f ? static_cast<double>(g_visualFps) : static_cast<double>(fps))
         : static_cast<double>(fps);
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | %.0f fps | %s scene | %s | debug %s | wind %.2f | turbulence %.2f | %.64s",
+        "Native FireSim %s | display %.0fhz | worker %.0fhz | age %llums | %s scene | %s | %.56s",
         g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
-        headlineFps,
+        displayedFps,
+        g_workerPublishedHz,
+        g_displayFrameAgeMs,
         sceneName(g_activeScene),
         toolName(g_activeGizmo),
-        renderDebugName(g_renderDebugMode),
-        g_wind,
-        g_turbulence,
         g_workerUiStatus);
     SetWindowTextA(g_window, title);
 }
@@ -2454,6 +2460,9 @@ bool initializeSharedViewport(bool reset) {
         g_sharedViewport->workerStatus = 0;
         g_sharedViewport->workerExitCode = 0;
         g_sharedViewport->workerErrorCount = 0;
+        g_sharedViewport->workerPublishedFrames = 0;
+        g_sharedViewport->workerPhysicsFrames = 0;
+        g_sharedViewport->workerRenderOnlyFrames = 0;
         g_haveLastWorkerSettings = false;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "shared viewport initialized");
     }
@@ -2671,21 +2680,19 @@ void serviceCudaWorkerWatchdog() {
         g_lastWorkerStatusFormatTickMs = now;
     } else if (g_sharedViewport->lastFrameTickMs != 0 && frameAge <= kWorkerFrameStaleMs) {
         if (now - g_lastWorkerStatusFormatTickMs >= kWorkerStatusUiUpdateMs) {
-            const double frameMs = static_cast<double>(g_sharedViewport->workerFrameMicros) / 1000.0;
             const double cudaMs = static_cast<double>(g_sharedViewport->workerCudaMicros) / 1000.0;
             const double publishMs = static_cast<double>(g_sharedViewport->workerPublishMicros) / 1000.0;
-            const double workerFps = g_sharedViewport->workerFrameMicros == 0 ? 0.0 : 1000000.0 / static_cast<double>(g_sharedViewport->workerFrameMicros);
             std::snprintf(
                 g_workerUiStatus,
                 sizeof(g_workerUiStatus),
-                "wrk %.0ffps %.1f c%.1f p%.1f ui %.0f copyHz %.0f/%.0f",
-                workerFps,
-                frameMs,
-                cudaMs,
-                publishMs,
+                "app %.0f present %.0f copy %.0f pub %.0f age %llums gpu %.1fms pub %.1fms",
                 g_visualFps,
+                g_livePresentHz,
                 g_liveCopiedHz,
-                g_liveCopyCallHz);
+                g_workerPublishedHz,
+                frameAge,
+                cudaMs,
+                publishMs);
             g_lastWorkerStatusFormatTickMs = now;
         }
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
@@ -3169,6 +3176,12 @@ int runCudaWorker(const std::string& args) {
         const LONG readySequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->slotFrameSequences[publishSlot] = readySequence;
         g_sharedViewport->latestFrameSlot = publishSlot;
+        InterlockedIncrement(&g_sharedViewport->workerPublishedFrames);
+        if (advancePhysics) {
+            InterlockedIncrement(&g_sharedViewport->workerPhysicsFrames);
+        } else {
+            InterlockedIncrement(&g_sharedViewport->workerRenderOnlyFrames);
+        }
 
         const auto targetFrameDuration = std::chrono::duration<double>(1.0 / static_cast<double>(kWorkerMaxPublishFps));
         const auto nextPublishTime = frameStart + std::chrono::duration_cast<Clock::duration>(targetFrameDuration);
@@ -4234,6 +4247,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     unsigned long long lastProfilePresentCalls = 0;
     unsigned long long lastProfileCopyMicros = 0;
     unsigned long long lastProfilePresentMicros = 0;
+    LONG lastProfileWorkerPublishedFrames = 0;
+    LONG lastProfileWorkerPhysicsFrames = 0;
+    LONG lastProfileWorkerRenderOnlyFrames = 0;
     int visualFrames = 0;
     float fps = 0.0f;
     const bool traceFrames = GetEnvironmentVariableA("FIRESIM_TRACE_FRAMES", nullptr, 0) > 0;
@@ -4242,7 +4258,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         CreateDirectoryA("out", nullptr);
         frameTrace.open("out\\live-frame-trace.csv", std::ios::binary);
         if (frameTrace) {
-            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,uploadUi,backend,seq,slot,workerFrameUs,workerCudaUs,workerPublishUs\n";
+            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,uploadUi,backend,seq,slot,frameAgeMs,workerPublishedFrames,workerPhysicsFrames,workerRenderOnlyFrames,workerFrameUs,workerCudaUs,workerPublishUs\n";
         }
     }
 
@@ -4304,6 +4320,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             ++g_liveCopiedFrames;
         }
         const bool workerTimestampFresh = workerFrameMetadataFresh();
+        g_displayFrameAgeMs =
+            g_sharedViewport == nullptr || g_sharedViewport->lastFrameTickMs == 0
+                ? 0
+                : tickMs() - g_sharedViewport->lastFrameTickMs;
         g_cudaWorkerFrameLive = (copiedWorkerFrame || workerTimestampFresh) && g_d3d.hasSimFrame;
         g_useCudaBackend = g_cudaWorkerFrameLive;
         if (!g_cudaWorkerFrameLive && !copiedWorkerFrame && settings.reset == 0) {
@@ -4354,6 +4374,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 << (g_useCudaBackend ? 1 : 0) << ","
                 << static_cast<long>(g_lastCopiedWorkerSequence) << ","
                 << (g_sharedViewport == nullptr ? -1L : static_cast<long>(g_sharedViewport->latestFrameSlot)) << ","
+                << g_displayFrameAgeMs << ","
+                << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerPublishedFrames)) << ","
+                << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerPhysicsFrames)) << ","
+                << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerRenderOnlyFrames)) << ","
                 << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerFrameMicros) << ","
                 << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerCudaMicros) << ","
                 << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerPublishMicros) << "\n";
@@ -4369,9 +4393,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             const unsigned long long presentDelta = g_livePresentCalls - lastProfilePresentCalls;
             const unsigned long long copyMicrosDelta = g_liveCopyMicros - lastProfileCopyMicros;
             const unsigned long long presentMicrosDelta = g_livePresentMicros - lastProfilePresentMicros;
+            const LONG workerPublishedFrames =
+                g_sharedViewport == nullptr ? 0 : g_sharedViewport->workerPublishedFrames;
+            const LONG workerPhysicsFrames =
+                g_sharedViewport == nullptr ? 0 : g_sharedViewport->workerPhysicsFrames;
+            const LONG workerRenderOnlyFrames =
+                g_sharedViewport == nullptr ? 0 : g_sharedViewport->workerRenderOnlyFrames;
+            const LONG workerPublishedDelta = std::max(0L, workerPublishedFrames - lastProfileWorkerPublishedFrames);
+            const LONG workerPhysicsDelta = std::max(0L, workerPhysicsFrames - lastProfileWorkerPhysicsFrames);
+            const LONG workerRenderOnlyDelta = std::max(0L, workerRenderOnlyFrames - lastProfileWorkerRenderOnlyFrames);
             g_liveCopyCallHz = static_cast<double>(copyCallsDelta) / static_cast<double>(fpsElapsed);
             g_liveCopiedHz = static_cast<double>(copiedDelta) / static_cast<double>(fpsElapsed);
             g_livePresentHz = static_cast<double>(presentDelta) / static_cast<double>(fpsElapsed);
+            g_workerPublishedHz = static_cast<double>(workerPublishedDelta) / static_cast<double>(fpsElapsed);
+            g_workerPhysicsHz = static_cast<double>(workerPhysicsDelta) / static_cast<double>(fpsElapsed);
+            g_workerRenderOnlyHz = static_cast<double>(workerRenderOnlyDelta) / static_cast<double>(fpsElapsed);
             g_liveIntervalCopyMs = copyCallsDelta == 0 ? 0.0 : static_cast<double>(copyMicrosDelta) / (1000.0 * static_cast<double>(copyCallsDelta));
             g_liveIntervalPresentMs = presentDelta == 0 ? 0.0 : static_cast<double>(presentMicrosDelta) / (1000.0 * static_cast<double>(presentDelta));
             lastProfileCopyCalls = g_liveCopyCalls;
@@ -4379,15 +4415,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             lastProfilePresentCalls = g_livePresentCalls;
             lastProfileCopyMicros = g_liveCopyMicros;
             lastProfilePresentMicros = g_livePresentMicros;
+            lastProfileWorkerPublishedFrames = workerPublishedFrames;
+            lastProfileWorkerPhysicsFrames = workerPhysicsFrames;
+            lastProfileWorkerRenderOnlyFrames = workerRenderOnlyFrames;
             char profileDetail[256] = {};
             std::snprintf(
                 profileDetail,
                 sizeof(profileDetail),
-                "uiFps=%.1f copyCallsHz=%.1f copiedHz=%.1f presentHz=%.1f copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
+                "appFps=%.1f presentHz=%.1f copiedHz=%.1f workerPublishHz=%.1f physicsHz=%.1f renderOnlyHz=%.1f frameAgeMs=%llu copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
                 g_visualFps,
-                g_liveCopyCallHz,
-                g_liveCopiedHz,
                 g_livePresentHz,
+                g_liveCopiedHz,
+                g_workerPublishedHz,
+                g_workerPhysicsHz,
+                g_workerRenderOnlyHz,
+                g_displayFrameAgeMs,
                 g_liveIntervalCopyMs,
                 g_liveIntervalPresentMs,
                 static_cast<long>(g_lastCopiedWorkerSequence),
