@@ -41,9 +41,11 @@ constexpr float kSmokeDarkness = 1.26f;
 constexpr float kFireIntensity = 1.42f;
 constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
-constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
+constexpr double kAppPumpFps = 360.0;
 constexpr float kWorkerMaxPublishFps = 180.0f;
 constexpr double kDisplayMaxPresentFps = 180.0;
+constexpr float kTargetFrameSeconds = static_cast<float>(1.0 / kAppPumpFps);
+static_assert(static_cast<int>(kAppPumpFps) == static_cast<int>(kDisplayMaxPresentFps) * 2, "display pacing expects a 2:1 app pump to present cadence");
 constexpr unsigned long long kWorkerStatusUiUpdateMs = 250ull;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
 constexpr DWORD kSharedViewportVersion = 9u;
@@ -277,12 +279,14 @@ unsigned long long g_liveCopyCalls = 0;
 unsigned long long g_liveCopiedFrames = 0;
 unsigned long long g_livePresentCalls = 0;
 unsigned long long g_livePresentFailures = 0;
+unsigned long long g_liveReusedPresents = 0;
 bool g_lastPresentSkippedWouldBlock = false;
 unsigned long long g_liveCopyMicros = 0;
 unsigned long long g_livePresentMicros = 0;
 double g_liveCopyCallHz = 0.0;
 double g_liveCopiedHz = 0.0;
 double g_livePresentHz = 0.0;
+double g_liveReusedPresentHz = 0.0;
 double g_liveIntervalCopyMs = 0.0;
 double g_liveIntervalPresentMs = 0.0;
 double g_workerPublishedHz = 0.0;
@@ -894,10 +898,11 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | display %.0fhz | worker %.0fhz | age %llums | %s scene | %s | %.56s",
+        "Native FireSim %s | present %.0fhz | worker %.0fhz | reuse %.0fhz | age %llums | %s scene | %s | %.48s",
         g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
         displayedFps,
         g_workerPublishedHz,
+        g_liveReusedPresentHz,
         g_displayFrameAgeMs,
         sceneName(g_activeScene),
         toolName(g_activeGizmo),
@@ -2788,10 +2793,11 @@ void serviceCudaWorkerWatchdog() {
             std::snprintf(
                 g_workerUiStatus,
                 sizeof(g_workerUiStatus),
-                "app %.0f present %.0f copy %.0f pub %.0f age %llums gpu %.1fms pub %.1fms",
+                "app %.0f present %.0f copy %.0f reuse %.0f pub %.0f age %llums gpu %.1fms pub %.1fms",
                 g_visualFps,
                 g_livePresentHz,
                 g_liveCopiedHz,
+                g_liveReusedPresentHz,
                 g_workerPublishedHz,
                 frameAge,
                 cudaMs,
@@ -4271,7 +4277,9 @@ int runDiagnostics() {
     out << "workerHeartbeatStaleMs=" << kWorkerHeartbeatStaleMs << "\n";
     out << "workerKillStaleMs=" << kWorkerKillStaleMs << "\n";
     out << "workerRestartLimitPerMinute=" << kWorkerRestartLimit << "\n";
-    out << "presentationTargetFps=300\n";
+    out << "appPumpFps=" << static_cast<int>(kAppPumpFps) << "\n";
+    out << "presentationTargetFps=" << static_cast<int>(kDisplayMaxPresentFps) << "\n";
+    out << "presentationPacing=2:1 fixed app pump to present cadence with intentional display-frame reuse\n";
     out << "presentVsync=false\n";
     out << "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
@@ -4366,9 +4374,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     auto last = Clock::now();
     auto fpsLast = last;
     auto nextDisplayPresent = last;
+    const auto displayPresentStep = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / kDisplayMaxPresentFps));
     unsigned long long lastProfileCopyCalls = 0;
     unsigned long long lastProfileCopiedFrames = 0;
     unsigned long long lastProfilePresentCalls = 0;
+    unsigned long long lastProfileReusedPresents = 0;
     unsigned long long lastProfileCopyMicros = 0;
     unsigned long long lastProfilePresentMicros = 0;
     LONG lastProfileWorkerPublishedFrames = 0;
@@ -4382,7 +4392,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         CreateDirectoryA("out", nullptr);
         frameTrace.open("out\\live-frame-trace.csv", std::ios::binary);
         if (frameTrace) {
-            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,uploadUi,backend,seq,slot,frameAgeMs,workerPublishedFrames,workerPhysicsFrames,workerRenderOnlyFrames,workerFrameUs,workerCudaUs,workerPublishUs\n";
+            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,reusedDisplayFrame,uploadUi,backend,seq,slot,frameAgeMs,workerPublishedFrames,workerPhysicsFrames,workerRenderOnlyFrames,workerFrameUs,workerCudaUs,workerPublishUs\n";
         }
     }
 
@@ -4457,9 +4467,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         const bool overlayDirty = overlayStateDirty(settings, g_useCudaBackend, g_cleanViewportMode);
         const bool presentDirty = copiedWorkerFrame || overlayDirty || !g_cudaWorkerFrameLive;
         bool presented = false;
+        bool reusedDisplayFrame = false;
         bool uploadUi = false;
         unsigned long long presentMicros = 0;
-        if (presentDirty && presentBudgetDue) {
+        if (presentBudgetDue && (presentDirty || g_cudaWorkerFrameLive)) {
+            reusedDisplayFrame = g_cudaWorkerFrameLive && !copiedWorkerFrame;
             uploadUi = overlayDirty || !g_useCudaBackend || !g_uiTextureUploaded;
             if (g_useCudaBackend) {
                 if (uploadUi) {
@@ -4479,7 +4491,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             if (!presented && !g_lastPresentSkippedWouldBlock) {
                 ++g_livePresentFailures;
             }
-            nextDisplayPresent = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / kDisplayMaxPresentFps));
+            if (presented && reusedDisplayFrame) {
+                ++g_liveReusedPresents;
+            }
+            do {
+                nextDisplayPresent += displayPresentStep;
+            } while (nextDisplayPresent <= Clock::now());
         }
 
         if (presented) {
@@ -4494,6 +4511,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 << std::chrono::duration_cast<std::chrono::microseconds>(frameEnd - now).count() << ","
                 << (copiedWorkerFrame ? 1 : 0) << ","
                 << (presented ? 1 : 0) << ","
+                << (reusedDisplayFrame ? 1 : 0) << ","
                 << (uploadUi ? 1 : 0) << ","
                 << (g_useCudaBackend ? 1 : 0) << ","
                 << static_cast<long>(g_lastCopiedWorkerSequence) << ","
@@ -4515,6 +4533,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             const unsigned long long copyCallsDelta = g_liveCopyCalls - lastProfileCopyCalls;
             const unsigned long long copiedDelta = g_liveCopiedFrames - lastProfileCopiedFrames;
             const unsigned long long presentDelta = g_livePresentCalls - lastProfilePresentCalls;
+            const unsigned long long reusedPresentDelta = g_liveReusedPresents - lastProfileReusedPresents;
             const unsigned long long copyMicrosDelta = g_liveCopyMicros - lastProfileCopyMicros;
             const unsigned long long presentMicrosDelta = g_livePresentMicros - lastProfilePresentMicros;
             const LONG workerPublishedFrames =
@@ -4529,6 +4548,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             g_liveCopyCallHz = static_cast<double>(copyCallsDelta) / static_cast<double>(fpsElapsed);
             g_liveCopiedHz = static_cast<double>(copiedDelta) / static_cast<double>(fpsElapsed);
             g_livePresentHz = static_cast<double>(presentDelta) / static_cast<double>(fpsElapsed);
+            g_liveReusedPresentHz = static_cast<double>(reusedPresentDelta) / static_cast<double>(fpsElapsed);
             g_workerPublishedHz = static_cast<double>(workerPublishedDelta) / static_cast<double>(fpsElapsed);
             g_workerPhysicsHz = static_cast<double>(workerPhysicsDelta) / static_cast<double>(fpsElapsed);
             g_workerRenderOnlyHz = static_cast<double>(workerRenderOnlyDelta) / static_cast<double>(fpsElapsed);
@@ -4537,6 +4557,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             lastProfileCopyCalls = g_liveCopyCalls;
             lastProfileCopiedFrames = g_liveCopiedFrames;
             lastProfilePresentCalls = g_livePresentCalls;
+            lastProfileReusedPresents = g_liveReusedPresents;
             lastProfileCopyMicros = g_liveCopyMicros;
             lastProfilePresentMicros = g_livePresentMicros;
             lastProfileWorkerPublishedFrames = workerPublishedFrames;
@@ -4546,10 +4567,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             std::snprintf(
                 profileDetail,
                 sizeof(profileDetail),
-                "appFps=%.1f presentHz=%.1f copiedHz=%.1f workerPublishHz=%.1f physicsHz=%.1f renderOnlyHz=%.1f frameAgeMs=%llu copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
+                "appFps=%.1f presentHz=%.1f copiedHz=%.1f reusedPresentHz=%.1f workerPublishHz=%.1f physicsHz=%.1f renderOnlyHz=%.1f frameAgeMs=%llu copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
                 g_visualFps,
                 g_livePresentHz,
                 g_liveCopiedHz,
+                g_liveReusedPresentHz,
                 g_workerPublishedHz,
                 g_workerPhysicsHz,
                 g_workerRenderOnlyHz,
