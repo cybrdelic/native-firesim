@@ -68,6 +68,7 @@ struct FireSettings {
     int reset = 0;
     int showGizmos = 1;
     int activeGizmo = 1;
+    int sceneId = 0;
     float wind = 0.0f;
     float turbulence = 0.72f;
     float detail = 0.88f;
@@ -83,6 +84,14 @@ struct FireSettings {
     float exposure = 1.0f;
     float reflectionGain = 1.0f;
     float smokeDarkness = 1.0f;
+    float emitterCenterX = 0.0f;
+    float emitterCenterZ = 0.0f;
+    float emitterHeightNorm = 0.0f;
+    float emitterHeightBandNorm = 0.06f;
+    float emitterRadius = 0.48f;
+    int burnerCenterCount = 0;
+    float burnerCenterX[4] = {};
+    float burnerCenterZ[4] = {};
 };
 
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);
@@ -90,10 +99,12 @@ bool fireCudaStepAndRender(std::uint32_t* bgraPixels, const FireSettings& settin
 bool fireCudaStepAndRenderMeasured(std::uint32_t* bgraPixels, const FireSettings& settings, FireCudaFrameMetrics* metrics);
 bool fireCudaSelectDeviceForD3D11(void* d3d11Device);
 bool fireCudaRegisterD3D11Texture(void* d3d11Texture);
+bool fireCudaStepD3D11(const FireSettings& settings);
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings);
 bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFrameMetrics* metrics);
 bool fireCudaRenderD3D11(const FireSettings& settings);
 void fireCudaUnregisterD3D11Texture();
+bool fireCudaSynchronize();
 bool fireCudaReset();
 bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics);
 void fireCudaShutdown();

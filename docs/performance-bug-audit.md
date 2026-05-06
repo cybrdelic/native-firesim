@@ -183,3 +183,140 @@ Current evidence from this pass:
 - `out/current-render-only/worker-benchmark.json`: render-only worker benchmark passed at `5.41 ms`, `184.92 FPS`.
 - `out/current-sim240/worker-benchmark.json`: physics-decoupled worker benchmark passed at `5.45 ms`, `183.36 FPS`.
 - Live bounded run after the timer-resolution fix showed `wrk 171-180fps` and `copyHz 153-179`, clearing the requested 100 FPS target in the live CUDA viewport.
+
+## Post-Merge Performance Pass
+
+Date: 2026-05-04
+
+This pass started from merged `main` after PR #3. Quality settings stayed fixed: `raymarchSteps=104`, `emberCount=176`, `pressureIterations=40`, and requested grid `384x240`.
+
+Baseline:
+
+- `out/postmerge-baseline-workerbench/worker-benchmark.json`: full physics benchmark passed at `88.12 ms`, `11.35 FPS`.
+- Baseline sampled GPU breakdown: velocity `5.72 ms`, reaction `26.00 ms`, projection `35.14 ms`, lighting `0.31 ms`, raymarch `15.85 ms`, pack `4.84 ms`.
+
+Kept fixes:
+
+- Replaced full-grid red/black SOR launches with a compact parity launch. This keeps the same 40 pressure iterations and same pressure math, but does not launch threads that immediately return for the inactive checkerboard color.
+- Removed the live worker's per-frame D3D immediate-context `Flush()` after copying the private CUDA/D3D FP16 texture into the shared keyed-mutex ring. Keyed mutex release still publishes key `1`, and live capture confirmed the host still receives frames.
+
+Rejected experiment:
+
+- A 2D compact parity launch was rejected. It regressed the full physics benchmark to `106.74 ms`, `9.37 FPS`, and the live-like `--sim-every-frames=30` benchmark to `23.61 ms`, `42.35 FPS`.
+
+Final evidence:
+
+- `out/postmerge-final-candidate-workerbench/worker-benchmark.json`: full physics benchmark passed at `71.28 ms`, `14.03 FPS`.
+- `out/postmerge-final-candidate-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `15.02 ms`, `66.57 FPS`.
+- `docs/pr-assets/screenshot-postmerge-performance-pass.png`: live viewport capture showed `wrk 143-146fps`, worker publish around `6.6-6.8 ms`, and `copyHz 39-40/52-53` with frames still visible.
+
+Remaining blockers:
+
+- The dense full-grid pressure solve is still the largest physics-side blocker. Compact parity reduces wasted work, but a real jump still needs a bounded multigrid/PCG pressure path or sparse active projection tiles.
+- The render-only/live-like path is now more limited by raymarch/pack/publish cadence than UI sleep, so the next exact pass should target persistent CUDA surface ownership or direct shared-slot rendering before changing visual quality.
+
+## Room-Aware Render Performance Pass
+
+Date: 2026-05-05
+
+This pass keeps the same CUDA quality settings and improves the room without increasing the visible-frame cost:
+
+- `renderKernel` now raymarches the fire volume before shading the room. If accumulated smoke/fire opacity makes the background contribution negligible, the room shader is skipped for that pixel.
+- `roomBackgroundRay` no longer uses FBM for floor marble, reflection streak offsets, window grain, or final room grain. Those were expensive per-pixel procedural calls that made the room read synthetic.
+- The room now uses analytic panel seams, ceiling ribs, wall base/crown shadow, a back-wall recess, tray contact darkening, and a cooler floor scorch. These are cheap masks, not extra volume samples.
+- Scene irradiance gathering now uses the three lower flame probes instead of four probes, avoiding a warm upper-plume probe that made the room wash out.
+
+Validation evidence:
+
+- `out/room-perf-pass-final-workerbench-rerun/worker-benchmark.json`: full physics benchmark passed at `60.21 ms`, `16.61 FPS`.
+- `out/room-perf-pass-final-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `5.88 ms`, `170.00 FPS`.
+- `docs/pr-assets/screenshot-room-performance-pass.png`: live viewport capture showed visible room panels/scorch, worker around `119 FPS` in the sustained capture, and frames still visible through the FP16 path.
+
+Compared with the previous post-merge evidence:
+
+- Full physics improved from `71.28 ms` / `14.03 FPS` to `60.21 ms` / `16.61 FPS` on the kept rerun.
+- Live-like decoupled frames improved from `15.02 ms` / `66.57 FPS` to `5.88 ms` / `170.00 FPS`.
+
+## Profiling And Fresh-Frame Pacing Pass
+
+Date: 2026-05-05
+
+The Pulse CUDA profiling checklist maps directly to this repo, but FireSim had only coarse CUDA event timings before this pass:
+
+- Existing coverage: `--worker-benchmark` records section timings for velocity, reaction, projection, lighting, raymarch, and pack.
+- New coverage: `scripts/profile-cuda-kernels.ps1` runs the canonical worker benchmark and can wrap it in Nsight Compute with launch filters, launch counts, imported source, and `basic`/`detailed`/`full` section sets.
+- Current local blocker: Nsight Compute is installed, but hardware performance counters are restricted for this user. `-NsightSet basic` reaches the target process and then fails with `ERR_NVGPUCTRPERM` until the command runs elevated or NVIDIA Control Panel allows GPU performance counters for all users.
+
+Frame pacing fix:
+
+- The window title now reports fresh copied CUDA frames instead of duplicate D3D presents. This prevents a misleading `250 FPS` title when the host is only copying a much lower number of worker frames.
+- The host presents on copied worker frames or overlay changes, not on every fresh metadata tick.
+- The D3D UI texture is uploaded only when the overlay changes or the CPU fallback is active. Fresh CUDA frames no longer pay a full 960x540 CPU overlay upload when the chrome is unchanged.
+
+Room lighting fix:
+
+- The room ambient/material response was too bright and gray. Room albedo, GI scale, ceiling/floor/wall base values, and the final room distance multiplier are darker now so the fire reads as the room's primary light source.
+
+Validation evidence:
+
+- `out/profile-room-pacing-sim30-workerbench/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `5.81 ms`, `172.02 FPS`.
+- `out/profile-room-pacing-full-workerbench/worker-benchmark.json`: full physics benchmark passed at `60.55 ms`, `16.52 FPS`.
+- `out/cuda-profile-smoke/worker-benchmark/worker-benchmark.json`: profiling script benchmark mode passed and wrote `profile-commands.md`.
+- `out/cuda-profile-ncu-smoke/firesim-speedoflight.ncu-rep`: Nsight Compute command path connected and captured launch-level data with the initial no-metric set.
+- `out/cuda-profile-ncu-smoke-basic`: confirmed the useful `basic` set is blocked by `ERR_NVGPUCTRPERM` on this Windows user session.
+
+## Live Physics Stutter Fix
+
+Date: 2026-05-05
+
+The consistent stutter came from two fixed live-loop rhythms:
+
+- The worker advanced physics every 30 render frames, and a physics frame also paid for full raymarch and FP16 publish. That made the expensive frame arrive on a predictable cadence.
+- Render-only frames use a temporal row budget; the kernel only understood the hardcoded `32` case, which made the pacing rule brittle and hid the actual cadence from parameters.
+
+Kept fix:
+
+- Added `fireCudaStepD3D11()`, a step-only CUDA path that advances the simulation without raymarching or publishing a D3D frame.
+- The live worker now uses step-only frames for physics and publishes on render-only frames. That removes full raymarch/pack/publish cost from the periodic physics spike.
+- Generalized render subsampling from a hardcoded `== 32` branch to `renderSubsample > 1`, keeping the current 32-row budget but making the cadence explicit.
+- The window title now reports successful visual presents for the headline FPS instead of copied worker frames.
+
+Rejected experiments:
+
+- Full-frame render-only (`renderSubsample = 1`) removed row reuse but overloaded dense plume rendering in live use.
+- 8-row and 16-row render budgets were smoother spatially but dropped the live-like benchmark to roughly `41-46 FPS`.
+- Blocking/vsync present removed dropped presents but caused the host to wait behind dense GPU work and worsened visible stalls.
+
+Validation evidence:
+
+- `verify.ps1 -DiagnosticsOnly`: passed after the step-only path.
+- Live telemetry after the kept fix showed startup visual presents around `110-135 FPS`, then mostly `90-120 FPS` visual presents and `70-100 Hz` copied fresh frames as the plume filled, instead of the earlier `1-4 FPS` spiral from the rejected experiments.
+
+Remaining architectural fix:
+
+- This shortens the periodic hitch; it does not eliminate the underlying single-state coupling. The complete fix is a double-buffered/asynchronous simulation-render split: physics writes a back simulation state, render samples the latest complete front state every display frame, and the front/back fields swap only at simulation barriers.
+
+## Double-Buffered Render-State Split
+
+Date: 2026-05-05
+
+The remaining coupling was inside CUDA state ownership:
+
+- Render-only frames still sampled the solver's current `g_heat`, `g_fuel`, `g_soot`, velocity, and scene-light pointers.
+- Step-only physics frames incremented the render phase even though no pixels were rendered, so the temporal renderer skipped a phase on a fixed cadence.
+- The original temporal budget selected rows. That made partial-frame reuse show up as horizontal bands; a naive per-pixel phase removed bands but broke warp coherence and regressed live-like rendering to `12.76 ms` / `78.37 FPS`.
+
+Kept fix:
+
+- Added two CUDA render snapshot slots for all render-visible scalar fields, MAC velocity fields, scene radiance, and scene shadow.
+- Physics writes the normal solver buffers, then publishes a complete back snapshot and swaps it to front only after advection, reaction, projection, and scene-lighting finish.
+- Render and pack kernels now read only the current front snapshot, not solver-owned mutable fields.
+- Step-only physics no longer increments the render phase. Only actual rendered frames advance the temporal phase.
+- Replaced row-only temporal phasing with coherent 16x16 tile phasing. This removes hard horizontal/vertical/diagonal update lines while keeping whole CUDA blocks coherent.
+- Split simulation time from render time so render-only visual motion does not advance the solver clock.
+
+Validation evidence:
+
+- `verify.ps1 -DiagnosticsOnly`: passed after the render-state split.
+- `out/snapshot-tilephase-sim30/worker-benchmark/worker-benchmark.json`: live-like `--sim-every-frames=30` benchmark passed at `3.55 ms`, `281.40 FPS`.
+- `out/snapshot-tilephase-full/worker-benchmark/worker-benchmark.json`: full-physics benchmark passed at `55.38 ms`, `18.06 FPS`.

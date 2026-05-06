@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "campfire",
+      "title": "Bonfire",
+      "uid": "k1e0cOzi8A",
+      "url": "https://poly.pizza/bundle/Survival-Pack-XzvQPP0yWB",
+      "author": "Quaternius",
+      "license": "Public Domain (CC0)",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "downloadArchiveNames": ["cc0/bonfire.glb", "bonfire.glb", "survival-pack-glb.zip"],
+      "expectedTriangles": 0,
+      "expectedVertices": 0,
+      "published": "2018-04-11",
+      "fireSourceType": "solid-fuel-bed",
+      "fuelMaterial": "bonfire logs / solid fuel-bed prop",
+      "upAxis": "z",
+      "excludeMaterialNames": ["Fire"],
+      "importScaleMeters": 80.0,
+      "runtimeBaseColor": [0.17, 0.075, 0.035],
+      "runtimeCrop": {
+        "maxHeightFraction": 1.0
+      },
+      "emitterHint": {
+        "mode": "low-center-bed",
+        "heightFraction": 0.34,
+        "radiusFraction": 0.42,
+        "worldHeightMeters": 0.045,
+        "heightBandMeters": 0.20
+      },
+      "notes": "CC0 replacement for the earlier Sketchfab source. Use as a visual and material-source fixture for fuel-bed, char, ash, and pyrolysis tests."
+    },
+    {
+      "id": "gas-burner-aver1",
+      "title": "Oven",
+      "uid": "2SXnFbwFzm:Oven",
+      "url": "https://poly.pizza/bundle/Ultimate-House-Interior-Pack-2SXnFbwFzm",
+      "author": "Quaternius",
+      "license": "Public Domain (CC0)",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "downloadArchiveNames": ["cc0/oven.glb", "oven.glb", "house-interior-glb.zip"],
+      "expectedTriangles": 0,
+      "expectedVertices": 0,
+      "published": "2022-07-11",
+      "fireSourceType": "gas-burner",
+      "fuelMaterial": "stove-top gaseous burner source",
+      "upAxis": "z",
+      "importScaleMeters": 70.0,
+      "runtimeBaseColor": [0.025, 0.030, 0.038],
+      "runtimeCrop": {
+        "minHeightFraction": 0.66
+      },
+      "emitterHint": {
+        "mode": "burner-ring",
+        "heightFraction": 0.20,
+        "radiusFraction": 0.33,
+        "worldHeightMeters": 0.138,
+        "heightBandMeters": 0.105,
+        "selectedBurnerIndex": 3
+      },
+      "notes": "CC0 stove/oven replacement for the earlier Sketchfab burner source. Use the cooktop as the controlled gas-burner fixture."
+    }
+  ]
+}

@@ -10,3 +10,5 @@ benchmarks/**/*.md text eol=lf
 *.jpg binary
 *.png binary
 *.webp binary
+*.glb binary
+*.npz binary
