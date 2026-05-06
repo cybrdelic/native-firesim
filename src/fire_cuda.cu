@@ -79,6 +79,9 @@ struct MetricAccumulator {
     double sootOpticalDepthSum;
     double sceneLightSum;
     double sceneShadowSum;
+    double flameMassProxy;
+    double smokeMassProxy;
+    double flameSmokeOverlapProxy;
     double opticalDepthSum;
     double heatReleaseProxy;
     double divergenceBeforeSq;
@@ -1350,6 +1353,14 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
     const float hrr = (fuel + pyrolysis * 0.42f) * oxygen * smoothstepf(610.0f, 1280.0f, tempK) * expf(-5200.0f / fmaxf(650.0f, tempK));
     const float opticalDepth = sootOptics + soot * (0.24f + 0.05f * sqrtf(fmaxf(0.0f, heat)));
     const float normalizedHeight = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.ny);
+    const float flameMass =
+        smoothstepf(0.72f, 2.10f, heat + progress * 0.62f + pyrolysis * 0.24f) *
+        smoothstepf(0.035f, 0.66f, oxygen) *
+        smoothstepf(0.012f, 0.52f, fuel + pyrolysis * 0.36f);
+    const float smokeMass =
+        smoothstepf(0.035f, 1.16f, sootOptics + soot * 0.38f + ash * 0.12f) *
+        smoothstepf(0.08f, 0.88f, normalizedHeight);
+    const float overlap = flameMass * smokeMass;
     const float flameMarker = heat + fuel * 0.24f + progress * 0.55f;
 
     atomicAdd(&metrics->heatSum, static_cast<double>(heat));
@@ -1364,6 +1375,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
     atomicAdd(&metrics->sootOpticalDepthSum, static_cast<double>(sootOptics));
     atomicAdd(&metrics->sceneLightSum, static_cast<double>(luminance3(make_float3(sceneLight.x, sceneLight.y, sceneLight.z))));
     atomicAdd(&metrics->sceneShadowSum, static_cast<double>(sceneShadow));
+    atomicAdd(&metrics->flameMassProxy, static_cast<double>(flameMass));
+    atomicAdd(&metrics->smokeMassProxy, static_cast<double>(smokeMass));
+    atomicAdd(&metrics->flameSmokeOverlapProxy, static_cast<double>(overlap));
     atomicAdd(&metrics->opticalDepthSum, static_cast<double>(opticalDepth));
     atomicAdd(&metrics->heatReleaseProxy, static_cast<double>(hrr));
     atomicAdd(&metrics->divergenceBeforeSq, static_cast<double>(divBefore) * static_cast<double>(divBefore));
@@ -2047,8 +2061,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 upperPlume * (0.22f + plumeNoise * 0.30f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.020f + plumeNoise * 0.034f));
             const float flameFrontMask = saturate(flameDensity * 4.0f + combustion * reactionFront * flameSheet * (0.12f + thinFront * 0.42f));
             const float emissiveMask = saturate(flameFrontMask);
-            const float scatterSeparation = 1.0f - smoothstepf(0.02f, 0.16f, emissiveMask) * 0.98f;
-            const float nearFlameSootCleanout = 1.0f - smoothstepf(0.04f, 0.40f, emissiveMask) * 0.62f;
+            const float resolvedFlameSheet = smoothstepf(0.030f, 0.32f, emissiveMask) * smoothstepf(0.035f, 0.72f, oxygen);
+            const float smokeOnlyMask = 1.0f - smoothstepf(0.025f, 0.20f, resolvedFlameSheet);
+            const float scatterSeparation = saturate(smokeOnlyMask * (1.0f - smoothstepf(0.02f, 0.16f, emissiveMask) * 0.58f));
+            const float nearFlameSootCleanout = 1.0f - smoothstepf(0.025f, 0.34f, resolvedFlameSheet) * 0.82f;
             const float smokeOnlyHeight = smoothstepf(0.20f, 0.70f, fv) * (1.0f - smoothstepf(0.02f, 0.20f, emissiveMask));
             const float absorptionDensity = rawSootDensity * nearFlameSootCleanout * (1.10f + smokeOnlyHeight * 2.20f);
             const float scatterDensity = rawSootDensity * scatterSeparation * smoothstepf(0.10f, 0.55f, fv + sootOptics * 0.10f) * (0.24f + (1.0f - smokeOnlyHeight) * 0.34f);
@@ -2057,7 +2073,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float sootAbsorption = absorptionDensity * (3.10f + particleRadius * 4.60f + sootOptics * 0.70f) * p.smokeDarkness;
             const float sootScattering = scatterDensity * (0.018f + (1.0f - particleRadius) * 0.050f) * (0.20f + p.smokeGain * 0.10f);
             const float sootExtinction = sootAbsorption + sootScattering;
-            const float flameExtinction = flameDensity * 0.24f;
+            const float flameExtinction = flameDensity * (0.12f + (1.0f - resolvedFlameSheet) * 0.12f);
             const float extinction = (sootExtinction + flameExtinction) * stepT;
             const float smokeAlpha = 1.0f - expf(-sootAbsorption * stepT);
             const float scatterAlpha = 1.0f - expf(-sootScattering * stepT);
@@ -2098,6 +2114,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float3 smokeAsh = make_float3(0.014f, 0.0165f, 0.0210f);
             float3 smokeColor = lerp3(smokeCoal, smokeBlack, sootLoad);
             smokeColor = lerp3(smokeColor, smokeAsh, ashVeil);
+            smokeColor = mul3(smokeColor, smokeOnlyMask);
             const float localIrradianceLuma = luminance3(localIrradiance);
             const float warmScatterDamp = 1.0f - upperSmokeMask * 0.94f;
             const float sceneWarmScatter = p.sceneId == 2 ? 0.025f : (p.sceneId == 1 ? 0.42f : 1.0f);
@@ -2114,7 +2131,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             debugTemperature = fmaxf(debugTemperature, saturate((tempK - 520.0f) / 1900.0f));
             accum = add3(accum, mul3(flameEmission, trans));
             accum = add3(accum, mul3(make_float3(1.0f, 0.24f, 0.035f), trans * coalGlow * stepT));
-            accum = add3(accum, mul3(smokeColor, trans * scatterGain));
+            accum = add3(accum, mul3(smokeColor, trans * scatterGain * smokeOnlyMask));
             accum = add3(accum, mul3(smokeScatterLight, trans * sceneScatter * (0.18f + warmScatterDamp * 0.42f)));
             flameGlow = fmaxf(flameGlow, flameDensity * radiantPower * (0.12f + fieldFilament * 0.18f + whiteFilament * 0.20f));
             smokeOcclusion = saturate(smokeOcclusion + smokeAlpha * trans);
@@ -3288,6 +3305,9 @@ bool stepAndRenderInternal(
         out.meanOpticalDepth = static_cast<float>(deviceMetrics.opticalDepthSum / std::max(1.0, cellCount));
         out.meanSceneLight = static_cast<float>(deviceMetrics.sceneLightSum / std::max(1.0, cellCount));
         out.meanSceneShadow = static_cast<float>(deviceMetrics.sceneShadowSum / std::max(1.0, cellCount));
+        out.flameMassProxy = static_cast<float>(deviceMetrics.flameMassProxy);
+        out.smokeMassProxy = static_cast<float>(deviceMetrics.smokeMassProxy);
+        out.flameSmokeOverlapProxy = static_cast<float>(deviceMetrics.flameSmokeOverlapProxy);
         out.heatReleaseProxy = static_cast<float>(deviceMetrics.heatReleaseProxy);
         out.divergenceBeforeL2 = divBeforeL2;
         out.divergenceBeforeMax = floatFromBits(deviceMetrics.divergenceBeforeMaxBits);
