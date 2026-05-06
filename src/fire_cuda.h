@@ -52,6 +52,8 @@ struct FireCudaFrameMetrics {
     float flameMassProxy = 0.0f;
     float smokeMassProxy = 0.0f;
     float flameSmokeOverlapProxy = 0.0f;
+    float meanVolumetricShadow = 0.0f;
+    float meanRoomIrradiance = 0.0f;
     float heatReleaseProxy = 0.0f;
     float divergenceBeforeL2 = 0.0f;
     float divergenceBeforeMax = 0.0f;

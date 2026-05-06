@@ -82,6 +82,8 @@ struct MetricAccumulator {
     double flameMassProxy;
     double smokeMassProxy;
     double flameSmokeOverlapProxy;
+    double volumetricShadowSum;
+    double roomIrradianceSum;
     double opticalDepthSum;
     double heatReleaseProxy;
     double divergenceBeforeSq;
@@ -1361,6 +1363,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
         smoothstepf(0.035f, 1.16f, sootOptics + soot * 0.38f + ash * 0.12f) *
         smoothstepf(0.08f, 0.88f, normalizedHeight);
     const float overlap = flameMass * smokeMass;
+    const float volumetricShadow = sceneShadow * expf(-sceneLight.w * 0.80f);
+    const float roomIrradiance = luminance3(make_float3(sceneLight.x, sceneLight.y, sceneLight.z)) * volumetricShadow;
     const float flameMarker = heat + fuel * 0.24f + progress * 0.55f;
 
     atomicAdd(&metrics->heatSum, static_cast<double>(heat));
@@ -1378,6 +1382,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
     atomicAdd(&metrics->flameMassProxy, static_cast<double>(flameMass));
     atomicAdd(&metrics->smokeMassProxy, static_cast<double>(smokeMass));
     atomicAdd(&metrics->flameSmokeOverlapProxy, static_cast<double>(overlap));
+    atomicAdd(&metrics->volumetricShadowSum, static_cast<double>(volumetricShadow));
+    atomicAdd(&metrics->roomIrradianceSum, static_cast<double>(roomIrradiance));
     atomicAdd(&metrics->opticalDepthSum, static_cast<double>(opticalDepth));
     atomicAdd(&metrics->heatReleaseProxy, static_cast<double>(hrr));
     atomicAdd(&metrics->divergenceBeforeSq, static_cast<double>(divBefore) * static_cast<double>(divBefore));
@@ -1466,6 +1472,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) buildSceneLightKernel(
     const float shearNoise = fbm3(make_float3(u * 12.0f - p.time * 0.38f, v * 11.0f - p.time * 0.62f, w * 13.0f + p.time * 0.20f));
     const float reactionFront = smoothstepf(0.035f, 0.54f, frontGradient + pyrolysis * 0.10f);
     const float flameHeightFade = smoothstepf(0.70f, 0.070f, v);
+    const float lowerShadowColumn = smoothstepf(0.62f, 0.06f, v);
+    const float plumeShadowColumn = smoothstepf(0.12f, 0.88f, v);
     const float sheetGate =
         smoothstepf(0.56f, 0.94f, fineNoise * 0.48f + shearNoise * 0.42f + reactionFront * 0.26f + heat * 0.018f) *
         smoothstepf(0.04f, 0.86f, reactionFront) *
@@ -1487,11 +1495,18 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) buildSceneLightKernel(
     const float sootAttenuation = expf(-(sootOptics * 0.25f + soot * 0.090f + ash * 0.035f));
     const float3 flame = mul3(blackbodyColor(tempK), flameEmitter * sootAttenuation * 3.40f);
     const float3 coal = mul3(make_float3(1.0f, 0.22f, 0.040f), emberEmitter * p.reflectionGain * 0.20f);
-    const float extinction = saturate(sootOptics * 0.20f + soot * 0.050f + ash * 0.035f);
+    const float extinction = saturate(
+        sootOptics * (0.26f + plumeShadowColumn * 0.42f) +
+        soot * (0.065f + plumeShadowColumn * 0.20f) +
+        ash * 0.050f +
+        progress * lowerShadowColumn * 0.020f);
 
     const int idx = lightIndexUnchecked(lx, ly, lz, p);
     sceneLight[idx] = make_float4(flame.x + coal.x, flame.y + coal.y, flame.z + coal.z, extinction);
-    sceneShadow[idx] = expf(-(sootOptics * 0.42f + soot * 0.16f + progress * 0.030f));
+    const float verticalDepth = v * (1.0f + plumeShadowColumn * 0.70f);
+    const float radialDepth = expf(-((u - 0.50f) * (u - 0.50f) * 5.5f + (w - 0.50f) * (w - 0.50f) * 7.0f));
+    const float opticalShadow = sootOptics * (0.62f + plumeShadowColumn * 1.15f) + soot * (0.22f + plumeShadowColumn * 0.46f) + ash * 0.072f;
+    sceneShadow[idx] = expf(-(opticalShadow * (0.72f + verticalDepth * 0.42f) + radialDepth * opticalShadow * 0.34f + progress * 0.035f));
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) propagateSceneLightKernel(
@@ -1585,12 +1600,32 @@ __device__ float3 gatherSceneIrradiance(
         const float dist2 = fmaxf(0.045f, dot3(toLight, toLight));
         const float3 wi = mul3(toLight, rsqrtf(dist2));
         const float ndotl = fmaxf(0.0f, dot3(normal, wi));
-        const float visibility = sampleSceneShadow(sceneShadowField, p, sampleUv.x, sampleUv.y, sampleUv.z) * expf(-light.w * 0.72f);
+        const float heightOcclusion = expf(-fmaxf(0.0f, hit.y - source.y) * light.w * 1.15f);
+        const float visibility = sampleSceneShadow(sceneShadowField, p, sampleUv.x, sampleUv.y, sampleUv.z) * expf(-light.w * 0.92f) * heightOcclusion;
         const float geometric = (0.12f + ndotl * 0.88f) * expf(-dist2 * 0.22f) / (0.12f + dist2);
         irradiance = add3(irradiance, mul3(radiance, visibility * geometric));
     }
 
-    return mul3(irradiance, 1.54f);
+    return mul3(irradiance, 1.82f);
+}
+
+__device__ float volumeShadowRay(
+    float3 hit,
+    const float4* sceneLightField,
+    const float* sceneShadowField,
+    const SimParams& p) {
+    const float3 targetUv = fireVolumeUvFromWorld(hit);
+    const float3 sourceUv = make_float3(0.50f, 0.12f, 0.50f);
+    float opticalDepth = 0.0f;
+#pragma unroll
+    for (int i = 1; i <= 5; ++i) {
+        const float t = static_cast<float>(i) / 6.0f;
+        const float3 uv = lerp3(sourceUv, targetUv, t);
+        const float4 light = sampleSceneLight(sceneLightField, p, uv.x, uv.y, uv.z);
+        const float shadow = sampleSceneShadow(sceneShadowField, p, uv.x, uv.y, uv.z);
+        opticalDepth += light.w * (0.18f + t * 0.22f) + (1.0f - shadow) * (0.08f + t * 0.16f);
+    }
+    return expf(-opticalDepth);
 }
 
 __device__ float rectMask(float2 p, float2 center, float2 halfSize, float feather) {
@@ -1786,12 +1821,16 @@ __device__ float3 roomBackgroundRay(
     const float3 volumeUv = fireVolumeUvFromWorld(hit);
     const float4 giSample = sampleSceneLight(sceneLightField, p, volumeUv.x, volumeUv.y, volumeUv.z);
     const float sceneShadow = sampleSceneShadow(sceneShadowField, p, volumeUv.x, volumeUv.y, volumeUv.z);
+    const float volumeVisibility = volumeShadowRay(hit, sceneLightField, sceneShadowField, p);
     const float3 gatheredIrradiance = gatherSceneIrradiance(hit, surfaceNormal, sceneLightField, sceneShadowField, p);
-    const float3 indirect = add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.12f), gatheredIrradiance);
+    const float3 indirect = mul3(add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.10f), gatheredIrradiance), volumeVisibility);
     const float grazingFalloff = surface == 2 ? 0.62f : 1.0f;
-    const float contactOcclusion = smoothstepf(0.005f, 0.42f, sceneShadow) * expf(-giSample.w * 0.55f);
+    const float contactOcclusion = smoothstepf(0.005f, 0.42f, sceneShadow) * expf(-giSample.w * 0.72f) * (0.30f + volumeVisibility * 0.70f);
     const float irradianceLift = 0.46f + smoothstepf(0.018f, 0.22f, luminance3(indirect)) * 0.30f;
-    color = add3(color, mul3(mul3(indirect, materialAlbedo), materialGiScale * grazingFalloff * contactOcclusion * irradianceLift));
+    const float contactWarmth = surface == 1 ? 1.16f : (surface == 2 ? 0.50f : 0.82f);
+    color = add3(color, mul3(mul3(indirect, materialAlbedo), materialGiScale * grazingFalloff * contactOcclusion * irradianceLift * contactWarmth));
+    const float shadowedSoot = (1.0f - volumeVisibility) * smoothstepf(0.18f, 0.82f, 1.0f - sceneShadow);
+    color = lerp3(color, make_float3(0.006f, 0.007f, 0.008f), shadowedSoot * (surface == 2 ? 0.38f : 0.26f));
     const float wallHorizontalEdge = surface == 3 ? roomHalf - fabsf(hit.z) : roomHalf - fabsf(hit.x);
     const float cornerDistance = surface == 1 || surface == 2
         ? fminf(roomHalf - fabsf(hit.x), roomHalf - fabsf(hit.z))
@@ -3308,6 +3347,8 @@ bool stepAndRenderInternal(
         out.flameMassProxy = static_cast<float>(deviceMetrics.flameMassProxy);
         out.smokeMassProxy = static_cast<float>(deviceMetrics.smokeMassProxy);
         out.flameSmokeOverlapProxy = static_cast<float>(deviceMetrics.flameSmokeOverlapProxy);
+        out.meanVolumetricShadow = static_cast<float>(deviceMetrics.volumetricShadowSum / std::max(1.0, cellCount));
+        out.meanRoomIrradiance = static_cast<float>(deviceMetrics.roomIrradianceSum / std::max(1.0, cellCount));
         out.heatReleaseProxy = static_cast<float>(deviceMetrics.heatReleaseProxy);
         out.divergenceBeforeL2 = divBeforeL2;
         out.divergenceBeforeMax = floatFromBits(deviceMetrics.divergenceBeforeMaxBits);

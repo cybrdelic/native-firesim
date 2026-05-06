@@ -3907,7 +3907,7 @@ int runValidation(const std::string& args) {
            "turbulenceEnergySum,sootOpticalDepthSum,maxHeat,maxFuel,maxSoot,maxPyrolysis,"
            "maxProgress,maxTurbulenceEnergy,flameHeightMeters,"
            "meanOpticalDepth,meanSceneLight,meanSceneShadow,flameMassProxy,smokeMassProxy,flameSmokeOverlapProxy,"
-           "heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
+           "meanVolumetricShadow,meanRoomIrradiance,heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
            "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,invalidCells\n";
     csv << std::fixed << std::setprecision(6);
 
@@ -3977,7 +3977,7 @@ int runValidation(const std::string& args) {
             << metrics.maxProgress << "," << metrics.maxTurbulenceEnergy << "," << metrics.flameHeightMeters << ","
             << metrics.meanOpticalDepth << "," << metrics.meanSceneLight << "," << metrics.meanSceneShadow << ","
             << metrics.flameMassProxy << "," << metrics.smokeMassProxy << "," << metrics.flameSmokeOverlapProxy << ","
-            << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
+            << metrics.meanVolumetricShadow << "," << metrics.meanRoomIrradiance << "," << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
             << metrics.divergenceAfterL2 << "," << metrics.divergenceBeforeMax << "," << metrics.divergenceAfterMax << ","
             << metrics.divergenceReduction << "," << metrics.invalidCells << "\n";
 
@@ -4190,6 +4190,8 @@ int runValidation(const std::string& args) {
     json << "  \"finalFlameMassProxy\": " << finalMetrics.flameMassProxy << ",\n";
     json << "  \"finalSmokeMassProxy\": " << finalMetrics.smokeMassProxy << ",\n";
     json << "  \"finalFlameSmokeOverlapProxy\": " << finalMetrics.flameSmokeOverlapProxy << ",\n";
+    json << "  \"finalMeanVolumetricShadow\": " << finalMetrics.meanVolumetricShadow << ",\n";
+    json << "  \"finalMeanRoomIrradiance\": " << finalMetrics.meanRoomIrradiance << ",\n";
     json << "  \"finalHeatReleaseProxy\": " << finalMetrics.heatReleaseProxy << ",\n";
     json << "  \"finalCharSum\": " << finalMetrics.charSum << ",\n";
     json << "  \"finalAshSum\": " << finalMetrics.ashSum << ",\n";
@@ -4279,6 +4281,8 @@ int runDiagnostics() {
     out << "uiOverlayAfterCameraResponse=true\n";
     out << "meshLightingPass=lit-scene-mesh\n";
     out << "volumeSmokeFlameSeparation=resolved flame-sheet mask suppresses soot absorption and scattering inside emissive samples\n";
+    out << "volumetricShadowing=scene shadow volume stores soot optical transmittance and room rays sample source-to-surface visibility\n";
+    out << "roomLightingLayer=room surfaces receive flame-fed irradiance gated by volumetric shadow and material albedo\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
