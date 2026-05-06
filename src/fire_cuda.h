@@ -96,6 +96,7 @@ bool fireCudaStepAndRenderD3D11(const FireSettings& settings);
 bool fireCudaStepAndRenderD3D11Measured(const FireSettings& settings, FireCudaFrameMetrics* metrics);
 bool fireCudaRenderD3D11(const FireSettings& settings);
 void fireCudaUnregisterD3D11Texture();
+bool fireCudaSynchronize();
 bool fireCudaReset();
 bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics);
 void fireCudaShutdown();

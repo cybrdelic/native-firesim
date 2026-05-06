@@ -42,6 +42,8 @@ constexpr float kSmokeGain = 0.96f;
 constexpr float kTurbulence = 1.34f;
 constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
 constexpr float kWorkerMaxPublishFps = 180.0f;
+constexpr double kDisplayMaxPresentFps = 180.0;
+constexpr unsigned long long kWorkerStatusUiUpdateMs = 250ull;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
 constexpr DWORD kSharedViewportVersion = 8u;
 constexpr int kSharedFrameSlots = 3;
@@ -58,7 +60,7 @@ constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
-constexpr int kWorkerPhysicsFrameInterval = 30;
+constexpr int kWorkerPhysicsFrameInterval = 3;
 constexpr int kSceneCount = 3;
 
 struct UiRect {
@@ -193,6 +195,7 @@ unsigned long long g_workerRestartBlockedUntilMs = 0;
 int g_workerRestartCount = 0;
 int g_workerLastExitCode = 0;
 char g_workerUiStatus[192] = "worker not started";
+unsigned long long g_lastWorkerStatusFormatTickMs = 0;
 bool g_haveLastWorkerSettings = false;
 FireSettings g_lastWorkerSettings;
 bool g_haveLastOverlaySettings = false;
@@ -211,7 +214,6 @@ double g_liveCopiedHz = 0.0;
 double g_livePresentHz = 0.0;
 double g_liveIntervalCopyMs = 0.0;
 double g_liveIntervalPresentMs = 0.0;
-bool g_useNonBlockingPresent = true;
 bool g_uiTextureUploaded = false;
 
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
@@ -1267,11 +1269,7 @@ bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
     g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
 
-    HRESULT present = g_d3d.swapChain->Present(0, g_useNonBlockingPresent ? DXGI_PRESENT_DO_NOT_WAIT : 0);
-    if (present == DXGI_ERROR_INVALID_CALL && g_useNonBlockingPresent) {
-        g_useNonBlockingPresent = false;
-        present = g_d3d.swapChain->Present(0, 0);
-    }
+    HRESULT present = g_d3d.swapChain->Present(0, 0);
     return SUCCEEDED(present);
 }
 
@@ -1993,22 +1991,26 @@ void serviceCudaWorkerWatchdog() {
     const LONG status = g_sharedViewport->workerStatus;
     if (status < 0) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker error: %.120s", g_sharedViewport->statusText);
+        g_lastWorkerStatusFormatTickMs = now;
     } else if (g_sharedViewport->lastFrameTickMs != 0 && frameAge <= kWorkerFrameStaleMs) {
-        const double frameMs = static_cast<double>(g_sharedViewport->workerFrameMicros) / 1000.0;
-        const double cudaMs = static_cast<double>(g_sharedViewport->workerCudaMicros) / 1000.0;
-        const double publishMs = static_cast<double>(g_sharedViewport->workerPublishMicros) / 1000.0;
-        const double workerFps = g_sharedViewport->workerFrameMicros == 0 ? 0.0 : 1000000.0 / static_cast<double>(g_sharedViewport->workerFrameMicros);
-        std::snprintf(
-            g_workerUiStatus,
-            sizeof(g_workerUiStatus),
-            "wrk %.0ffps %.1f c%.1f p%.1f ui %.0f copyHz %.0f/%.0f",
-            workerFps,
-            frameMs,
-            cudaMs,
-            publishMs,
-            g_visualFps,
-            g_liveCopiedHz,
-            g_liveCopyCallHz);
+        if (now - g_lastWorkerStatusFormatTickMs >= kWorkerStatusUiUpdateMs) {
+            const double frameMs = static_cast<double>(g_sharedViewport->workerFrameMicros) / 1000.0;
+            const double cudaMs = static_cast<double>(g_sharedViewport->workerCudaMicros) / 1000.0;
+            const double publishMs = static_cast<double>(g_sharedViewport->workerPublishMicros) / 1000.0;
+            const double workerFps = g_sharedViewport->workerFrameMicros == 0 ? 0.0 : 1000000.0 / static_cast<double>(g_sharedViewport->workerFrameMicros);
+            std::snprintf(
+                g_workerUiStatus,
+                sizeof(g_workerUiStatus),
+                "wrk %.0ffps %.1f c%.1f p%.1f ui %.0f copyHz %.0f/%.0f",
+                workerFps,
+                frameMs,
+                cudaMs,
+                publishMs,
+                g_visualFps,
+                g_liveCopiedHz,
+                g_liveCopyCallHz);
+            g_lastWorkerStatusFormatTickMs = now;
+        }
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker running; waiting for fresh frame");
     } else {
@@ -2375,7 +2377,7 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
-    if (!fireCudaRegisterD3D11Texture(d3dTarget.cudaTexture.Get())) {
+    if (!fireCudaRegisterD3D11Texture(d3dTarget.sharedTextures[0].Get())) {
         g_sharedViewport->workerStatus = -3;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
@@ -2420,80 +2422,16 @@ int runCudaWorker(const std::string& args) {
         const bool advancePhysics = settings.reset != 0 || framesSincePhysics >= kWorkerPhysicsFrameInterval;
         settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
         applyCanonicalFireSettings(settings);
+        const int publishSlot = 0;
         const auto frameStart = Clock::now();
-        const bool producedFrame = !advancePhysics;
-        if (!(advancePhysics ? fireCudaStepD3D11(settings) : fireCudaRenderD3D11(settings))) {
-            g_sharedViewport->workerStatus = -2;
-            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
-            g_sharedViewport->workerExitCode = 4;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA %s failed: %.142s", advancePhysics ? "step" : "render", fireCudaLastError());
-            appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
-            break;
-        }
-        if (advancePhysics) {
-            accumulatedPhysicsDt = 0.0f;
-            framesSincePhysics = 0;
-        } else {
-            framesSincePhysics += 1;
-        }
-        const auto cudaDone = Clock::now();
-        if (!producedFrame) {
+        HRESULT acquire = d3dTarget.sharedMutexes[publishSlot]->AcquireSync(0, 0);
+        if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
             g_sharedViewport->workerHeartbeatTickMs = tickMs();
-            g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
-            g_sharedViewport->workerFrameMicros = g_sharedViewport->workerCudaMicros;
+            g_sharedViewport->workerCudaMicros = 0;
+            g_sharedViewport->workerFrameMicros = 0;
             g_sharedViewport->workerPublishMicros = 0;
             g_sharedViewport->workerStatus = 2;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker stepped physics; rendering next frame");
-            Sleep(0);
-            continue;
-        }
-
-        int publishSlot = -1;
-        HRESULT acquire = static_cast<HRESULT>(WAIT_TIMEOUT);
-        const LONG preferredSlot = (g_sharedViewport->latestFrameSlot + 1 + kSharedFrameSlots) % kSharedFrameSlots;
-        for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
-            const int slot = static_cast<int>((preferredSlot + attempt) % kSharedFrameSlots);
-            acquire = d3dTarget.sharedMutexes[slot]->AcquireSync(0, 0);
-            if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
-                continue;
-            }
-            publishSlot = slot;
-            break;
-        }
-        if (publishSlot < 0) {
-            int reclaimedSlots = 0;
-            for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
-                const LONG readySequence = g_sharedViewport->slotFrameSequences[slot];
-                if (readySequence <= 0 || (readySequence & 1) != 0) {
-                    continue;
-                }
-                const HRESULT reclaim = d3dTarget.sharedMutexes[slot]->AcquireSync(1, 0);
-                if (reclaim != S_OK) {
-                    continue;
-                }
-                g_sharedViewport->slotFrameSequences[slot] = 0;
-                d3dTarget.sharedMutexes[slot]->ReleaseSync(0);
-                ++reclaimedSlots;
-            }
-            if (reclaimedSlots > 0) {
-                for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
-                    const int slot = static_cast<int>((preferredSlot + attempt) % kSharedFrameSlots);
-                    acquire = d3dTarget.sharedMutexes[slot]->AcquireSync(0, 0);
-                    if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
-                        continue;
-                    }
-                    publishSlot = slot;
-                    break;
-                }
-            }
-        }
-        if (publishSlot < 0) {
-            g_sharedViewport->workerHeartbeatTickMs = tickMs();
-            g_sharedViewport->workerCudaMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(cudaDone - frameStart).count());
-            g_sharedViewport->workerFrameMicros = g_sharedViewport->workerCudaMicros;
-            g_sharedViewport->workerPublishMicros = 0;
-            g_sharedViewport->workerStatus = 2;
-            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker rendered; publish slot busy");
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker publish slot busy");
             Sleep(0);
             continue;
         }
@@ -2508,7 +2446,31 @@ int runCudaWorker(const std::string& args) {
 
         const LONG writingSequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->slotFrameSequences[publishSlot] = writingSequence;
-        d3dTarget.context->CopyResource(d3dTarget.sharedTextures[publishSlot].Get(), d3dTarget.cudaTexture.Get());
+        if (!(advancePhysics ? fireCudaStepAndRenderD3D11(settings) : fireCudaRenderD3D11(settings))) {
+            d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(0);
+            g_sharedViewport->workerStatus = -2;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 4;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA %s failed: %.142s", advancePhysics ? "step" : "render", fireCudaLastError());
+            appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
+            break;
+        }
+        if (!fireCudaSynchronize()) {
+            d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(0);
+            g_sharedViewport->workerStatus = -2;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 4;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA synchronize failed: %.142s", fireCudaLastError());
+            appendRuntimeEvent("worker-cuda-sync-failed", g_sharedViewport->statusText);
+            break;
+        }
+        if (advancePhysics) {
+            accumulatedPhysicsDt = 0.0f;
+            framesSincePhysics = 0;
+        } else {
+            framesSincePhysics += 1;
+        }
+        const auto cudaDone = Clock::now();
         const HRESULT release = d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(1);
         if (FAILED(release)) {
             g_sharedViewport->workerStatus = -5;
@@ -3566,6 +3528,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
     auto fpsLast = last;
+    auto nextDisplayPresent = last;
     unsigned long long lastProfileCopyCalls = 0;
     unsigned long long lastProfileCopiedFrames = 0;
     unsigned long long lastProfilePresentCalls = 0;
@@ -3573,6 +3536,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     unsigned long long lastProfilePresentMicros = 0;
     int visualFrames = 0;
     float fps = 0.0f;
+    const bool traceFrames = GetEnvironmentVariableA("FIRESIM_TRACE_FRAMES", nullptr, 0) > 0;
+    std::ofstream frameTrace;
+    if (traceFrames) {
+        CreateDirectoryA("out", nullptr);
+        frameTrace.open("out\\live-frame-trace.csv", std::ios::binary);
+        if (frameTrace) {
+            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,uploadUi,backend,seq,slot,workerFrameUs,workerCudaUs,workerPublishUs\n";
+        }
+    }
 
     MSG msg = {};
     while (g_running) {
@@ -3615,10 +3587,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         workerSettings.showGizmos = 0;
         writeWorkerSettings(workerSettings);
         serviceCudaWorkerWatchdog();
+        const bool presentBudgetDue = now >= nextDisplayPresent;
         const auto copyStart = Clock::now();
-        ++g_liveCopyCalls;
-        const bool copiedWorkerFrame = g_cudaWorkerRequested && copyD3DWorkerFrame();
-        g_liveCopyMicros += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - copyStart).count());
+        bool copiedWorkerFrame = false;
+        if (presentBudgetDue) {
+            ++g_liveCopyCalls;
+            copiedWorkerFrame = g_cudaWorkerRequested && copyD3DWorkerFrame();
+        }
+        const auto copyEnd = Clock::now();
+        const auto copyMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(copyEnd - copyStart).count());
+        g_liveCopyMicros += copyMicros;
         if (copiedWorkerFrame) {
             ++g_liveCopiedFrames;
         }
@@ -3632,8 +3610,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         const bool overlayDirty = overlayStateDirty(settings, g_useCudaBackend, g_cleanViewportMode);
         const bool presentDirty = copiedWorkerFrame || overlayDirty || !g_cudaWorkerFrameLive;
         bool presented = false;
-        if (presentDirty) {
-            const bool uploadUi = overlayDirty || !g_useCudaBackend || !g_uiTextureUploaded;
+        bool uploadUi = false;
+        unsigned long long presentMicros = 0;
+        if (presentDirty && presentBudgetDue) {
+            uploadUi = overlayDirty || !g_useCudaBackend || !g_uiTextureUploaded;
             if (g_useCudaBackend) {
                 if (uploadUi) {
                     composeD3DOverlayFrame(g_frame, settings, true, g_cleanViewportMode);
@@ -3646,17 +3626,35 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             }
             const auto presentStart = Clock::now();
             presented = renderD3DFrame(g_useCudaBackend, g_displayExposure, uploadUi);
-            g_livePresentMicros += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - presentStart).count());
+            presentMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - presentStart).count());
+            g_livePresentMicros += presentMicros;
             ++g_livePresentCalls;
             if (!presented) {
                 ++g_livePresentFailures;
             }
+            nextDisplayPresent = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / kDisplayMaxPresentFps));
         }
 
         if (presented) {
             ++visualFrames;
         }
         const auto frameEnd = Clock::now();
+        if (frameTrace) {
+            frameTrace << tickMs() << ","
+                << std::chrono::duration<double, std::milli>(frameEnd - now).count() << ","
+                << copyMicros << ","
+                << presentMicros << ","
+                << std::chrono::duration_cast<std::chrono::microseconds>(frameEnd - now).count() << ","
+                << (copiedWorkerFrame ? 1 : 0) << ","
+                << (presented ? 1 : 0) << ","
+                << (uploadUi ? 1 : 0) << ","
+                << (g_useCudaBackend ? 1 : 0) << ","
+                << static_cast<long>(g_lastCopiedWorkerSequence) << ","
+                << (g_sharedViewport == nullptr ? -1L : static_cast<long>(g_sharedViewport->latestFrameSlot)) << ","
+                << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerFrameMicros) << ","
+                << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerCudaMicros) << ","
+                << (g_sharedViewport == nullptr ? 0ull : g_sharedViewport->workerPublishMicros) << "\n";
+        }
         const float fpsElapsed = std::chrono::duration<float>(frameEnd - fpsLast).count();
         if (fpsElapsed >= 0.5f) {
             fps = static_cast<float>(visualFrames) / fpsElapsed;

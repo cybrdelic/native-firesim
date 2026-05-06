@@ -49,8 +49,6 @@ struct SimParams {
     int raymarchSteps;
     int emberCount;
     int renderDebugMode;
-    int renderSubsample;
-    int renderPhase;
     float exposure;
     float reflectionGain;
     float smokeDarkness;
@@ -177,14 +175,7 @@ float g_renderTime = 0.0f;
 int g_renderSnapshotFront = 0;
 int g_renderSnapshotBack = 1;
 unsigned long long g_renderSnapshotVersion = 0;
-unsigned long long g_lastRenderedSnapshotVersion = 0;
 bool g_haveRenderSnapshot = false;
-bool g_haveLastRenderView = false;
-float g_lastRenderYaw = 0.0f;
-float g_lastRenderPitch = 0.0f;
-float g_lastRenderDistance = 0.0f;
-int g_lastRenderDebugMode = -1;
-int g_lastRenderSceneId = -1;
 char g_lastError[512] = "No CUDA error.";
 
 bool fail(const char* label, cudaError_t err) {
@@ -1508,9 +1499,11 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) propagateSceneLightKerne
 }
 
 __device__ float floorGrid(float x, float z, float scale, float width) {
-    const float gx = fabsf(fracf(x * scale + 0.5f) - 0.5f);
-    const float gz = fabsf(fracf(z * scale + 0.5f) - 0.5f);
-    return smoothstepf(width, 0.0f, fminf(gx, gz));
+    (void)x;
+    (void)z;
+    (void)scale;
+    (void)width;
+    return 0.0f;
 }
 
 __device__ float3 fireVolumeUvFromWorld(float3 p) {
@@ -1646,7 +1639,7 @@ __device__ float3 roomBackgroundRay(
         const float slabTone = sinf(hit.x * 2.20f + hit.z * 1.40f) * 0.50f + sinf(hit.z * 3.10f - hit.x * 0.80f) * 0.50f;
         color = cinematic ? make_float3(0.027f, 0.027f, 0.026f) : make_float3(0.024f, 0.024f, 0.023f);
         color = add3(color, mul3(make_float3(0.014f, 0.014f, 0.013f), slabTone * 0.018f));
-        color = lerp3(color, make_float3(0.014f, 0.014f, 0.013f), saturate(panelSeam * 0.52f + fineSeam * 0.18f));
+        color = lerp3(color, make_float3(0.014f, 0.014f, 0.013f), saturate(panelSeam * 0.16f + fineSeam * 0.045f));
         materialAlbedo = make_float3(0.38f, 0.38f, 0.36f);
         materialGiScale = 0.30f;
 
@@ -1667,7 +1660,7 @@ __device__ float3 roomBackgroundRay(
             const float radialGrooves = floorGrid(radius, 0.0f, 18.0f, 0.005f);
             color = lerp3(color, make_float3(0.018f, 0.019f, 0.020f), plate * 0.70f);
             color = lerp3(color, make_float3(0.005f, 0.005f, 0.005f), burner * 0.72f);
-            color = add3(color, mul3(make_float3(0.11f, 0.10f, 0.09f), radialGrooves * plate * 0.026f));
+            color = add3(color, mul3(make_float3(0.11f, 0.10f, 0.09f), radialGrooves * plate * 0.010f));
             color = add3(color, mul3(make_float3(0.090f, 0.032f, 0.006f), burner * glow * 0.012f));
             materialAlbedo = lerp3(materialAlbedo, make_float3(0.032f, 0.033f, 0.034f), plate * 0.82f);
             materialGiScale = lerpf(materialGiScale, 0.42f, plate * 0.72f);
@@ -1702,7 +1695,7 @@ __device__ float3 roomBackgroundRay(
         const float ceilingRib = floorGrid(hit.x - 0.08f, hit.z + 0.22f, 0.42f, 0.004f);
         const float fixtureL = expf(-((hit.x + 1.50f) * (hit.x + 1.50f) + (hit.z - 0.92f) * (hit.z - 0.92f)) * 120.0f);
         const float fixtureR = expf(-((hit.x - 1.72f) * (hit.x - 1.72f) + (hit.z - 0.80f) * (hit.z - 0.80f)) * 120.0f);
-        color = lerp3(color, make_float3(0.011f, 0.011f, 0.010f), saturate(ceilingGrid * 0.34f + ceilingRib * 0.13f));
+        color = lerp3(color, make_float3(0.011f, 0.011f, 0.010f), saturate(ceilingGrid * 0.090f + ceilingRib * 0.035f));
         color = add3(color, mul3(make_float3(0.10f, 0.096f, 0.088f), (panelA + panelB) * 0.08f));
         color = add3(color, mul3(make_float3(0.26f, 0.20f, 0.13f), (fixtureL + fixtureR) * 0.10f));
     } else {
@@ -1713,7 +1706,7 @@ __device__ float3 roomBackgroundRay(
         const float panelSeam = floorGrid(wallU + 0.10f, hit.y - 0.06f, 1.08f, 0.007f);
         const float baseShadow = smoothstepf(0.34f, 0.02f, hit.y);
         const float crownShadow = smoothstepf(ceilingY - 0.32f, ceilingY - 0.02f, hit.y);
-        color = lerp3(color, make_float3(0.017f, 0.017f, 0.016f), panelSeam * 0.34f);
+        color = lerp3(color, make_float3(0.017f, 0.017f, 0.016f), panelSeam * 0.090f);
         color = lerp3(color, make_float3(0.012f, 0.012f, 0.011f), saturate(baseShadow * 0.30f + crownShadow * 0.20f));
         if (surface == 4 && hit.z > 0.0f) {
             const float recess = rectMask(make_float2(hit.x, hit.y), make_float2(0.0f, 1.00f), make_float2(0.92f, 0.72f), 0.055f);
@@ -1821,18 +1814,6 @@ __device__ void blendGizmo(float3* color, float3 gizmoColor, float alpha) {
     *color = lerp3(*color, gizmoColor, saturate(alpha));
 }
 
-__device__ bool shouldRenderPixelThisPhase(int x, int y, const SimParams& p) {
-    if (p.renderSubsample <= 1) {
-        return true;
-    }
-
-    const int phaseCount = max(1, p.renderSubsample);
-    const int tileX = x >> 4;
-    const int tileY = y >> 4;
-    const int tiledPhase = tileX * 13 + tileY * 29 + ((tileX ^ tileY) * 7);
-    return (tiledPhase % phaseCount) == (p.renderPhase % phaseCount);
-}
-
 __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, const SimParams& p) {
     if (p.showGizmos == 0) {
         return;
@@ -1873,9 +1854,6 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = p.launchFrameYStart + blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
-        return;
-    }
-    if (!shouldRenderPixelThisPhase(x, y, p)) {
         return;
     }
 
@@ -2186,9 +2164,6 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16SurfaceKernel(
     if (x >= p.frameW || y >= p.launchFrameYEnd || y >= p.frameH) {
         return;
     }
-    if (!shouldRenderPixelThisPhase(x, y, p)) {
-        return;
-    }
 
     const int pixelIndex = y * p.frameW + x;
     const float4 radiance = hdr[pixelIndex];
@@ -2443,7 +2418,6 @@ void freeDeviceMemory() {
     g_renderSnapshotFront = 0;
     g_renderSnapshotBack = 1;
     g_renderSnapshotVersion = 0;
-    g_lastRenderedSnapshotVersion = 0;
     g_haveRenderSnapshot = false;
     g_renderTime = g_time;
     g_stepStartEvent = nullptr;
@@ -2484,8 +2458,6 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.raymarchSteps = 56;
     params.emberCount = 96;
     params.renderDebugMode = 0;
-    params.renderSubsample = 1;
-    params.renderPhase = 0;
     params.exposure = 1.0f;
     params.reflectionGain = 1.0f;
     params.smokeDarkness = 1.0f;
@@ -2504,23 +2476,6 @@ void updateCameraCache(SimParams& params) {
     params.cameraUp = cam.up;
     params.cameraTanHalfFov = cam.tanHalfFov;
     params.cameraAspect = cam.aspect;
-}
-
-bool consumeRenderViewChanged(const SimParams& params) {
-    const bool changed =
-        !g_haveLastRenderView ||
-        fabsf(params.cameraYaw - g_lastRenderYaw) > 0.00035f ||
-        fabsf(params.cameraPitch - g_lastRenderPitch) > 0.00035f ||
-        fabsf(params.cameraDistance - g_lastRenderDistance) > 0.00080f ||
-        params.sceneId != g_lastRenderSceneId ||
-        params.renderDebugMode != g_lastRenderDebugMode;
-    g_haveLastRenderView = true;
-    g_lastRenderYaw = params.cameraYaw;
-    g_lastRenderPitch = params.cameraPitch;
-    g_lastRenderDistance = params.cameraDistance;
-    g_lastRenderSceneId = params.sceneId;
-    g_lastRenderDebugMode = params.renderDebugMode;
-    return changed;
 }
 
 SimParams withVolumeWindow(SimParams params, int zStart, int zEnd) {
@@ -2776,7 +2731,6 @@ bool resetSimulationFields(const SimParams& params) {
     g_renderSnapshotFront = 0;
     g_renderSnapshotBack = 1;
     g_renderSnapshotVersion = 0;
-    g_lastRenderedSnapshotVersion = 0;
     g_haveRenderSnapshot = false;
     g_time = 0.0f;
     g_renderTime = 0.0f;
@@ -2784,9 +2738,6 @@ bool resetSimulationFields(const SimParams& params) {
     if (!publishRenderSnapshot()) {
         return false;
     }
-    g_haveLastRenderView = false;
-    g_lastRenderDebugMode = -1;
-    g_lastRenderSceneId = -1;
     return check("reset kernels sync", cudaDeviceSynchronize());
 }
 
@@ -2890,9 +2841,6 @@ bool stepAndRenderInternal(
     params.reflectionGain = std::max(0.0f, std::min(2.2f, settings.reflectionGain));
     params.smokeDarkness = std::max(0.35f, std::min(2.4f, settings.smokeDarkness));
     updateCameraCache(params);
-    const bool renderViewChanged = consumeRenderViewChanged(params);
-    params.renderSubsample = advanceSimulation || renderViewChanged || params.renderDebugMode != 0 ? 1 : 32;
-    params.renderPhase = g_frameIndex % std::max(1, params.renderSubsample);
 
     if (settings.reset != 0 && !resetSimulationFields(params)) {
         return false;
@@ -3246,7 +3194,6 @@ bool stepAndRenderInternal(
         out.divergenceReduction = divBeforeL2 > 0.000001f ? 1.0f - divAfterL2 / divBeforeL2 : 0.0f;
         *metrics = out;
     }
-    g_lastRenderedSnapshotVersion = g_renderSnapshotVersion;
     ++g_frameIndex;
     return true;
 }
@@ -3319,6 +3266,10 @@ void fireCudaUnregisterD3D11Texture() {
     }
 }
 
+bool fireCudaSynchronize() {
+    return check("cudaDeviceSynchronize", cudaDeviceSynchronize());
+}
+
 void fireCudaShutdown() {
     freeDeviceMemory();
     g_nx = 0;
@@ -3328,9 +3279,6 @@ void fireCudaShutdown() {
     g_frameH = 0;
     g_frameIndex = 0;
     g_time = 0.0f;
-    g_haveLastRenderView = false;
-    g_lastRenderDebugMode = -1;
-    g_lastRenderSceneId = -1;
 }
 
 const char* fireCudaLastError() {
