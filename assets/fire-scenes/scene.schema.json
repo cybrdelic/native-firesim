@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "required": [
+    "id",
+    "displayName",
+    "mesh",
+    "meshTransform",
+    "emitter",
+    "volumeBounds",
+    "lighting",
+    "material",
+    "expectedBehavior"
+  ],
+  "description": "Native FireSim scene contract. This is intentionally small and loader-oriented: every scene must define the mesh, transform, source, volume, lighting, material, and expected behavior in one place."
+}
