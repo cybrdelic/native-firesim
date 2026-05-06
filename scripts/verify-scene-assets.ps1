@@ -29,5 +29,10 @@ if ($missing.Count -gt 0) {
     exit 2
 }
 
+python (Join-Path $PSScriptRoot "verify-scene-contracts.py")
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 Write-Host "scene asset check: real imported runtime meshes present"
 exit 0
