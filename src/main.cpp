@@ -576,10 +576,6 @@ const char* sceneName(int scene) {
 void requestSimulationReset() {
     g_needsReset = true;
     g_resetFramesRemaining = 3;
-    clearSimulationFrame(g_simFrame);
-    g_d3d.hasSimFrame = false;
-    g_cudaWorkerFrameLive = false;
-    g_useCudaBackend = false;
     g_lastCopiedWorkerSequence = g_sharedViewport == nullptr ? 0 : g_sharedViewport->frameSequence;
     g_haveLastWorkerSettings = false;
     g_haveLastOverlaySettings = false;
@@ -4036,11 +4032,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.cameraPitch = g_cameraPitch;
         settings.cameraDistance = g_cameraDistance;
         if (settings.reset != 0) {
-            if (g_needsReset) {
-                clearSimulationFrame(g_simFrame);
-                g_d3d.hasSimFrame = false;
-                g_cudaWorkerFrameLive = false;
-            }
             g_needsReset = false;
             if (g_resetFramesRemaining > 0) {
                 --g_resetFramesRemaining;
@@ -4067,7 +4058,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         const bool workerTimestampFresh = workerFrameMetadataFresh();
         g_cudaWorkerFrameLive = (copiedWorkerFrame || workerTimestampFresh) && g_d3d.hasSimFrame;
         g_useCudaBackend = g_cudaWorkerFrameLive;
-        if (!g_cudaWorkerFrameLive && !copiedWorkerFrame) {
+        if (!g_cudaWorkerFrameLive && !copiedWorkerFrame && settings.reset == 0) {
             clearSimulationFrame(g_simFrame);
         }
         g_displayExposure = settings.exposure;
