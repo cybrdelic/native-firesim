@@ -741,13 +741,13 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
     if (p.sceneId == 2) {
         const float radius = sqrtf(x * x + z * z);
         const float angle = atan2f(z, x);
-        const float ring = smoothstepf(0.070f, 0.012f, fabsf(radius - 0.34f));
-        const float innerRing = smoothstepf(0.052f, 0.010f, fabsf(radius - 0.18f));
-        const float ports = 0.5f + 0.5f * cosf(angle * 18.0f + fbm(make_float2(x * 7.0f, z * 7.0f)) * 1.7f);
-        const float portMask = smoothstepf(0.50f, 0.92f, ports);
-        const float centerPilot = smoothstepf(0.070f, 0.000f, radius) * 0.20f;
-        return saturate((ring * (0.40f + portMask * 0.88f) + innerRing * 0.32f + centerPilot) *
-            smoothstepf(0.72f, 0.46f, radius));
+        const float ring = smoothstepf(0.040f, 0.007f, fabsf(radius - 0.34f));
+        const float innerRing = smoothstepf(0.030f, 0.006f, fabsf(radius - 0.18f));
+        const float ports = 0.5f + 0.5f * cosf(angle * 24.0f);
+        const float portMask = smoothstepf(0.72f, 0.98f, ports);
+        const float centerPilot = smoothstepf(0.040f, 0.000f, radius) * 0.10f;
+        return saturate((ring * (0.12f + portMask * 1.18f) + innerRing * 0.20f + centerPilot) *
+            smoothstepf(0.56f, 0.42f, radius));
     }
     const float tray = smoothstepf(0.98f, 0.040f, fabsf(x)) * smoothstepf(0.48f, 0.034f, fabsf(z));
     const float mound = expf(-(x * x * 0.70f + z * z * 2.15f));
@@ -763,7 +763,7 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
 __device__ float fuelBedSource(float x, float z, float h, const SimParams& p) {
     const float material = fuelBedMaterial(x, z, p);
     const float height = p.sceneId == 2
-        ? smoothstepf(0.170f, 0.00f, h)
+        ? smoothstepf(0.115f, 0.00f, h)
         : smoothstepf(p.sceneId == 1 ? 0.135f : 0.105f, 0.00f, h);
     const float emberBreathing = 0.84f + 0.16f * fbm(make_float2(x * 9.0f + p.time * 0.035f, z * 11.0f - p.time * 0.025f));
     const float exposedFuel = saturate(material * emberBreathing);
@@ -799,18 +799,18 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) resetScalarsKernel(
     const float material = fuelBedMaterial(worldX, worldZ, p);
     const float chunkNoise = fbm(make_float2(worldX * 18.0f + worldZ * 2.0f, worldZ * 22.0f - worldX * 5.0f));
     const float bed = fuelBedSource(worldX, worldZ, v, p);
-    const float charScale = p.sceneId == 2 ? 0.12f : (p.sceneId == 1 ? 1.18f : 1.0f);
-    const float sootScale = p.sceneId == 2 ? 0.18f : (p.sceneId == 1 ? 1.20f : 1.0f);
-    heat[idx] = bed * (0.74f + chunkNoise * 0.24f);
-    fuel[idx] = bed * (p.sceneId == 2 ? 1.72f : 1.02f + chunkNoise * 0.30f);
+    const float charScale = p.sceneId == 2 ? 0.04f : (p.sceneId == 1 ? 1.28f : 1.0f);
+    const float sootScale = p.sceneId == 2 ? 0.045f : (p.sceneId == 1 ? 1.34f : 1.0f);
+    heat[idx] = bed * (p.sceneId == 2 ? 1.18f : 0.74f + chunkNoise * 0.24f);
+    fuel[idx] = bed * (p.sceneId == 2 ? 2.35f : 1.02f + chunkNoise * 0.30f);
     oxygen[idx] = 1.0f;
-    soot[idx] = bed * 0.018f * sootScale;
+    soot[idx] = bed * (p.sceneId == 2 ? 0.0035f : 0.018f) * sootScale;
     charField[idx] = material * (0.92f + chunkNoise * 0.72f) * charScale;
     ash[idx] = material * (0.018f + smoothstepf(0.56f, 0.86f, chunkNoise) * 0.055f) * (p.sceneId == 2 ? 0.10f : 1.0f);
     pyrolysis[idx] = bed * (0.050f + chunkNoise * 0.030f);
     progress[idx] = bed * 0.20f;
     turbulenceEnergy[idx] = bed * 0.070f;
-    sootOptics[idx] = bed * 0.018f * sootScale;
+    sootOptics[idx] = bed * (p.sceneId == 2 ? 0.0025f : 0.018f) * sootScale;
     pressure[idx] = 0.0f;
     divergence[idx] = 0.0f;
 }
@@ -991,7 +991,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float sourceNoise = 0.70f + 0.48f * fbm(make_float2(worldX * 13.0f + worldZ * 3.0f + p.time * 0.38f, v * 31.0f + worldZ * 11.0f));
     const float exposedChar = saturate(charMass / fmaxf(0.055f, charMass + ash * 1.75f));
     const float charEdges = smoothstepf(0.06f, 0.78f, material) * smoothstepf(0.92f, 0.02f, ash);
-    const float gasFeed = p.sceneId == 2 ? 0.72f : exposedChar * charEdges;
+    const float gasFeed = p.sceneId == 2 ? 1.28f : exposedChar * charEdges;
     const float bed = fuelBedSource(worldX, worldZ, v, p) * sourceNoise * gasFeed * p.intensity;
     const float ambientK = 293.0f;
     float tempK = ambientK + heat * 335.0f;
@@ -1004,9 +1004,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     charMass -= charRelease * 0.92f;
     ash += charRelease * (p.sceneId == 2 ? 0.025f : 0.16f + 0.22f * saturate(1.0f - oxygen));
 
-    heat += bed * (p.sceneId == 2 ? 8.80f : 7.20f) * p.dt * (1.0f + radiativeFeedback * 1.12f) + charRelease * 3.35f;
-    fuel += pyrolysisRate * (p.sceneId == 2 ? 3.15f : 4.30f);
-    soot += pyrolysisRate * (0.090f + ash * 0.032f + saturate(1.0f - oxygen) * 0.13f) * p.smokeGain * (p.sceneId == 2 ? 0.42f : 1.0f);
+    heat += bed * (p.sceneId == 2 ? 13.20f : 7.20f) * p.dt * (1.0f + radiativeFeedback * 1.12f) + charRelease * 3.35f;
+    fuel += pyrolysisRate * (p.sceneId == 2 ? 5.40f : 4.30f);
+    soot += pyrolysisRate * (0.090f + ash * 0.032f + saturate(1.0f - oxygen) * 0.13f) * p.smokeGain * (p.sceneId == 2 ? 0.08f : (p.sceneId == 1 ? 1.22f : 1.0f));
 
     if (p.leftDown != 0) {
         const float mx = p.mouseX;
@@ -1033,7 +1033,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float burnMass = fminf(oxygenLimited, oxygenLimited * thermalActivation * arrhenius * (118.0f + p.intensity * 34.0f) * p.dt);
     const float incomplete = saturate(1.0f - oxygen * 1.30f + fuel * 0.065f + soot * 0.015f);
     const float heatRelease = burnMass * 7.0f;
-    const float sootYield = burnMass * (0.035f + incomplete * 0.34f) * p.smokeGain;
+    const float sootYield = burnMass * (0.035f + incomplete * 0.34f) * p.smokeGain * (p.sceneId == 2 ? 0.14f : (p.sceneId == 1 ? 1.16f : 1.0f));
     const float sootOxidation = soot * oxygen * smoothstepf(760.0f, 1540.0f, tempK) * p.dt * 0.82f;
     const float frontProduction = burnMass * (9.8f + turbulenceEnergy * 3.4f) + pyrolysisRate * 0.70f + charRelease * 2.10f;
     const float boundaryAir = smoothstepf(0.70f, 0.96f, v) + smoothstepf(0.11f, 0.03f, u) + smoothstepf(0.89f, 0.97f, u) + smoothstepf(0.11f, 0.03f, w) + smoothstepf(0.89f, 0.97f, w);
@@ -2009,10 +2009,12 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.38f, 0.92f, shearNoise + (0.72f - fv) * 0.12f + reactionFront * 0.10f) *
                 smoothstepf(1.0f, 0.02f, fv) *
                 fieldEdge;
-            const float convectiveSheet = smoothstepf(0.36f, 0.84f, shearNoise + heat * 0.046f + plumeNoise * 0.18f + lesBreakup * 0.12f) * smoothstepf(0.96f, 0.035f, fv) * fieldEdge;
+            const float burnerLowJet = p.sceneId == 2 ? smoothstepf(0.135f, 0.000f, fv) * smoothstepf(0.10f, 1.12f, fuel) * smoothstepf(0.46f, 1.0f, oxygen) : 0.0f;
+            const float campTongueBias = p.sceneId == 1 ? smoothstepf(0.04f, 0.58f, fuel + pyrolysis * 0.34f) * smoothstepf(0.70f, 0.06f, fv) : 0.0f;
+            const float convectiveSheet = smoothstepf(0.36f, 0.84f, shearNoise + heat * 0.046f + plumeNoise * 0.18f + lesBreakup * 0.12f + burnerLowJet * 0.42f + campTongueBias * 0.12f) * smoothstepf(p.sceneId == 2 ? 0.42f : 0.96f, 0.035f, fv) * fieldEdge;
             const float breakup = smoothstepf(0.34f, 0.88f, fineNoise * 0.48f + shearNoise * 0.42f + holeNoise * 0.24f + heat * 0.026f);
             const float verticalFade = smoothstepf(0.96f, 0.025f, fv);
-            const float flameHeightFade = smoothstepf(0.76f, 0.10f, fv);
+            const float flameHeightFade = p.sceneId == 2 ? smoothstepf(0.34f, 0.035f, fv) : smoothstepf(p.sceneId == 1 ? 0.84f : 0.76f, 0.10f, fv);
             const float lowerWhite = smoothstepf(0.060f, 0.00f, fv) * smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
             const float tempK = 293.0f + heat * 360.0f + fuel * 44.0f + pyrolysis * 90.0f + fieldFilament * 560.0f + convectiveSheet * 420.0f + lowerWhite * 110.0f + progress * 64.0f;
             const float combustion =
@@ -2033,7 +2035,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 combustion * reactionFront * flameSheet * (0.012f + fieldFilament * 0.78f + convectiveSheet * 0.28f + thinFront * 1.08f) *
                 (0.060f + breakup * 0.84f + raggedEdge * 0.46f + lesBreakup * 0.38f) *
                 (0.20f + thinFront * 2.40f) *
-                (0.060f + sheetConfinement * 0.94f) *
+                (0.060f + sheetConfinement * 0.94f + burnerLowJet * 0.38f + campTongueBias * 0.18f) *
                 flameHeightFade;
             const float plumeVoid = smoothstepf(0.54f, 0.90f, holeNoise + fineNoise * 0.26f + shearNoise * 0.22f + fv * 0.20f);
             const float topDissolve = smoothstepf(0.88f, 0.42f, fv);
@@ -2080,7 +2082,16 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float whiteFilament = saturate(whiteCore * (0.020f + fieldFilament * 0.10f + thinFront * 0.16f));
             const float orangeEdge = (1.0f - whiteFilament * 0.72f) * thinFront * reactionFront * flameSheet * (0.52f + breakup * 0.95f) * smoothstepf(0.08f, 0.80f, oxygen);
             float3 flameColor = lerp3(make_float3(1.32f, 0.27f, 0.038f), blackbodyColor(tempK), saturate(whiteCore * 0.92f + whiteFilament * 0.62f));
+            if (p.sceneId == 2) {
+                const float blueBase = burnerLowJet * smoothstepf(0.030f, 0.22f, flameDensity + combustion * 0.18f);
+                flameColor = lerp3(flameColor, make_float3(0.17f, 0.42f, 1.75f), saturate(blueBase * 0.86f));
+            } else if (p.sceneId == 1) {
+                flameColor = lerp3(flameColor, make_float3(1.42f, 0.22f, 0.025f), saturate(campTongueBias * (1.0f - whiteCore) * 0.42f));
+            }
             float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.10f + whiteCore * 0.38f));
+            if (p.sceneId == 2) {
+                flameEmission = add3(flameEmission, mul3(make_float3(0.10f, 0.40f, 2.20f), burnerLowJet * combustion * stepT * 0.88f));
+            }
             flameEmission = add3(flameEmission, mul3(make_float3(1.05f, 0.94f, 0.76f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.24f));
             flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * 2.10f));
             flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * flameDensity * radiantPower * stepT * 0.92f * (1.0f - whiteCore * 0.62f)));

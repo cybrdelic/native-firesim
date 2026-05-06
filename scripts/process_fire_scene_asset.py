@@ -216,6 +216,22 @@ def main() -> int:
             "watertight": bool(mesh.is_watertight),
             **scene_stats,
         }
+        normals = mesh.vertex_normals if mesh.vertex_normals is not None and len(mesh.vertex_normals) == len(mesh.vertices) else np.zeros_like(mesh.vertices)
+        runtime_mesh = {
+            "schemaVersion": 1,
+            "assetId": args.asset_id,
+            "coordinateSystem": "meters, +Y up, centered X/Z, minY grounded",
+            "boundsMinMeters": bounds[0].round(6).tolist(),
+            "boundsMaxMeters": bounds[1].round(6).tolist(),
+            "vertices": mesh.vertices.astype(np.float32).round(6).tolist(),
+            "normals": normals.astype(np.float32).round(6).tolist(),
+            "triangles": mesh.faces.astype(np.uint32).tolist(),
+            "material": {
+                "sourceType": source.get("fireSourceType", ""),
+                "fuelMaterial": source.get("fuelMaterial", ""),
+            },
+        }
+        write_json(output_dir / "runtime-mesh.json", runtime_mesh)
 
         geometry = {
             "schemaVersion": 1,
@@ -233,6 +249,7 @@ def main() -> int:
                 "depth": float(extents[2]),
                 "height": float(extents[1]),
                 "geometryMesh": "scene.glb",
+                "runtimeMesh": "runtime-mesh.json",
                 "emitterMask": "emitter-mask.json",
                 "sdfGrid": "sdf-grid.npz",
                 "sourceType": source.get("fireSourceType", "")
@@ -253,6 +270,7 @@ def main() -> int:
 
         generated = {
             "sceneGlbSha256": sha256_file(scene_path),
+            "runtimeMeshSha256": sha256_file(output_dir / "runtime-mesh.json"),
             "sdfGridSha256": sha256_file(output_dir / "sdf-grid.npz"),
             "geometrySha256": sha256_file(output_dir / "geometry.json"),
             "emitterMaskSha256": sha256_file(output_dir / "emitter-mask.json"),
@@ -268,6 +286,7 @@ def main() -> int:
             },
             "outputs": {
                 "sceneGlb": "scene.glb",
+                "runtimeMesh": "runtime-mesh.json",
                 "geometry": "geometry.json",
                 "emitterMask": "emitter-mask.json",
                 "sdfGrid": "sdf-grid.npz",
