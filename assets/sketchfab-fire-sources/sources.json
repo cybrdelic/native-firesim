@@ -3,47 +3,63 @@
   "sources": [
     {
       "id": "campfire",
-      "title": "Campfire",
-      "uid": "fb573067b02f49e193e293b6112e7712",
-      "url": "https://sketchfab.com/3d-models/campfire-fb573067b02f49e193e293b6112e7712",
-      "author": "Tactical_Beard",
-      "license": "CC Attribution",
-      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
-      "downloadArchiveNames": ["campfire.zip", "fb573067b02f49e193e293b6112e7712.zip"],
-      "expectedTriangles": 412,
-      "expectedVertices": 222,
+      "title": "Bonfire",
+      "uid": "k1e0cOzi8A",
+      "url": "https://poly.pizza/bundle/Survival-Pack-XzvQPP0yWB",
+      "author": "Quaternius",
+      "license": "Public Domain (CC0)",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "downloadArchiveNames": ["cc0/bonfire.glb", "bonfire.glb", "survival-pack-glb.zip"],
+      "expectedTriangles": 0,
+      "expectedVertices": 0,
       "published": "2018-04-11",
       "fireSourceType": "solid-fuel-bed",
-      "fuelMaterial": "wood logs / campfire prop",
-      "importScaleMeters": 1.0,
+      "fuelMaterial": "bonfire logs / solid fuel-bed prop",
+      "upAxis": "z",
+      "excludeMaterialNames": ["Fire"],
+      "importScaleMeters": 80.0,
+      "runtimeBaseColor": [0.17, 0.075, 0.035],
+      "runtimeCrop": {
+        "maxHeightFraction": 1.0
+      },
       "emitterHint": {
         "mode": "low-center-bed",
         "heightFraction": 0.34,
-        "radiusFraction": 0.42
+        "radiusFraction": 0.42,
+        "worldHeightMeters": 0.045,
+        "heightBandMeters": 0.20
       },
-      "notes": "Use as a visual and material-source fixture for fuel-bed, char, ash, and pyrolysis tests. Credit Tactical_Beard when shipping assets or captures."
+      "notes": "CC0 replacement for the earlier Sketchfab source. Use as a visual and material-source fixture for fuel-bed, char, ash, and pyrolysis tests."
     },
     {
       "id": "gas-burner-aver1",
-      "title": "Gas-Burner",
-      "uid": "9d24aac8a4c444a1b440647aa6f96438",
-      "url": "https://sketchfab.com/3d-models/gas-burner-9d24aac8a4c444a1b440647aa6f96438",
-      "author": "Aver1",
-      "license": "CC Attribution",
-      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
-      "downloadArchiveNames": ["gas-burner-aver1.zip", "9d24aac8a4c444a1b440647aa6f96438.zip"],
-      "expectedTriangles": 9900,
-      "expectedVertices": 5000,
-      "published": "2021-01-27",
+      "title": "Oven",
+      "uid": "2SXnFbwFzm:Oven",
+      "url": "https://poly.pizza/bundle/Ultimate-House-Interior-Pack-2SXnFbwFzm",
+      "author": "Quaternius",
+      "license": "Public Domain (CC0)",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "downloadArchiveNames": ["cc0/oven.glb", "oven.glb", "house-interior-glb.zip"],
+      "expectedTriangles": 0,
+      "expectedVertices": 0,
+      "published": "2022-07-11",
       "fireSourceType": "gas-burner",
-      "fuelMaterial": "gaseous burner source",
-      "importScaleMeters": 1.0,
+      "fuelMaterial": "stove-top gaseous burner source",
+      "upAxis": "z",
+      "importScaleMeters": 70.0,
+      "runtimeBaseColor": [0.025, 0.030, 0.038],
+      "runtimeCrop": {
+        "minHeightFraction": 0.66
+      },
       "emitterHint": {
         "mode": "burner-ring",
         "heightFraction": 0.20,
-        "radiusFraction": 0.33
+        "radiusFraction": 0.33,
+        "worldHeightMeters": 0.138,
+        "heightBandMeters": 0.105,
+        "selectedBurnerIndex": 3
       },
-      "notes": "Use as the first controlled-source fixture for burner plume, HRR calibration, and source-mask validation. Credit Aver1 when shipping assets or captures."
+      "notes": "CC0 stove/oven replacement for the earlier Sketchfab burner source. Use the cooktop as the controlled gas-burner fixture."
     }
   ]
 }

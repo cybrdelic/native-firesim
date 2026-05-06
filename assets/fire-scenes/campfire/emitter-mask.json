@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "coordinateSystem": "meters, +Y up, centered X/Z, minY grounded",
+  "gridResolution": [
+    32,
+    32,
+    32
+  ],
+  "boundsMinMeters": [
+    -0.4724240005016327,
+    -0.03499399870634079,
+    -0.43392398953437805
+  ],
+  "boundsMaxMeters": [
+    0.4724240005016327,
+    0.3066929876804352,
+    0.43392398953437805
+  ],
+  "sdfSignMode": "unsigned",
+  "activeEmitterVoxels": 3894,
+  "emitterMode": "low-center-bed",
+  "emitterHint": {
+    "mode": "low-center-bed",
+    "heightFraction": 0.34,
+    "radiusFraction": 0.42,
+    "worldHeightMeters": 0.045,
+    "heightBandMeters": 0.2
+  },
+  "burnerCentersMeters": [],
+  "derivedEmitter": {
+    "centerXMeters": 0.011655047535896301,
+    "centerYMeters": 0.02828231453895569,
+    "centerZMeters": -0.00791538693010807,
+    "radiusMeters": 0.3531242311000824,
+    "heightBandMeters": 0.11022160947322845
+  },
+  "sdfGrid": "sdf-grid.npz"
+}

@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "assetId": "gas-burner-aver1",
+  "source": {
+    "id": "gas-burner-aver1",
+    "title": "Oven",
+    "uid": "2SXnFbwFzm:Oven",
+    "url": "https://poly.pizza/bundle/Ultimate-House-Interior-Pack-2SXnFbwFzm",
+    "author": "Quaternius",
+    "license": "Public Domain (CC0)",
+    "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "downloadArchiveNames": [
+      "cc0/oven.glb",
+      "oven.glb",
+      "house-interior-glb.zip"
+    ],
+    "expectedTriangles": 0,
+    "expectedVertices": 0,
+    "published": "2022-07-11",
+    "fireSourceType": "gas-burner",
+    "fuelMaterial": "stove-top gaseous burner source",
+    "upAxis": "z",
+    "importScaleMeters": 70.0,
+    "runtimeBaseColor": [
+      0.025,
+      0.03,
+      0.038
+    ],
+    "runtimeCrop": {
+      "minHeightFraction": 0.66
+    },
+    "emitterHint": {
+      "mode": "burner-ring",
+      "heightFraction": 0.2,
+      "radiusFraction": 0.33,
+      "worldHeightMeters": 0.138,
+      "heightBandMeters": 0.105,
+      "selectedBurnerIndex": 3
+    },
+    "notes": "CC0 stove/oven replacement for the earlier Sketchfab burner source. Use the cooktop as the controlled gas-burner fixture."
+  },
+  "input": {
+    "path": "C:\\Users\\alexf\\Documents\\Codex\\2026-04-30\\all-right-so-i-want-you\\native-firesim\\assets\\sketchfab-fire-sources\\_downloads\\cc0\\oven.glb",
+    "sha256": "be6d232fd72e4b4177b86717a8fd638c627a122ab0aa1e5dade1132443c60b06",
+    "modelFile": "C:\\Users\\alexf\\Documents\\Codex\\2026-04-30\\all-right-so-i-want-you\\native-firesim\\assets\\sketchfab-fire-sources\\_downloads\\cc0\\oven.glb"
+  },
+  "outputs": {
+    "sceneGlb": "scene.glb",
+    "runtimeMesh": "runtime-mesh.json",
+    "geometry": "geometry.json",
+    "emitterMask": "emitter-mask.json",
+    "sdfGrid": "sdf-grid.npz"
+  },
+  "generated": {
+    "sceneGlbSha256": "609f1fa240d704d9170e285a448f4bedf41f43a237236a6ac2f99ce138c95c3f",
+    "runtimeMeshSha256": "4ad80c0cfda553e480c20cfa53080858ba3a137226606f99c2a616063d20b1e6",
+    "sdfGridSha256": "1816575e91aa7ec93678a710deed3822c04b4cf2ef0e198839ba7dc3ab9c6914",
+    "geometrySha256": "5e847004490c80c5e21405a3657a1ddaecc401258ad31c15e543d312876d53f4",
+    "emitterMaskSha256": "913c11fb353fbee20316ab67820f3df0e16d1ea510267a66fc0f36385233e02e"
+  },
+  "mesh": {
+    "vertices": 506,
+    "faces": 476,
+    "boundsMinMeters": [
+      -0.409927,
+      0.0,
+      -0.374627
+    ],
+    "boundsMaxMeters": [
+      0.409927,
+      0.376206,
+      0.374627
+    ],
+    "extentsMeters": [
+      0.819854,
+      0.376206,
+      0.749254
+    ],
+    "watertight": false,
+    "nodeCount": 5,
+    "geometryCount": 5,
+    "runtimeGeometryCount": 5
+  },
+  "attribution": "Oven by Quaternius (https://poly.pizza/bundle/Ultimate-House-Interior-Pack-2SXnFbwFzm), licensed Public Domain (CC0) (https://creativecommons.org/publicdomain/zero/1.0/)."
+}

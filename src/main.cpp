@@ -133,12 +133,17 @@ struct MeshVertex {
     float nx;
     float ny;
     float nz;
+    float cr;
+    float cg;
+    float cb;
 };
 
 struct MeshConstants {
     float viewProj[16];
     float lightPos[4];
     float baseColor[4];
+    float fireColor[4];
+    float fireParams[4];
 };
 
 struct RuntimeSceneMesh {
@@ -147,6 +152,17 @@ struct RuntimeSceneMesh {
     ComPtr<ID3D11Buffer> vertexBuffer;
     ComPtr<ID3D11Buffer> indexBuffer;
     bool loaded = false;
+};
+
+struct SceneEmitterParams {
+    float centerX = 0.0f;
+    float centerZ = 0.0f;
+    float heightNorm = 0.0f;
+    float heightBandNorm = 0.06f;
+    float radius = 0.48f;
+    int burnerCenterCount = 0;
+    float burnerCenterX[4] = {};
+    float burnerCenterZ[4] = {};
 };
 
 struct D3DDisplayState {
@@ -185,6 +201,7 @@ std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
 D3DDisplayState g_d3d;
 std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
+std::array<SceneEmitterParams, kSceneCount> g_sceneEmitters;
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
 HANDLE g_cudaWorkerProcess = nullptr;
@@ -249,7 +266,15 @@ double g_liveIntervalCopyMs = 0.0;
 double g_liveIntervalPresentMs = 0.0;
 bool g_uiTextureUploaded = false;
 
+void stopCudaWorker();
+
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
+    bool burnerCentersSame = a.burnerCenterCount == b.burnerCenterCount;
+    for (int i = 0; i < 4; ++i) {
+        burnerCentersSame = burnerCentersSame &&
+            a.burnerCenterX[i] == b.burnerCenterX[i] &&
+            a.burnerCenterZ[i] == b.burnerCenterZ[i];
+    }
     return a.width == b.width &&
         a.height == b.height &&
         a.mouseX == b.mouseX &&
@@ -274,7 +299,13 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         a.renderDebugMode == b.renderDebugMode &&
         a.exposure == b.exposure &&
         a.reflectionGain == b.reflectionGain &&
-        a.smokeDarkness == b.smokeDarkness;
+        a.smokeDarkness == b.smokeDarkness &&
+        a.emitterCenterX == b.emitterCenterX &&
+        a.emitterCenterZ == b.emitterCenterZ &&
+        a.emitterHeightNorm == b.emitterHeightNorm &&
+        a.emitterHeightBandNorm == b.emitterHeightBandNorm &&
+        a.emitterRadius == b.emitterRadius &&
+        burnerCentersSame;
 }
 
 bool overlayStateDirty(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
@@ -290,6 +321,21 @@ void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool c
     g_lastOverlayCleanViewport = cleanViewport;
     std::snprintf(g_lastOverlayStatus, sizeof(g_lastOverlayStatus), "%s", g_workerUiStatus);
     g_haveLastOverlaySettings = true;
+}
+
+void applySceneEmitterParams(FireSettings& settings) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+    const SceneEmitterParams& emitter = g_sceneEmitters[scene];
+    settings.emitterCenterX = emitter.centerX;
+    settings.emitterCenterZ = emitter.centerZ;
+    settings.emitterHeightNorm = emitter.heightNorm;
+    settings.emitterHeightBandNorm = emitter.heightBandNorm;
+    settings.emitterRadius = emitter.radius;
+    settings.burnerCenterCount = emitter.burnerCenterCount;
+    for (int i = 0; i < 4; ++i) {
+        settings.burnerCenterX[i] = emitter.burnerCenterX[i];
+        settings.burnerCenterZ[i] = emitter.burnerCenterZ[i];
+    }
 }
 
 float clamp01(float v) {
@@ -582,6 +628,20 @@ void requestSimulationReset() {
     g_uiTextureUploaded = false;
 }
 
+void switchScene(int scene) {
+    const int nextScene = std::max(0, std::min(kSceneCount - 1, scene));
+    if (g_activeScene == nextScene) {
+        return;
+    }
+    g_activeScene = nextScene;
+    g_d3d.hasSimFrame = false;
+    stopCudaWorker();
+    g_lastWorkerStartTickMs = 0;
+    requestSimulationReset();
+}
+
+void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport);
+
 void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
     const bool active = activeTool == tool;
     fillRect(pixels, rect, active ? 0.105f : 0.048f, active ? 0.059f : 0.050f, active ? 0.037f : 0.052f, 1.0f);
@@ -729,11 +789,13 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
 void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
     std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
     blitViewport(pixels, simPixels);
+    drawSceneDebugOverlay(pixels, settings, cleanViewport);
     drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
 }
 
 void composeD3DOverlayFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
     std::fill(pixels.begin(), pixels.end(), 0u);
+    drawSceneDebugOverlay(pixels, settings, cleanViewport);
     drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
 }
 
@@ -992,76 +1054,32 @@ std::vector<std::uint32_t> parseJsonUInts(const std::string& text) {
     return values;
 }
 
+bool jsonNumberForKey(const std::string& text, const char* key, float& out) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const std::size_t keyPos = text.find(needle);
+    if (keyPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t colon = text.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) {
+        return false;
+    }
+    const char* start = text.c_str() + colon + 1;
+    char* end = nullptr;
+    const float value = std::strtof(start, &end);
+    if (end == start) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 const char* runtimeMeshAssetId(int sceneId) {
     switch (sceneId) {
     case 1: return "campfire";
     case 2: return "gas-burner-aver1";
     default: return "";
     }
-}
-
-void appendMeshVertex(RuntimeSceneMesh& mesh, float x, float y, float z, float nx, float ny, float nz) {
-    mesh.vertices.push_back({x, y, z, nx, ny, nz});
-}
-
-void appendCylinder(RuntimeSceneMesh& mesh, float cx, float cy, float cz, float radius, float halfLength, float angle, int segments) {
-    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
-    const float ca = std::cos(angle);
-    const float sa = std::sin(angle);
-    for (int side = 0; side < 2; ++side) {
-        const float localX = side == 0 ? -halfLength : halfLength;
-        for (int i = 0; i < segments; ++i) {
-            const float a = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
-            const float ly = std::sin(a) * radius;
-            const float lz = std::cos(a) * radius;
-            const float wx = cx + localX * ca - lz * sa;
-            const float wz = cz + localX * sa + lz * ca;
-            const float nx = -std::cos(a) * sa;
-            const float nz = std::cos(a) * ca;
-            appendMeshVertex(mesh, wx, cy + ly, wz, nx, std::sin(a), nz);
-        }
-    }
-    for (int i = 0; i < segments; ++i) {
-        const std::uint32_t a = base + static_cast<std::uint32_t>(i);
-        const std::uint32_t b = base + static_cast<std::uint32_t>((i + 1) % segments);
-        const std::uint32_t c = base + static_cast<std::uint32_t>(segments + i);
-        const std::uint32_t d = base + static_cast<std::uint32_t>(segments + ((i + 1) % segments));
-        mesh.indices.insert(mesh.indices.end(), {a, b, c, b, d, c});
-    }
-}
-
-void appendRing(RuntimeSceneMesh& mesh, float y, float innerRadius, float outerRadius, int segments) {
-    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
-    for (int i = 0; i < segments; ++i) {
-        const float a = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
-        const float c = std::cos(a);
-        const float s = std::sin(a);
-        appendMeshVertex(mesh, c * innerRadius, y, s * innerRadius, 0.0f, 1.0f, 0.0f);
-        appendMeshVertex(mesh, c * outerRadius, y, s * outerRadius, 0.0f, 1.0f, 0.0f);
-    }
-    for (int i = 0; i < segments; ++i) {
-        const std::uint32_t a = base + static_cast<std::uint32_t>(i * 2);
-        const std::uint32_t b = base + static_cast<std::uint32_t>(((i + 1) % segments) * 2);
-        const std::uint32_t c = a + 1;
-        const std::uint32_t d = b + 1;
-        mesh.indices.insert(mesh.indices.end(), {a, c, b, c, d, b});
-    }
-}
-
-RuntimeSceneMesh makeBuiltInSceneMesh(int sceneId) {
-    RuntimeSceneMesh mesh;
-    if (sceneId == 1) {
-        appendCylinder(mesh, -0.08f, 0.10f, 0.00f, 0.075f, 0.56f, 0.38f, 16);
-        appendCylinder(mesh, 0.10f, 0.11f, -0.02f, 0.072f, 0.54f, -0.58f, 16);
-        appendCylinder(mesh, 0.03f, 0.18f, 0.08f, 0.055f, 0.36f, 1.34f, 14);
-        appendRing(mesh, 0.026f, 0.10f, 0.48f, 28);
-    } else if (sceneId == 2) {
-        appendRing(mesh, 0.045f, 0.28f, 0.40f, 48);
-        appendRing(mesh, 0.055f, 0.13f, 0.22f, 32);
-        appendRing(mesh, 0.030f, 0.45f, 0.78f, 64);
-    }
-    mesh.loaded = !mesh.vertices.empty() && !mesh.indices.empty();
-    return mesh;
 }
 
 bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
@@ -1077,6 +1095,7 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     }
     const std::vector<float> positions = parseJsonFloats(jsonArrayForKey(text, "vertices"));
     const std::vector<float> normals = parseJsonFloats(jsonArrayForKey(text, "normals"));
+    const std::vector<float> colors = parseJsonFloats(jsonArrayForKey(text, "colors"));
     const std::vector<std::uint32_t> indices = parseJsonUInts(jsonArrayForKey(text, "triangles"));
     if (positions.size() < 9 || positions.size() % 3 != 0 || indices.size() < 3 || indices.size() % 3 != 0) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "runtime mesh parse failed for scene %d", sceneId);
@@ -1084,13 +1103,22 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     }
     const std::size_t vertexCount = positions.size() / 3;
     mesh.vertices.resize(vertexCount);
+    const float meshYOffset = sceneId == 2 ? -0.24f : 0.0f;
     for (std::size_t i = 0; i < vertexCount; ++i) {
         mesh.vertices[i].px = positions[i * 3 + 0];
-        mesh.vertices[i].py = positions[i * 3 + 1];
+        mesh.vertices[i].py = positions[i * 3 + 1] + meshYOffset;
         mesh.vertices[i].pz = positions[i * 3 + 2];
         mesh.vertices[i].nx = normals.size() >= positions.size() ? normals[i * 3 + 0] : 0.0f;
         mesh.vertices[i].ny = normals.size() >= positions.size() ? normals[i * 3 + 1] : 1.0f;
         mesh.vertices[i].nz = normals.size() >= positions.size() ? normals[i * 3 + 2] : 0.0f;
+        mesh.vertices[i].cr = colors.size() >= positions.size() ? colors[i * 3 + 0] : 0.55f;
+        mesh.vertices[i].cg = colors.size() >= positions.size() ? colors[i * 3 + 1] : 0.55f;
+        mesh.vertices[i].cb = colors.size() >= positions.size() ? colors[i * 3 + 2] : 0.55f;
+        if (sceneId == 2) {
+            mesh.vertices[i].cr = 0.035f;
+            mesh.vertices[i].cg = 0.036f;
+            mesh.vertices[i].cb = 0.039f;
+        }
     }
     mesh.indices = indices;
     mesh.loaded = true;
@@ -1123,12 +1151,67 @@ bool createMeshBuffers(RuntimeSceneMesh& mesh) {
     return true;
 }
 
+SceneEmitterParams loadSceneEmitterParams(int sceneId) {
+    SceneEmitterParams params;
+    if (sceneId == 1) {
+        params.radius = 0.32f;
+        params.heightNorm = (0.045f - 0.02f) / 2.03f;
+        params.heightBandNorm = 0.20f / 2.03f;
+    } else if (sceneId == 2) {
+        params.radius = 0.24f;
+        params.heightNorm = (0.138f - 0.02f) / 2.03f;
+        params.heightBandNorm = 0.105f / 2.03f;
+    }
+
+    const char* assetId = runtimeMeshAssetId(sceneId);
+    if (assetId[0] == '\0') {
+        return params;
+    }
+    const std::filesystem::path path = std::filesystem::path("assets") / "fire-scenes" / assetId / "emitter-mask.json";
+    const std::string text = readTextFile(path);
+    if (text.empty()) {
+        return params;
+    }
+    float value = 0.0f;
+    if (jsonNumberForKey(text, "centerXMeters", value)) {
+        params.centerX = value;
+    }
+    if (jsonNumberForKey(text, "centerZMeters", value)) {
+        params.centerZ = value;
+    }
+    if (jsonNumberForKey(text, "centerYMeters", value)) {
+        params.heightNorm = (value - 0.02f) / 2.03f;
+    } else if (jsonNumberForKey(text, "worldHeightMeters", value)) {
+        params.heightNorm = (value - 0.02f) / 2.03f;
+    }
+    if (jsonNumberForKey(text, "heightBandMeters", value)) {
+        params.heightBandNorm = value / 2.03f;
+    }
+    if (jsonNumberForKey(text, "radiusMeters", value)) {
+        params.radius = value;
+    } else if (jsonNumberForKey(text, "radiusFraction", value)) {
+        float width = 0.0f;
+        float depth = 0.0f;
+        if (jsonNumberForKey(text, "width", width) && jsonNumberForKey(text, "depth", depth)) {
+            params.radius = value * std::max(width, depth);
+        }
+    }
+    const std::vector<float> burnerCenters = parseJsonFloats(jsonArrayForKey(text, "burnerCentersMeters"));
+    params.burnerCenterCount = static_cast<int>(std::min<std::size_t>(4, burnerCenters.size() / 3));
+    for (int i = 0; i < params.burnerCenterCount; ++i) {
+        params.burnerCenterX[i] = burnerCenters[static_cast<std::size_t>(i) * 3 + 0];
+        params.burnerCenterZ[i] = burnerCenters[static_cast<std::size_t>(i) * 3 + 2];
+    }
+    return params;
+}
+
 void loadRuntimeSceneMeshes() {
     for (int scene = 0; scene < kSceneCount; ++scene) {
+        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
         RuntimeSceneMesh mesh;
-        if ((!loadRuntimeSceneMesh(scene, mesh) || !createMeshBuffers(mesh)) && scene != 0) {
-            mesh = makeBuiltInSceneMesh(scene);
-            createMeshBuffers(mesh);
+        if (scene != 0 && (!loadRuntimeSceneMesh(scene, mesh) || !createMeshBuffers(mesh))) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "missing imported mesh for %s", runtimeMeshAssetId(scene));
+            mesh = {};
         }
         g_sceneMeshes[scene] = std::move(mesh);
     }
@@ -1146,12 +1229,14 @@ struct VSOut {
 struct MeshVSIn {
     float3 pos : POSITION;
     float3 normal : NORMAL;
+    float3 color : COLOR0;
 };
 
 struct MeshVSOut {
     float4 pos : SV_POSITION;
     float3 worldPos : TEXCOORD0;
     float3 normal : TEXCOORD1;
+    float3 color : TEXCOORD2;
 };
 
 VSOut FullscreenVS(uint id : SV_VertexID) {
@@ -1178,6 +1263,8 @@ cbuffer MeshConstants : register(b1) {
     float4x4 MeshViewProj;
     float4 MeshLightPos;
     float4 MeshBaseColor;
+    float4 MeshFireColor;
+    float4 MeshFireParams;
 }
 
 float Luma(float3 c) {
@@ -1218,6 +1305,7 @@ MeshVSOut MeshVS(MeshVSIn input) {
     outp.pos = mul(wp, MeshViewProj);
     outp.worldPos = input.pos;
     outp.normal = normalize(input.normal);
+    outp.color = saturate(input.color);
     return outp;
 }
 
@@ -1227,10 +1315,21 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float3 v = normalize(float3(0.0, 0.85, 2.4) - input.worldPos);
     float ndl = saturate(dot(n, l));
     float rim = pow(saturate(1.0 - dot(n, v)), 2.2);
-    float3 fireBounce = float3(1.0, 0.35, 0.08) * (0.08 + ndl * 0.22);
-    float3 coolFill = float3(0.018, 0.021, 0.026) * (0.35 + rim * 0.70);
-    float3 color = MeshBaseColor.rgb * (0.10 + ndl * 0.62) + fireBounce + coolFill;
-    return float4(color, MeshBaseColor.a);
+    float radial = length(input.worldPos.xz);
+    float sourceRadius = max(MeshFireParams.x, 0.01);
+    float sourceFalloff = exp(-(radial * radial) / (sourceRadius * sourceRadius));
+    float lowSource = saturate(1.0 - input.worldPos.y * MeshFireParams.z);
+    float3 toFire = normalize(float3(-input.worldPos.x, MeshLightPos.y - input.worldPos.y, -input.worldPos.z));
+    float fireFacing = saturate(dot(n, toFire));
+    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.20 + lowSource * 0.48 + fireFacing * 0.42);
+    float3 coolFill = float3(0.015, 0.018, 0.024) * (0.22 + rim * 0.54);
+    float3 material = max(input.color, MeshBaseColor.rgb);
+    float3 color = material * (0.050 + ndl * 0.30 + rim * 0.05) + fireBounce + coolFill;
+    float2 screenUv = saturate(input.pos.xy / float2(960.0, 540.0));
+    float sceneLuma = Luma(FrameTex.Sample(LinearSampler, screenUv).rgb);
+    float hotVolume = smoothstep(0.12, 0.55, sceneLuma);
+    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.82);
+    return float4(color, alpha);
 }
 )HLSL";
 }
@@ -1373,6 +1472,7 @@ bool initializeD3D(HWND hwnd) {
     const D3D11_INPUT_ELEMENT_DESC meshInput[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
     if (FAILED(g_d3d.device->CreateInputLayout(
             meshInput,
@@ -1571,6 +1671,103 @@ Vec3 normalize3(Vec3 v) {
     return {v.x * invLen, v.y * invLen, v.z * invLen};
 }
 
+bool projectWorldToViewport(Vec3 world, int& sx, int& sy, float& depth) {
+    const Vec3 target = {0.0f, 0.48f, 0.0f};
+    const float cp = std::cos(g_cameraPitch);
+    const Vec3 eye = {
+        std::sin(g_cameraYaw) * g_cameraDistance * cp,
+        target.y + std::sin(g_cameraPitch) * g_cameraDistance,
+        std::cos(g_cameraYaw) * g_cameraDistance * cp};
+    const Vec3 z = normalize3(sub3(eye, target));
+    const Vec3 x = normalize3(cross3({0.0f, 1.0f, 0.0f}, z));
+    const Vec3 y = cross3(z, x);
+    const Vec3 rel = sub3(world, eye);
+    depth = -dot3(z, rel);
+    if (depth <= 0.03f) {
+        return false;
+    }
+
+    const float fovY = 50.0f * 3.1415926535f / 180.0f;
+    const float aspect = static_cast<float>(kFrameWidth) / static_cast<float>(kFrameHeight);
+    const float f = 1.0f / std::tan(fovY * 0.5f);
+    const float ndcX = (dot3(x, rel) * f / aspect) / depth;
+    const float ndcY = (dot3(y, rel) * f) / depth;
+    if (!std::isfinite(ndcX) || !std::isfinite(ndcY) || ndcX < -1.4f || ndcX > 1.4f || ndcY < -1.4f || ndcY > 1.4f) {
+        return false;
+    }
+
+    sx = kViewportRect.x + static_cast<int>((ndcX * 0.5f + 0.5f) * static_cast<float>(kViewportRect.w));
+    sy = kViewportRect.y + static_cast<int>((0.5f - ndcY * 0.5f) * static_cast<float>(kViewportRect.h));
+    return contains(kViewportRect, sx, sy);
+}
+
+void drawProjectedEmitterMarker(
+    std::vector<std::uint32_t>& pixels,
+    Vec3 center,
+    float radiusMeters,
+    const char* label,
+    float cr,
+    float cg,
+    float cb) {
+    int cx = 0;
+    int cy = 0;
+    float depth = 0.0f;
+    if (!projectWorldToViewport(center, cx, cy, depth)) {
+        return;
+    }
+
+    int rx = 0;
+    int ry = 0;
+    float edgeDepth = 0.0f;
+    float radiusPx = 18.0f;
+    if (projectWorldToViewport({center.x + std::max(0.03f, radiusMeters), center.y, center.z}, rx, ry, edgeDepth)) {
+        const float dx = static_cast<float>(rx - cx);
+        const float dy = static_cast<float>(ry - cy);
+        radiusPx = std::sqrt(dx * dx + dy * dy);
+    }
+    radiusPx = std::max(8.0f, std::min(70.0f, radiusPx));
+
+    drawCirclePx(pixels, cx, cy, static_cast<int>(radiusPx), cr, cg, cb, 0.88f);
+    drawCirclePx(pixels, cx, cy, 3, cr, cg, cb, 0.95f);
+    drawLinePx(pixels, cx - 10, cy, cx + 10, cy, cr, cg, cb, 0.76f);
+    drawLinePx(pixels, cx, cy - 10, cx, cy + 10, cr, cg, cb, 0.76f);
+    drawText(pixels, cx + 10, cy - 18, label, 1, cr, cg, cb, 0.88f);
+}
+
+void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport) {
+    if (cleanViewport || (settings.showGizmos == 0 && settings.renderDebugMode == 0)) {
+        return;
+    }
+
+    const float emitterY = std::max(0.02f, settings.emitterHeightNorm * 2.03f + 0.02f);
+    if (settings.sceneId == 2 && settings.burnerCenterCount > 0) {
+        const int count = std::min(4, settings.burnerCenterCount);
+        for (int i = 0; i < count; ++i) {
+            char label[24] = {};
+            std::snprintf(label, sizeof(label), i == 0 ? "SRC ACTIVE" : "PORT %d", i);
+            const float alphaBias = i == 0 ? 1.0f : 0.72f;
+            drawProjectedEmitterMarker(
+                pixels,
+                {settings.burnerCenterX[i], emitterY, settings.burnerCenterZ[i]},
+                settings.emitterRadius,
+                label,
+                0.18f * alphaBias,
+                0.72f * alphaBias,
+                1.0f);
+        }
+        return;
+    }
+
+    drawProjectedEmitterMarker(
+        pixels,
+        {settings.emitterCenterX, emitterY, settings.emitterCenterZ},
+        settings.emitterRadius,
+        "SRC",
+        1.0f,
+        0.42f,
+        0.08f);
+}
+
 void mulMat4(const float a[16], const float b[16], float out[16]) {
     float r[16] = {};
     for (int row = 0; row < 4; ++row) {
@@ -1617,15 +1814,44 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
     constants.lightPos[2] = 0.0f;
     constants.lightPos[3] = 1.0f;
     if (sceneId == 1) {
-        constants.baseColor[0] = 0.060f * exposure;
-        constants.baseColor[1] = 0.036f * exposure;
-        constants.baseColor[2] = 0.020f * exposure;
-        constants.baseColor[3] = 0.92f;
+        constants.baseColor[0] = 0.052f * exposure;
+        constants.baseColor[1] = 0.030f * exposure;
+        constants.baseColor[2] = 0.017f * exposure;
+        constants.baseColor[3] = 0.70f;
+        constants.fireColor[0] = 1.18f * exposure;
+        constants.fireColor[1] = 0.42f * exposure;
+        constants.fireColor[2] = 0.070f * exposure;
+        constants.fireColor[3] = 1.0f;
+        constants.fireParams[0] = 0.62f;
+        constants.fireParams[1] = 0.18f;
+        constants.fireParams[2] = 4.0f;
+        constants.fireParams[3] = 1.0f;
+    } else if (sceneId == 2) {
+        constants.baseColor[0] = 0.017f * exposure;
+        constants.baseColor[1] = 0.019f * exposure;
+        constants.baseColor[2] = 0.023f * exposure;
+        constants.baseColor[3] = 0.90f;
+        constants.fireColor[0] = 0.040f * exposure;
+        constants.fireColor[1] = 0.13f * exposure;
+        constants.fireColor[2] = 0.42f * exposure;
+        constants.fireColor[3] = 1.0f;
+        constants.fireParams[0] = 0.26f;
+        constants.fireParams[1] = 0.055f;
+        constants.fireParams[2] = 8.5f;
+        constants.fireParams[3] = 2.0f;
     } else {
         constants.baseColor[0] = 0.020f * exposure;
         constants.baseColor[1] = 0.022f * exposure;
         constants.baseColor[2] = 0.024f * exposure;
         constants.baseColor[3] = 0.88f;
+        constants.fireColor[0] = 1.05f * exposure;
+        constants.fireColor[1] = 0.36f * exposure;
+        constants.fireColor[2] = 0.060f * exposure;
+        constants.fireColor[3] = 1.0f;
+        constants.fireParams[0] = 0.54f;
+        constants.fireParams[1] = 0.24f;
+        constants.fireParams[2] = 5.0f;
+        constants.fireParams[3] = 0.0f;
     }
     return constants;
 }
@@ -1700,13 +1926,18 @@ bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
         g_d3d.context->PSSetShaderResources(0, 1, simSrvs);
         g_d3d.context->PSSetShader(g_d3d.simPixelShader.Get(), nullptr, 0);
         g_d3d.context->Draw(3, 0);
-        ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
-        g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     }
 
     const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
     renderRuntimeSceneMesh(exposure);
+    ID3D11Buffer* nullVertexBuffers[] = {nullptr};
+    UINT nullStride = 0;
+    UINT nullOffset = 0;
+    g_d3d.context->IASetInputLayout(nullptr);
+    g_d3d.context->IASetVertexBuffers(0, 1, nullVertexBuffers, &nullStride, &nullOffset);
+    g_d3d.context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+    g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
     ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
     g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
     g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
@@ -1740,10 +1971,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (const int scene = hitTestSceneButton(g_pointerFrameX, g_pointerFrameY); scene >= 0) {
-            if (g_activeScene != scene) {
-                g_activeScene = scene;
-                requestSimulationReset();
-            }
+            switchScene(scene);
             return 0;
         }
         if (const int command = hitTestCommandButton(g_pointerFrameX, g_pointerFrameY); command != 0) {
@@ -1828,8 +2056,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (wParam == 'S') {
-            g_activeScene = (g_activeScene + 1) % kSceneCount;
-            requestSimulationReset();
+            switchScene((g_activeScene + 1) % kSceneCount);
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
@@ -2570,6 +2797,9 @@ int runWorkerBenchmark(const std::string& args) {
     if (!gpuKernelLaunchAllowed(args)) {
         return writeGpuSafetyStop("worker-benchmark");
     }
+    for (int scene = 0; scene < kSceneCount; ++scene) {
+        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
+    }
     ensureDirectoryTree("out");
     const std::string outputDirArg = argumentValue(args, "--output-dir=");
     const std::string outputDir = outputDirArg.empty() ? "out\\worker-benchmark" : outputDirArg;
@@ -2638,6 +2868,7 @@ int runWorkerBenchmark(const std::string& args) {
         settings.cameraPitch = 0.08f;
         settings.cameraDistance = 2.62f;
         applyCanonicalFireSettings(settings);
+        applySceneEmitterParams(settings);
         return settings;
     };
 
@@ -2768,6 +2999,9 @@ int runCudaWorker(const std::string& args) {
         return writeGpuSafetyStop("cuda-worker");
     }
     TimerResolutionScope timerResolution;
+    for (int scene = 0; scene < kSceneCount; ++scene) {
+        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
+    }
     if (!initializeSharedViewport(false)) {
         return 2;
     }
@@ -2872,6 +3106,7 @@ int runCudaWorker(const std::string& args) {
         const bool advancePhysics = settings.reset != 0 || framesSincePhysics >= kWorkerPhysicsFrameInterval;
         settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
         applyCanonicalFireSettings(settings);
+        applySceneEmitterParams(settings);
         const int publishSlot = 0;
         const auto frameStart = Clock::now();
         HRESULT acquire = d3dTarget.sharedMutexes[publishSlot]->AcquireSync(0, 0);
@@ -3468,6 +3703,9 @@ int runInputStressTest() {
 
 int runCudaSmokeTest() {
     CreateDirectoryA("out", nullptr);
+    for (int scene = 0; scene < kSceneCount; ++scene) {
+        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
+    }
     std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
     std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, 0xff000000u);
 
@@ -3490,6 +3728,7 @@ int runCudaSmokeTest() {
         settings.wind = 0.08f;
         settings.detail = 0.92f;
         applyCanonicalFireSettings(settings);
+        applySceneEmitterParams(settings);
         settings.turbulence = std::max(settings.turbulence, 1.08f);
         settings.smoke = std::max(settings.smoke, 1.05f);
         settings.intensity = std::max(settings.intensity, 1.05f);
@@ -3523,6 +3762,7 @@ int runValidation(const std::string& args) {
     const std::string outputDir = outputDirArg.empty() ? "out" : outputDirArg;
     const int validationFrames = argumentIntValue(args, "--validation-frames=", 96, 8, 240);
     const int validationScene = argumentIntValue(args, "--scene=", 0, 0, kSceneCount - 1);
+    g_sceneEmitters[validationScene] = loadSceneEmitterParams(validationScene);
     const bool poolFireCalibration = args.find("--pool-fire-calibration") != std::string::npos;
     if (!ensureDirectoryTree(outputDir)) {
         return 3;
@@ -3595,6 +3835,7 @@ int runValidation(const std::string& args) {
         settings.wind = poolFireCalibration ? 0.0f : 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
         settings.detail = 0.98f;
         applyCanonicalFireSettings(settings);
+        applySceneEmitterParams(settings);
         settings.turbulence = std::max(settings.turbulence, 1.08f);
         settings.smoke = std::max(settings.smoke, 1.02f);
         settings.intensity = std::max(settings.intensity, 1.18f);
@@ -3954,10 +4195,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         return runCudaSmokeTest();
     }
     if (args.find("--input-stress-test") != std::string::npos) {
-        return runInputStressTest();
+        const int code = runInputStressTest();
+        ExitProcess(static_cast<UINT>(code));
     }
     g_useCudaBackend = false;
     g_cudaWorkerRequested = cudaWorkerEnabledByDefault(args);
+    g_activeScene = argumentIntValue(args, "--scene=", 0, 0, kSceneCount - 1);
+    if (g_activeScene != 0) {
+        g_needsReset = true;
+        g_resetFramesRemaining = 3;
+    }
 
     timeBeginPeriod(1);
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
@@ -4025,6 +4272,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.sceneId = g_activeScene;
         settings.wind = g_wind;
         applyCanonicalFireSettings(settings);
+        applySceneEmitterParams(settings);
         settings.renderDebugMode = g_renderDebugMode;
         settings.turbulence = std::max(g_turbulence, kTurbulence);
         settings.detail = 0.92f;

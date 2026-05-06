@@ -84,6 +84,14 @@ struct FireSettings {
     float exposure = 1.0f;
     float reflectionGain = 1.0f;
     float smokeDarkness = 1.0f;
+    float emitterCenterX = 0.0f;
+    float emitterCenterZ = 0.0f;
+    float emitterHeightNorm = 0.0f;
+    float emitterHeightBandNorm = 0.06f;
+    float emitterRadius = 0.48f;
+    int burnerCenterCount = 0;
+    float burnerCenterX[4] = {};
+    float burnerCenterZ[4] = {};
 };
 
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);

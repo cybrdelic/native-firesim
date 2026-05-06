@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -77,19 +78,58 @@ def find_model(root: Path) -> Path:
     return sorted(candidates, key=score)[0]
 
 
-def load_as_mesh(model_path: Path) -> tuple[trimesh.Trimesh, dict]:
+def mesh_base_color(mesh: trimesh.Trimesh) -> np.ndarray:
+    material = getattr(mesh.visual, "material", None)
+    color = getattr(material, "baseColorFactor", None)
+    if color is None:
+        return np.array([0.55, 0.55, 0.55, 1.0], dtype=np.float32)
+    color = np.array(color, dtype=np.float32).reshape(-1)
+    if color.size < 3:
+        return np.array([0.55, 0.55, 0.55, 1.0], dtype=np.float32)
+    if color.max(initial=1.0) > 1.0:
+        color = color / 255.0
+    if color.size == 3:
+        color = np.concatenate([color, np.array([1.0], dtype=np.float32)])
+    return color[:4].astype(np.float32)
+
+
+def convert_up_axis(mesh: trimesh.Trimesh, source: dict) -> trimesh.Trimesh:
+    if source.get("upAxis", "y").lower() != "z":
+        return mesh
+    converted = mesh.copy()
+    vertices = converted.vertices.copy()
+    converted.vertices = np.column_stack((vertices[:, 0], vertices[:, 2], -vertices[:, 1]))
+    converted.remove_unreferenced_vertices()
+    return converted
+
+
+def load_as_mesh(model_path: Path, source: dict) -> tuple[trimesh.Trimesh, dict]:
     loaded = trimesh.load(model_path, force="scene", process=False)
+    excluded_materials = {str(v).lower() for v in source.get("excludeMaterialNames", [])}
     if isinstance(loaded, trimesh.Scene):
-        mesh = loaded.to_geometry() if hasattr(loaded, "to_geometry") else None
-        if not isinstance(mesh, trimesh.Trimesh):
+        pieces = []
+        colors = []
+        for name, geom in loaded.geometry.items():
+            material_name = str(getattr(getattr(geom.visual, "material", None), "name", "")).lower()
+            if material_name in excluded_materials:
+                continue
+            part = convert_up_axis(geom.copy(), source)
+            color = mesh_base_color(geom)
+            pieces.append(part)
+            colors.append(np.repeat(color.reshape(1, 4), len(part.vertices), axis=0))
+        if not pieces:
             raise SystemExit(f"Scene had no mesh geometry: {model_path}")
+        mesh = trimesh.util.concatenate(pieces)
+        mesh.visual.vertex_colors = np.vstack(colors)
         scene_stats = {
             "nodeCount": len(loaded.graph.nodes_geometry),
             "geometryCount": len(loaded.geometry),
+            "runtimeGeometryCount": len(pieces),
         }
     elif isinstance(loaded, trimesh.Trimesh):
-        mesh = loaded
-        scene_stats = {"nodeCount": 1, "geometryCount": 1}
+        mesh = convert_up_axis(loaded, source)
+        mesh.visual.vertex_colors = np.repeat(mesh_base_color(loaded).reshape(1, 4), len(mesh.vertices), axis=0)
+        scene_stats = {"nodeCount": 1, "geometryCount": 1, "runtimeGeometryCount": 1}
     else:
         raise SystemExit(f"Unsupported loaded asset type: {type(loaded).__name__}")
 
@@ -102,6 +142,9 @@ def load_as_mesh(model_path: Path) -> tuple[trimesh.Trimesh, dict]:
 def normalize_mesh(mesh: trimesh.Trimesh, scale: float) -> trimesh.Trimesh:
     normalized = mesh.copy()
     normalized.apply_scale(float(scale))
+    post_scale = getattr(normalize_mesh, "post_scale", None)
+    if post_scale is not None:
+        normalized.apply_scale(post_scale)
     bounds = normalized.bounds
     center_xz = np.array([(bounds[0, 0] + bounds[1, 0]) * 0.5, bounds[0, 1], (bounds[0, 2] + bounds[1, 2]) * 0.5])
     normalized.apply_translation(-center_xz)
@@ -109,7 +152,58 @@ def normalize_mesh(mesh: trimesh.Trimesh, scale: float) -> trimesh.Trimesh:
     return normalized
 
 
-def emitter_mask(points: np.ndarray, bounds: np.ndarray, distances: np.ndarray, source: dict) -> np.ndarray:
+def crop_mesh_height(mesh: trimesh.Trimesh, source: dict) -> trimesh.Trimesh:
+    crop = source.get("runtimeCrop", {})
+    if not crop:
+        return mesh
+    bounds = mesh.bounds
+    height = max(float(bounds[1, 1] - bounds[0, 1]), 1e-6)
+    centers_y = mesh.triangles_center[:, 1]
+    keep = np.ones(len(mesh.faces), dtype=bool)
+    if "maxHeightFraction" in crop:
+        max_y = bounds[0, 1] + height * float(crop["maxHeightFraction"])
+        keep &= centers_y <= max_y
+    if "minHeightFraction" in crop:
+        min_y = bounds[0, 1] + height * float(crop["minHeightFraction"])
+        keep &= centers_y >= min_y
+    if np.count_nonzero(keep) == 0:
+        raise SystemExit(f"Runtime crop removed all faces for {source.get('id', source.get('title', 'asset'))}")
+    cropped = mesh.copy()
+    cropped.update_faces(keep)
+    cropped.remove_unreferenced_vertices()
+    return cropped
+
+
+def derive_burner_centers(mesh: trimesh.Trimesh) -> np.ndarray:
+    bounds = mesh.bounds.astype(np.float32)
+    extents = np.maximum(bounds[1] - bounds[0], 1e-6)
+    vertices = mesh.vertices.astype(np.float32)
+    y_norm = (vertices[:, 1] - bounds[0, 1]) / extents[1]
+    edge_margin_x = extents[0] * 0.12
+    edge_margin_z = extents[2] * 0.12
+    candidates = vertices[
+        (y_norm > 0.45)
+        & (vertices[:, 0] > bounds[0, 0] + edge_margin_x)
+        & (vertices[:, 0] < bounds[1, 0] - edge_margin_x)
+        & (vertices[:, 2] > bounds[0, 2] + edge_margin_z)
+        & (vertices[:, 2] < bounds[1, 2] - edge_margin_z)
+        & (np.abs(vertices[:, 0]) > extents[0] * 0.10)
+        & (np.abs(vertices[:, 2]) > extents[2] * 0.10)
+    ]
+    centers: list[list[float]] = []
+    for sx in (-1.0, 1.0):
+        for sz in (-1.0, 1.0):
+            q = candidates[(candidates[:, 0] * sx > 0.0) & (candidates[:, 2] * sz > 0.0)]
+            if len(q) >= 6:
+                centers.append([
+                    float(np.median(q[:, 0])),
+                    float(np.percentile(q[:, 1], 70)),
+                    float(np.median(q[:, 2])),
+                ])
+    return np.asarray(centers, dtype=np.float32)
+
+
+def emitter_mask(points: np.ndarray, bounds: np.ndarray, distances: np.ndarray, source: dict, burner_centers: np.ndarray) -> np.ndarray:
     hint = source.get("emitterHint", {})
     mode = hint.get("mode", "low-center-bed")
     extents = np.maximum(bounds[1] - bounds[0], 1e-6)
@@ -120,9 +214,21 @@ def emitter_mask(points: np.ndarray, bounds: np.ndarray, distances: np.ndarray, 
     near_surface = distances <= (max(extents) / 18.0)
 
     if mode == "burner-ring":
-        inner = radius * 0.58
-        outer = radius * 1.12
-        return (y_norm <= height) & (radial >= inner) & (radial <= outer) & near_surface
+        centers = burner_centers if len(burner_centers) > 0 else np.zeros((1, 3), dtype=np.float32)
+        ring_radius = radius * 0.45 if len(burner_centers) > 0 else radius
+        inner = ring_radius * 0.58
+        outer = ring_radius * 1.12
+        if "worldHeightMeters" in hint:
+            center_y = float(hint["worldHeightMeters"])
+            band = float(hint.get("heightBandMeters", max(extents[1] * 0.20, 0.04)))
+            height_mask = np.abs(points[:, 1] - center_y) <= band * 0.5
+        else:
+            height_mask = y_norm <= height
+        distances_to_centers = np.full(len(points), np.inf, dtype=np.float32)
+        for center in centers:
+            center_radial = np.sqrt((points[:, 0] - center[0]) ** 2 + (points[:, 2] - center[2]) ** 2)
+            distances_to_centers = np.minimum(distances_to_centers, center_radial)
+        return height_mask & (distances_to_centers >= inner) & (distances_to_centers <= outer)
 
     return (y_norm <= height) & (radial <= radius) & near_surface
 
@@ -152,7 +258,41 @@ def build_sdf_and_emitter(mesh: trimesh.Trimesh, source: dict, resolution: int) 
         except Exception:
             sign_mode = "unsigned"
 
-    emitter = emitter_mask(grid, bounds, distances, source)
+    all_burner_centers = derive_burner_centers(mesh) if source.get("emitterHint", {}).get("mode") == "burner-ring" else np.zeros((0, 3), dtype=np.float32)
+    hint = source.get("emitterHint", {})
+    selected_burner_index = int(hint.get("selectedBurnerIndex", -1))
+    if len(all_burner_centers) > 0 and 0 <= selected_burner_index < len(all_burner_centers):
+        active_burner_centers = all_burner_centers[selected_burner_index:selected_burner_index + 1]
+    else:
+        active_burner_centers = all_burner_centers
+        selected_burner_index = -1
+    emitter = emitter_mask(grid, bounds, distances, source, active_burner_centers)
+    active_points = grid[emitter]
+    if len(active_points) > 0:
+        center = active_points.mean(axis=0)
+        if len(active_burner_centers) > 0:
+            nearest = np.full(len(active_points), np.inf, dtype=np.float32)
+            for burner_center in active_burner_centers:
+                d = np.sqrt((active_points[:, 0] - burner_center[0]) ** 2 + (active_points[:, 2] - burner_center[2]) ** 2)
+                nearest = np.minimum(nearest, d)
+            radial = nearest
+        else:
+            radial = np.sqrt((active_points[:, 0] - center[0]) ** 2 + (active_points[:, 2] - center[2]) ** 2)
+        derived = {
+            "centerXMeters": float(center[0]),
+            "centerYMeters": float(center[1]),
+            "centerZMeters": float(center[2]),
+            "radiusMeters": float(np.percentile(radial, 85)) if len(radial) > 1 else 0.05,
+            "heightBandMeters": float(max(active_points[:, 1].max() - active_points[:, 1].min(), max(extents[1] / resolution, 0.02))),
+        }
+    else:
+        derived = {
+            "centerXMeters": 0.0,
+            "centerYMeters": float(source.get("emitterHint", {}).get("worldHeightMeters", bounds[0, 1])),
+            "centerZMeters": 0.0,
+            "radiusMeters": float(source.get("emitterHint", {}).get("radiusFraction", 0.35)) * max(extents[0], extents[2]),
+            "heightBandMeters": float(source.get("emitterHint", {}).get("heightBandMeters", max(extents[1] / 8.0, 0.04))),
+        }
     payload = {
         "schemaVersion": 1,
         "coordinateSystem": "meters, +Y up, centered X/Z, minY grounded",
@@ -162,6 +302,11 @@ def build_sdf_and_emitter(mesh: trimesh.Trimesh, source: dict, resolution: int) 
         "sdfSignMode": sign_mode,
         "activeEmitterVoxels": int(np.count_nonzero(emitter)),
         "emitterMode": source.get("emitterHint", {}).get("mode", "low-center-bed"),
+        "emitterHint": source.get("emitterHint", {}),
+        "burnerCentersMeters": active_burner_centers.round(6).tolist(),
+        "allBurnerCentersMeters": all_burner_centers.round(6).tolist(),
+        "selectedBurnerIndex": selected_burner_index,
+        "derivedEmitter": derived,
         "sdfGrid": "sdf-grid.npz",
     }
     return payload, signed_distance.reshape((resolution, resolution, resolution)), emitter.reshape((resolution, resolution, resolution))
@@ -189,8 +334,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix=f"firesim-{args.asset_id}-") as temp_name:
         root = unpack_input(input_path, Path(temp_name))
         model_path = find_model(root if input_path.suffix.lower() == ".zip" else input_path)
-        mesh, scene_stats = load_as_mesh(model_path)
+        mesh, scene_stats = load_as_mesh(model_path, source)
+        mesh = crop_mesh_height(mesh, source)
+        normalize_mesh.post_scale = np.array(source.get("postNormalizeScale", [1.0, 1.0, 1.0]), dtype=np.float64)
         mesh = normalize_mesh(mesh, float(source.get("importScaleMeters", 1.0)))
+        normalize_mesh.post_scale = None
 
         scene_path = output_dir / "scene.glb"
         mesh.export(scene_path)
@@ -217,6 +365,13 @@ def main() -> int:
             **scene_stats,
         }
         normals = mesh.vertex_normals if mesh.vertex_normals is not None and len(mesh.vertex_normals) == len(mesh.vertices) else np.zeros_like(mesh.vertices)
+        colors = getattr(mesh.visual, "vertex_colors", None)
+        if colors is None or len(colors) != len(mesh.vertices):
+            base = np.array(source.get("runtimeBaseColor", [0.55, 0.55, 0.55]), dtype=np.float32)
+            colors = np.repeat(base.reshape(1, 3), len(mesh.vertices), axis=0)
+        colors = colors[:, :3].astype(np.float32)
+        if colors.max(initial=1.0) > 1.0:
+            colors = colors / 255.0
         runtime_mesh = {
             "schemaVersion": 1,
             "assetId": args.asset_id,
@@ -225,6 +380,7 @@ def main() -> int:
             "boundsMaxMeters": bounds[1].round(6).tolist(),
             "vertices": mesh.vertices.astype(np.float32).round(6).tolist(),
             "normals": normals.astype(np.float32).round(6).tolist(),
+            "colors": colors.round(6).tolist(),
             "triangles": mesh.faces.astype(np.uint32).tolist(),
             "material": {
                 "sourceType": source.get("fireSourceType", ""),
@@ -297,6 +453,12 @@ def main() -> int:
         }
         write_json(output_dir / "asset-manifest.json", asset_manifest)
         (output_dir / "ATTRIBUTION.txt").write_text(asset_manifest["attribution"] + "\n", encoding="utf-8", newline="\n")
+        overlay_script = Path(__file__).resolve().parent / "render_emitter_debug_overlay.py"
+        if overlay_script.exists():
+            subprocess.run(
+                [sys.executable, str(overlay_script), "--scene-dir", str(output_dir)],
+                check=True,
+            )
 
     print(f"imported {args.asset_id} -> {output_dir}")
     return 0
