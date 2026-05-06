@@ -2727,8 +2727,89 @@ std::size_t shadowByteCount() {
     return static_cast<std::size_t>(g_lightNx) * static_cast<std::size_t>(g_lightNy) * static_cast<std::size_t>(g_lightNz) * sizeof(float);
 }
 
+enum class FieldOwner {
+    PhysicalScalar,
+    OpticalScalar,
+    Velocity,
+    Lighting
+};
+
+struct SnapshotFloatField {
+    const char* label;
+    float** slots;
+    std::size_t bytes;
+    FieldOwner owner;
+};
+
+struct SnapshotFloat4Field {
+    const char* label;
+    float4** slots;
+    std::size_t bytes;
+    FieldOwner owner;
+};
+
+struct SnapshotFloatCopy {
+    const char* label;
+    float** slots;
+    const float* source;
+    std::size_t bytes;
+    FieldOwner owner;
+};
+
+struct SnapshotFloat4Copy {
+    const char* label;
+    float4** slots;
+    const float4* source;
+    std::size_t bytes;
+    FieldOwner owner;
+};
+
 bool copyRenderSnapshotField(const char* label, void* dst, const void* src, std::size_t bytes) {
     return check(label, cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, 0));
+}
+
+bool allocateSnapshotFloatFields(const SnapshotFloatField* fields, int count, int slot) {
+    for (int i = 0; i < count; ++i) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "cudaMalloc render snapshot %s", fields[i].label);
+        if (!check(label, cudaMalloc(&fields[i].slots[slot], fields[i].bytes))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool allocateSnapshotFloat4Fields(const SnapshotFloat4Field* fields, int count, int slot) {
+    for (int i = 0; i < count; ++i) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "cudaMalloc render snapshot %s", fields[i].label);
+        if (!check(label, cudaMalloc(&fields[i].slots[slot], fields[i].bytes))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool copySnapshotFloatFields(const SnapshotFloatCopy* fields, int count, int slot) {
+    for (int i = 0; i < count; ++i) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "snapshot %s", fields[i].label);
+        if (!copyRenderSnapshotField(label, fields[i].slots[slot], fields[i].source, fields[i].bytes)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool copySnapshotFloat4Fields(const SnapshotFloat4Copy* fields, int count, int slot) {
+    for (int i = 0; i < count; ++i) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "snapshot %s", fields[i].label);
+        if (!copyRenderSnapshotField(label, fields[i].slots[slot], fields[i].source, fields[i].bytes)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool allocateRenderSnapshotSlot(
@@ -2739,21 +2820,27 @@ bool allocateRenderSnapshotSlot(
     std::size_t wBytes,
     std::size_t lightBytes,
     std::size_t shadowBytes) {
-    return check("cudaMalloc render snapshot heat", cudaMalloc(&g_renderHeat[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot fuel", cudaMalloc(&g_renderFuel[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot oxygen", cudaMalloc(&g_renderOxygen[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot soot", cudaMalloc(&g_renderSoot[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot char", cudaMalloc(&g_renderChar[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot ash", cudaMalloc(&g_renderAsh[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot pyrolysis", cudaMalloc(&g_renderPyrolysis[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot progress", cudaMalloc(&g_renderProgress[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot turbulence energy", cudaMalloc(&g_renderTurbulenceEnergy[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot soot optics", cudaMalloc(&g_renderSootOptics[slot], scalarBytes)) &&
-        check("cudaMalloc render snapshot u", cudaMalloc(&g_renderU[slot], uBytes)) &&
-        check("cudaMalloc render snapshot v", cudaMalloc(&g_renderV[slot], vBytes)) &&
-        check("cudaMalloc render snapshot w", cudaMalloc(&g_renderW[slot], wBytes)) &&
-        check("cudaMalloc render snapshot scene light", cudaMalloc(&g_renderSceneLight[slot], lightBytes)) &&
-        check("cudaMalloc render snapshot scene shadow", cudaMalloc(&g_renderSceneShadow[slot], shadowBytes));
+    const SnapshotFloatField scalarSnapshots[] = {
+        {"heat", g_renderHeat, scalarBytes, FieldOwner::PhysicalScalar},
+        {"fuel", g_renderFuel, scalarBytes, FieldOwner::PhysicalScalar},
+        {"oxygen", g_renderOxygen, scalarBytes, FieldOwner::PhysicalScalar},
+        {"soot", g_renderSoot, scalarBytes, FieldOwner::PhysicalScalar},
+        {"char", g_renderChar, scalarBytes, FieldOwner::PhysicalScalar},
+        {"ash", g_renderAsh, scalarBytes, FieldOwner::PhysicalScalar},
+        {"pyrolysis", g_renderPyrolysis, scalarBytes, FieldOwner::PhysicalScalar},
+        {"progress", g_renderProgress, scalarBytes, FieldOwner::PhysicalScalar},
+        {"turbulence energy", g_renderTurbulenceEnergy, scalarBytes, FieldOwner::PhysicalScalar},
+        {"soot optics", g_renderSootOptics, scalarBytes, FieldOwner::OpticalScalar},
+        {"u", g_renderU, uBytes, FieldOwner::Velocity},
+        {"v", g_renderV, vBytes, FieldOwner::Velocity},
+        {"w", g_renderW, wBytes, FieldOwner::Velocity},
+        {"scene shadow", g_renderSceneShadow, shadowBytes, FieldOwner::Lighting},
+    };
+    const SnapshotFloat4Field vectorSnapshots[] = {
+        {"scene light", g_renderSceneLight, lightBytes, FieldOwner::Lighting},
+    };
+    return allocateSnapshotFloatFields(scalarSnapshots, static_cast<int>(sizeof(scalarSnapshots) / sizeof(scalarSnapshots[0])), slot) &&
+        allocateSnapshotFloat4Fields(vectorSnapshots, static_cast<int>(sizeof(vectorSnapshots) / sizeof(vectorSnapshots[0])), slot);
 }
 
 bool publishRenderSnapshot() {
@@ -2764,21 +2851,27 @@ bool publishRenderSnapshot() {
     }
 
     const std::size_t scalarBytes = scalarByteCount();
-    if (!copyRenderSnapshotField("snapshot heat", g_renderHeat[slot], g_heat, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot fuel", g_renderFuel[slot], g_fuel, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot oxygen", g_renderOxygen[slot], g_oxygen, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot soot", g_renderSoot[slot], g_soot, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot char", g_renderChar[slot], g_char, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot ash", g_renderAsh[slot], g_ash, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot pyrolysis", g_renderPyrolysis[slot], g_pyrolysis, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot progress", g_renderProgress[slot], g_progress, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot turbulence energy", g_renderTurbulenceEnergy[slot], g_turbulenceEnergy, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot soot optics", g_renderSootOptics[slot], g_sootOptics, scalarBytes) ||
-        !copyRenderSnapshotField("snapshot u", g_renderU[slot], g_u, uByteCount()) ||
-        !copyRenderSnapshotField("snapshot v", g_renderV[slot], g_v, vByteCount()) ||
-        !copyRenderSnapshotField("snapshot w", g_renderW[slot], g_w, wByteCount()) ||
-        !copyRenderSnapshotField("snapshot scene light", g_renderSceneLight[slot], g_sceneLight, lightByteCount()) ||
-        !copyRenderSnapshotField("snapshot scene shadow", g_renderSceneShadow[slot], g_sceneShadow, shadowByteCount())) {
+    const SnapshotFloatCopy scalarCopies[] = {
+        {"heat", g_renderHeat, g_heat, scalarBytes, FieldOwner::PhysicalScalar},
+        {"fuel", g_renderFuel, g_fuel, scalarBytes, FieldOwner::PhysicalScalar},
+        {"oxygen", g_renderOxygen, g_oxygen, scalarBytes, FieldOwner::PhysicalScalar},
+        {"soot", g_renderSoot, g_soot, scalarBytes, FieldOwner::PhysicalScalar},
+        {"char", g_renderChar, g_char, scalarBytes, FieldOwner::PhysicalScalar},
+        {"ash", g_renderAsh, g_ash, scalarBytes, FieldOwner::PhysicalScalar},
+        {"pyrolysis", g_renderPyrolysis, g_pyrolysis, scalarBytes, FieldOwner::PhysicalScalar},
+        {"progress", g_renderProgress, g_progress, scalarBytes, FieldOwner::PhysicalScalar},
+        {"turbulence energy", g_renderTurbulenceEnergy, g_turbulenceEnergy, scalarBytes, FieldOwner::PhysicalScalar},
+        {"soot optics", g_renderSootOptics, g_sootOptics, scalarBytes, FieldOwner::OpticalScalar},
+        {"u", g_renderU, g_u, uByteCount(), FieldOwner::Velocity},
+        {"v", g_renderV, g_v, vByteCount(), FieldOwner::Velocity},
+        {"w", g_renderW, g_w, wByteCount(), FieldOwner::Velocity},
+        {"scene shadow", g_renderSceneShadow, g_sceneShadow, shadowByteCount(), FieldOwner::Lighting},
+    };
+    const SnapshotFloat4Copy vectorCopies[] = {
+        {"scene light", g_renderSceneLight, g_sceneLight, lightByteCount(), FieldOwner::Lighting},
+    };
+    if (!copySnapshotFloatFields(scalarCopies, static_cast<int>(sizeof(scalarCopies) / sizeof(scalarCopies[0])), slot) ||
+        !copySnapshotFloat4Fields(vectorCopies, static_cast<int>(sizeof(vectorCopies) / sizeof(vectorCopies[0])), slot)) {
         return false;
     }
 
