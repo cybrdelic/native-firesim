@@ -43,10 +43,10 @@ constexpr float kTurbulence = 1.34f;
 constexpr float kTargetFrameSeconds = 1.0f / 300.0f;
 constexpr float kWorkerMaxPublishFps = 180.0f;
 constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 7u;
+constexpr DWORD kSharedViewportVersion = 8u;
 constexpr int kSharedFrameSlots = 3;
 constexpr int kDisplayFrameSlots = 3;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV7";
+constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV8";
 constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
     return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
@@ -59,6 +59,7 @@ constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
 constexpr int kWorkerPhysicsFrameInterval = 30;
+constexpr int kSceneCount = 3;
 
 struct UiRect {
     int x;
@@ -80,6 +81,11 @@ constexpr UiRect kToolButtonRects[4] = {
 };
 constexpr UiRect kOverlayButtonRect = {104, 486, 72, 28};
 constexpr UiRect kResetButtonRect = {184, 486, 72, 28};
+constexpr UiRect kSceneButtonRects[kSceneCount] = {
+    {336, 20, 74, 24},
+    {418, 20, 74, 24},
+    {500, 20, 90, 24},
+};
 constexpr UiRect kWindSliderRect = {790, 214, 130, 16};
 constexpr UiRect kTurbulenceSliderRect = {790, 304, 130, 16};
 
@@ -173,6 +179,7 @@ float g_cameraPitch = 0.08f;
 float g_cameraDistance = 2.62f;
 float g_displayExposure = kExposure;
 int g_activeGizmo = 1;
+int g_activeScene = 0;
 int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
@@ -217,6 +224,7 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         a.reset == b.reset &&
         a.showGizmos == b.showGizmos &&
         a.activeGizmo == b.activeGizmo &&
+        a.sceneId == b.sceneId &&
         a.wind == b.wind &&
         a.turbulence == b.turbulence &&
         a.detail == b.detail &&
@@ -523,6 +531,14 @@ const char* renderDebugName(int mode) {
     }
 }
 
+const char* sceneName(int scene) {
+    switch (scene) {
+    case 1: return "CAMPFIRE";
+    case 2: return "GAS BURNER";
+    default: return "ROOM";
+    }
+}
+
 void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
     const bool active = activeTool == tool;
     fillRect(pixels, rect, active ? 0.105f : 0.048f, active ? 0.059f : 0.050f, active ? 0.037f : 0.052f, 1.0f);
@@ -552,6 +568,12 @@ void drawCommandButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, c
     fillRect(pixels, rect, active ? 0.080f : 0.046f, active ? 0.078f : 0.048f, active ? 0.064f : 0.050f, 1.0f);
     strokeRect(pixels, rect, active ? 0.78f : 0.22f, active ? 0.74f : 0.24f, active ? 0.55f : 0.25f, active ? 0.90f : 0.70f);
     drawCenteredText(pixels, rect, label, 1, 0.84f, 0.85f, 0.80f, 0.92f);
+}
+
+void drawSceneButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* label, bool active) {
+    fillRect(pixels, rect, active ? 0.036f : 0.023f, active ? 0.052f : 0.026f, active ? 0.070f : 0.028f, active ? 0.95f : 0.76f);
+    strokeRect(pixels, rect, active ? 0.38f : 0.16f, active ? 0.66f : 0.18f, active ? 1.00f : 0.20f, active ? 0.92f : 0.68f);
+    drawCenteredText(pixels, rect, label, 1, active ? 0.62f : 0.54f, active ? 0.78f : 0.58f, active ? 1.0f : 0.62f, active ? 0.96f : 0.78f);
 }
 
 void drawSlider(std::vector<std::uint32_t>& pixels, const UiRect& rect, float normalized, float cr, float cg, float cb) {
@@ -615,7 +637,10 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
 
     drawText(pixels, 30, 26, "NATIVE FIRESIM", 1, 0.88f, 0.90f, 0.84f, 0.96f);
     drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D FP16 D3D" : "NO LIVE CUDA FRAME", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
-    drawText(pixels, 628, 26, cudaBackend ? "RMB ORBIT   WHEEL ZOOM" : "NO CUSTOM CUDA KERNELS", 1, 0.70f, 0.72f, 0.68f, 0.88f);
+    drawSceneButton(pixels, kSceneButtonRects[0], "ROOM", settings.sceneId == 0);
+    drawSceneButton(pixels, kSceneButtonRects[1], "CAMP", settings.sceneId == 1);
+    drawSceneButton(pixels, kSceneButtonRects[2], "BURNER", settings.sceneId == 2);
+    drawText(pixels, 640, 26, cudaBackend ? "RMB ORBIT   WHEEL ZOOM" : "NO CUSTOM CUDA KERNELS", 1, 0.70f, 0.72f, 0.68f, 0.88f);
 
     drawCenteredText(pixels, {kRailRect.x, 78, kRailRect.w, 14}, "TOOLS", 1, 0.60f, 0.62f, 0.58f, 0.82f);
     drawToolButton(pixels, kToolButtonRects[0], 1, "FIRE", settings.activeGizmo);
@@ -628,6 +653,7 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
     drawText(pixels, 790, 92, "FIELD", 2, 0.86f, 0.88f, 0.82f, 0.95f);
     drawText(pixels, 790, 132, "ACTIVE", 1, 0.50f, 0.52f, 0.50f, 0.86f);
     drawText(pixels, 790, 150, toolName(settings.activeGizmo), 2, 0.96f, 0.65f, 0.26f, 0.95f);
+    drawText(pixels, 790, 172, sceneName(settings.sceneId), 1, 0.54f, 0.74f, 1.0f, 0.86f);
 
     char value[32] = {};
     drawText(pixels, 790, 194, "WIND", 1, 0.64f, 0.82f, 0.88f, 0.88f);
@@ -647,7 +673,7 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "NO LIVE CUDA FRAME   WORKER STARTING/STALE   D DEBUG   C CLEAN",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   S SCENE   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "NO LIVE CUDA FRAME   S SCENE   WORKER STARTING/STALE   D DEBUG   C CLEAN",
         1,
         0.76f,
         0.78f,
@@ -685,6 +711,15 @@ int hitTestCommandButton(int frameX, int frameY) {
         return 2;
     }
     return 0;
+}
+
+int hitTestSceneButton(int frameX, int frameY) {
+    for (int i = 0; i < kSceneCount; ++i) {
+        if (contains(kSceneButtonRects[i], frameX, frameY)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 int hitTestSlider(int frameX, int frameY) {
@@ -729,9 +764,10 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | %.0f fps | %s | debug %s | wind %.2f | turbulence %.2f | %.64s",
+        "Native FireSim %s | %.0f fps | %s scene | %s | debug %s | wind %.2f | turbulence %.2f | %.64s",
         g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
         headlineFps,
+        sceneName(g_activeScene),
         toolName(g_activeGizmo),
         renderDebugName(g_renderDebugMode),
         g_wind,
@@ -1255,6 +1291,13 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_activeGizmo = tool;
             return 0;
         }
+        if (const int scene = hitTestSceneButton(g_pointerFrameX, g_pointerFrameY); scene >= 0) {
+            if (g_activeScene != scene) {
+                g_activeScene = scene;
+                g_needsReset = true;
+            }
+            return 0;
+        }
         if (const int command = hitTestCommandButton(g_pointerFrameX, g_pointerFrameY); command != 0) {
             if (command == 1) {
                 g_showGizmos = !g_showGizmos;
@@ -1334,6 +1377,11 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == 'D') {
             g_renderDebugMode = (g_renderDebugMode + 1) % 7;
+            return 0;
+        }
+        if (wParam == 'S') {
+            g_activeScene = (g_activeScene + 1) % kSceneCount;
+            g_needsReset = true;
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
@@ -1653,6 +1701,7 @@ int argumentIntValue(const std::string& args, const char* prefix, int fallback, 
 }
 
 void applyCanonicalFireSettings(FireSettings& settings) {
+    settings.sceneId = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
     settings.cinematicMode = 1;
     settings.raymarchSteps = kRaymarchSteps;
     settings.emberCount = kEmberCount;
@@ -2993,6 +3042,7 @@ int runInputStressTest() {
         settings.mouseY = (i % 3) == 0 ? -3.0f : 4.0f;
         settings.showGizmos = 1;
         settings.activeGizmo = (i % 8) - 2;
+        settings.sceneId = i % kSceneCount;
         settings.wind = -2.0f + static_cast<float>(i % 17) * 0.25f;
         settings.turbulence = -1.0f + static_cast<float>(i % 23) * 0.15f;
         settings.smoke = -0.5f + static_cast<float>(i % 11) * 0.24f;
@@ -3547,6 +3597,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.reset = g_needsReset ? 1 : 0;
         settings.showGizmos = (g_showGizmos && !g_cleanViewportMode) ? 1 : 0;
         settings.activeGizmo = g_activeGizmo;
+        settings.sceneId = g_activeScene;
         settings.wind = g_wind;
         applyCanonicalFireSettings(settings);
         settings.renderDebugMode = g_renderDebugMode;

@@ -68,6 +68,7 @@ struct FireSettings {
     int reset = 0;
     int showGizmos = 1;
     int activeGizmo = 1;
+    int sceneId = 0;
     float wind = 0.0f;
     float turbulence = 0.72f;
     float detail = 0.88f;
