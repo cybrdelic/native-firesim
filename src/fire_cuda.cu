@@ -1984,7 +1984,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.38f, 0.92f, shearNoise + (0.72f - fv) * 0.12f + reactionFront * 0.10f) *
                 smoothstepf(1.0f, 0.02f, fv) *
                 fieldEdge;
-            const float burnerLowJet = p.sceneId == 2 ? smoothstepf(0.095f, 0.000f, fv) * smoothstepf(0.08f, 0.82f, fuel) * smoothstepf(0.54f, 1.0f, oxygen) : 0.0f;
+            const float burnerLowJet = p.sceneId == 2 ? smoothstepf(0.105f, 0.000f, fv) * smoothstepf(0.05f, 0.58f, fuel + heat * 0.025f) * smoothstepf(0.50f, 1.0f, oxygen) : 0.0f;
             const float burnerPortJet = p.sceneId == 2 ? burnerLowJet * smoothstepf(0.55f, 0.96f, fineNoise + shearNoise * 0.22f) : 0.0f;
             const float campTongueBias = p.sceneId == 1 ? smoothstepf(0.04f, 0.62f, fuel + pyrolysis * 0.42f) * smoothstepf(0.82f, 0.05f, fv) : 0.0f;
             const float convectiveSheet = smoothstepf(0.36f, 0.84f, shearNoise + heat * 0.046f + plumeNoise * 0.18f + lesBreakup * 0.12f + burnerPortJet * 0.56f + campTongueBias * 0.12f) * smoothstepf(p.sceneId == 2 ? 0.23f : 0.96f, 0.035f, fv) * fieldEdge;
@@ -2059,18 +2059,19 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float orangeEdge = (1.0f - whiteFilament * 0.72f) * thinFront * reactionFront * flameSheet * (0.52f + breakup * 0.95f) * smoothstepf(0.08f, 0.80f, oxygen);
             float3 flameColor = lerp3(make_float3(1.32f, 0.27f, 0.038f), blackbodyColor(tempK), saturate(whiteCore * 0.92f + whiteFilament * 0.62f));
             if (p.sceneId == 2) {
-                const float blueBase = burnerPortJet * smoothstepf(0.018f, 0.16f, flameDensity + combustion * 0.18f);
-                flameColor = lerp3(flameColor, make_float3(0.10f, 0.36f, 2.20f), saturate(blueBase * 1.24f));
+                const float blueBase = burnerPortJet * smoothstepf(0.010f, 0.11f, flameDensity + combustion * 0.18f);
+                flameColor = lerp3(make_float3(0.020f, 0.18f, 2.40f), make_float3(0.36f, 0.58f, 1.95f), saturate(whiteCore * 0.34f + blueBase * 0.20f));
             } else if (p.sceneId == 1) {
                 flameColor = lerp3(flameColor, make_float3(1.42f, 0.22f, 0.025f), saturate(campTongueBias * (1.0f - whiteCore) * 0.42f));
             }
             float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.10f + whiteCore * 0.38f));
             if (p.sceneId == 2) {
-                flameEmission = add3(flameEmission, mul3(make_float3(0.05f, 0.33f, 2.85f), burnerPortJet * combustion * stepT * 1.65f));
+                flameEmission = mul3(flameEmission, 0.42f);
+                flameEmission = add3(flameEmission, mul3(make_float3(0.012f, 0.28f, 5.20f), burnerPortJet * combustion * stepT * 4.40f));
             }
             flameEmission = add3(flameEmission, mul3(make_float3(1.05f, 0.94f, 0.76f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.24f));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * 2.10f));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * flameDensity * radiantPower * stepT * 0.92f * (1.0f - whiteCore * 0.62f)));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : 2.10f)));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.035f : 0.92f) * (1.0f - whiteCore * 0.62f)));
             const float upperSmokeMask = smoothstepf(0.18f, 0.72f, fv) * scatterSeparation;
             const float ashVeil = saturate(ash * 0.014f + smoothstepf(0.30f, 0.88f, fv) * (1.0f - sootLoad) * 0.003f);
             const float3 smokeBlack = make_float3(0.0018f, 0.0020f, 0.0024f);
@@ -2233,25 +2234,28 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     const float h1 = hash21(make_float2(seed, 9.1f));
     const float h2 = hash21(make_float2(seed, 19.4f));
     const float h3 = hash21(make_float2(seed, 31.6f));
+    if (p.sceneId == 1 && h2 > 0.34f) {
+        return;
+    }
     if (p.sceneId == 2 && h0 > 0.14f) {
         return;
     }
-    const float sceneLift = p.sceneId == 1 ? 1.18f : (p.sceneId == 2 ? 0.38f : 0.86f);
-    const float life = fracf(p.time * (0.36f + h2 * 0.28f + (p.sceneId == 2 ? 0.42f : 0.0f)) + h0);
-    const float t = life * (p.sceneId == 1 ? 1.72f : (p.sceneId == 2 ? 0.54f : 1.18f));
+    const float sceneLift = p.sceneId == 1 ? 0.74f : (p.sceneId == 2 ? 0.24f : 0.86f);
+    const float life = fracf(p.time * (0.24f + h2 * 0.20f + (p.sceneId == 2 ? 0.42f : 0.0f)) + h0);
+    const float t = life * (p.sceneId == 1 ? 1.10f : (p.sceneId == 2 ? 0.42f : 1.18f));
     const float spawnRadius = p.sceneId == 1 ? 0.62f : (p.sceneId == 2 ? 0.34f : 0.48f);
     const float spawnAngle = h0 * 6.2831853f;
     const float ringBias = p.sceneId == 2 ? 0.82f + h1 * 0.26f : sqrtf(h1);
     const float startX = cosf(spawnAngle) * spawnRadius * ringBias;
     const float startZ = sinf(spawnAngle) * spawnRadius * ringBias * (p.sceneId == 1 ? 0.72f : 1.0f);
     const float3 sparkWorld = make_float3(
-        startX + ((h1 - 0.5f) * 0.28f + p.wind * 0.44f) * t,
-        0.035f + (0.55f + h3 * 1.18f) * t * sceneLift - (0.23f + h2 * 0.11f) * t * t,
-        startZ + (h2 - 0.5f) * 0.24f * t);
+        startX + ((h1 - 0.5f) * 0.42f + p.wind * 0.34f) * t,
+        0.035f + (0.38f + h3 * 0.72f) * t * sceneLift - (0.34f + h2 * 0.18f) * t * t,
+        startZ + (h2 - 0.5f) * 0.34f * t);
     const float3 prevWorld = make_float3(
-        startX + ((h1 - 0.5f) * 0.28f + p.wind * 0.44f) * fmaxf(0.0f, t - 0.045f),
-        0.035f + (0.55f + h3 * 1.18f) * fmaxf(0.0f, t - 0.045f) * sceneLift - (0.23f + h2 * 0.11f) * fmaxf(0.0f, t - 0.045f) * fmaxf(0.0f, t - 0.045f),
-        startZ + (h2 - 0.5f) * 0.24f * fmaxf(0.0f, t - 0.045f));
+        startX + ((h1 - 0.5f) * 0.42f + p.wind * 0.34f) * fmaxf(0.0f, t - 0.045f),
+        0.035f + (0.38f + h3 * 0.72f) * fmaxf(0.0f, t - 0.045f) * sceneLift - (0.34f + h2 * 0.18f) * fmaxf(0.0f, t - 0.045f) * fmaxf(0.0f, t - 0.045f),
+        startZ + (h2 - 0.5f) * 0.34f * fmaxf(0.0f, t - 0.045f));
     const float3 sparkScreen = projectPoint(cam, sparkWorld);
     const float3 prevScreen = projectPoint(cam, prevWorld);
     if (sparkScreen.z <= 0.0f || sparkScreen.x < -0.05f || sparkScreen.x > 1.05f || sparkScreen.y < -0.05f || sparkScreen.y > 1.05f) {
@@ -2270,10 +2274,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
     const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
     const int maxY = min(p.frameH - 1, static_cast<int>(ceilf(centerY)) + pad);
-    const float3 hotCore = p.sceneId == 2 ? make_float3(0.55f, 0.72f, 1.0f) : make_float3(1.0f, 0.62f, 0.18f);
-    const float3 cooled = p.sceneId == 2 ? make_float3(0.20f, 0.30f, 0.48f) : make_float3(0.42f, 0.055f, 0.014f);
+    const float3 hotCore = p.sceneId == 2 ? make_float3(0.42f, 0.66f, 1.22f) : make_float3(1.0f, 0.50f, 0.12f);
+    const float3 cooled = p.sceneId == 2 ? make_float3(0.12f, 0.20f, 0.36f) : make_float3(0.24f, 0.030f, 0.010f);
     const float3 sparkColor = lerp3(hotCore, cooled, smoothstepf(0.18f, 0.88f, life));
-    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.20f, life) * sparkGate * (p.sceneId == 2 ? 0.34f : 0.98f);
+    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.20f, life) * sparkGate * (p.sceneId == 2 ? 0.18f : (p.sceneId == 1 ? 0.42f : 0.98f));
 
     for (int y = minY; y <= maxY; ++y) {
         const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH);

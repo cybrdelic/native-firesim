@@ -575,7 +575,7 @@ const char* sceneName(int scene) {
 
 void requestSimulationReset() {
     g_needsReset = true;
-    g_resetFramesRemaining = 8;
+    g_resetFramesRemaining = 3;
     clearSimulationFrame(g_simFrame);
     g_d3d.hasSimFrame = false;
     g_cudaWorkerFrameLive = false;
@@ -3526,6 +3526,7 @@ int runValidation(const std::string& args) {
     const std::string outputDirArg = argumentValue(args, "--output-dir=");
     const std::string outputDir = outputDirArg.empty() ? "out" : outputDirArg;
     const int validationFrames = argumentIntValue(args, "--validation-frames=", 96, 8, 240);
+    const int validationScene = argumentIntValue(args, "--scene=", 0, 0, kSceneCount - 1);
     const bool poolFireCalibration = args.find("--pool-fire-calibration") != std::string::npos;
     if (!ensureDirectoryTree(outputDir)) {
         return 3;
@@ -3593,6 +3594,8 @@ int runValidation(const std::string& args) {
         settings.rightDown = 0;
         settings.showGizmos = 0;
         settings.activeGizmo = 1;
+        settings.sceneId = validationScene;
+        settings.reset = i == 0 ? 1 : 0;
         settings.wind = poolFireCalibration ? 0.0f : 0.10f + 0.05f * std::sin(static_cast<float>(i) * 0.037f);
         settings.detail = 0.98f;
         applyCanonicalFireSettings(settings);
