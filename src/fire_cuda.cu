@@ -251,6 +251,10 @@ __host__ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+__host__ __device__ float length3(float3 v) {
+    return sqrtf(fmaxf(0.0f, dot3(v, v)));
+}
+
 __host__ __device__ float luminance3(float3 color) {
     return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
 }
@@ -1571,6 +1575,50 @@ __device__ float lineMask(float2 p, float2 a, float2 b, float thickness) {
     return smoothstepf(thickness, thickness * 0.25f, sqrtf(dot2(d, d)));
 }
 
+__device__ void sourceModelOverlay(float2 uv, const CameraState& cam, const SimParams& p, float glow, float3* color) {
+    if (uv.x < 0.24f || uv.x > 0.76f || uv.y < 0.42f || uv.y > 0.88f) {
+        return;
+    }
+    float alpha = 0.0f;
+    float3 modelColor = make_float3(0.0f, 0.0f, 0.0f);
+    if (p.sceneId == 1) {
+        const float3 a0 = projectPoint(cam, make_float3(-0.58f, 0.085f, -0.20f));
+        const float3 a1 = projectPoint(cam, make_float3(0.50f, 0.125f, 0.22f));
+        const float3 b0 = projectPoint(cam, make_float3(-0.45f, 0.105f, 0.22f));
+        const float3 b1 = projectPoint(cam, make_float3(0.54f, 0.080f, -0.26f));
+        const float3 c0 = projectPoint(cam, make_float3(-0.25f, 0.180f, 0.02f));
+        const float3 c1 = projectPoint(cam, make_float3(0.36f, 0.190f, 0.08f));
+        const float logA = lineMask(uv, make_float2(a0.x, a0.y), make_float2(a1.x, a1.y), 0.024f / fmaxf(0.8f, a0.z));
+        const float logB = lineMask(uv, make_float2(b0.x, b0.y), make_float2(b1.x, b1.y), 0.023f / fmaxf(0.8f, b0.z));
+        const float logC = lineMask(uv, make_float2(c0.x, c0.y), make_float2(c1.x, c1.y), 0.019f / fmaxf(0.8f, c0.z));
+        const float logs = saturate(logA + logB + logC);
+        const float3 center = projectPoint(cam, make_float3(0.0f, 0.035f, 0.0f));
+        const float coal = smoothstepf(0.060f, 0.010f, sqrtf((uv.x - center.x) * (uv.x - center.x) * 1.8f + (uv.y - center.y) * (uv.y - center.y) * 6.0f));
+        alpha = saturate(logs * 0.78f + coal * 0.46f);
+        modelColor = add3(lerp3(make_float3(0.032f, 0.021f, 0.015f), make_float3(0.12f, 0.065f, 0.030f), logs), mul3(make_float3(0.22f, 0.050f, 0.008f), coal * glow * 0.020f));
+    } else if (p.sceneId == 2) {
+        const float3 center = projectPoint(cam, make_float3(0.0f, 0.095f, 0.0f));
+        const float3 edgeX = projectPoint(cam, make_float3(0.34f, 0.095f, 0.0f));
+        const float3 edgeZ = projectPoint(cam, make_float3(0.0f, 0.095f, 0.34f));
+        const float rx = fmaxf(0.010f, fabsf(edgeX.x - center.x) + fabsf(edgeZ.x - center.x) * 0.35f);
+        const float ry = fmaxf(0.006f, fabsf(edgeX.y - center.y) + fabsf(edgeZ.y - center.y) * 0.35f);
+        const float q = sqrtf(((uv.x - center.x) * (uv.x - center.x)) / (rx * rx) + ((uv.y - center.y) * (uv.y - center.y)) / (ry * ry));
+        const float ring = smoothstepf(1.18f, 0.92f, q) * smoothstepf(0.68f, 0.88f, q);
+        const float plate = smoothstepf(1.60f, 1.10f, q) * 0.36f;
+        alpha = saturate(ring * 0.86f + plate * 0.42f);
+        modelColor = add3(lerp3(make_float3(0.018f, 0.019f, 0.020f), make_float3(0.16f, 0.15f, 0.13f), ring * 0.55f + plate * 0.20f), mul3(make_float3(0.12f, 0.030f, 0.004f), ring * glow * 0.010f));
+    } else {
+        const float3 c = projectPoint(cam, make_float3(0.0f, 0.072f, 0.0f));
+        const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
+        const float inner = smoothstepf(0.112f, 0.086f, fabsf(uv.x - c.x)) * smoothstepf(0.039f, 0.027f, fabsf(uv.y - c.y));
+        alpha = saturate((tray - inner * 0.55f) * 0.65f);
+        modelColor = lerp3(make_float3(0.015f, 0.013f, 0.011f), make_float3(0.13f, 0.12f, 0.10f), alpha);
+    }
+    if (alpha > 0.001f) {
+        *color = lerp3(*color, modelColor, saturate(alpha));
+    }
+}
+
 __device__ float3 roomBackgroundRay(
     const CameraState& cam,
     float2 uv,
@@ -1745,6 +1793,7 @@ __device__ float3 roomBackgroundRay(
 
     const float grain = (hash21(make_float2(floorf(hit.x * 19.0f + hit.z * 13.0f), floorf(hit.y * 15.0f + p.time * 0.08f))) - 0.5f) * 0.006f;
     color = add3(color, make_float3(grain, grain, grain));
+    sourceModelOverlay(uv, cam, p, glow, &color);
     const float fog = smoothstepf(3.8f, 0.2f, bestT);
     const float vignette = smoothstepf(0.78f, 0.20f, sqrtf((uv.x - 0.50f) * (uv.x - 0.50f) + (uv.y - 0.46f) * (uv.y - 0.46f)));
     return mul3(color, (0.22f + fog * 0.68f) * (0.70f + vignette * 0.30f));

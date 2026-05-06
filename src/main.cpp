@@ -248,8 +248,7 @@ bool overlayStateDirty(const FireSettings& settings, bool cudaBackend, bool clea
     return !g_haveLastOverlaySettings ||
         !sameFireSettings(g_lastOverlaySettings, settings) ||
         g_lastOverlayCudaBackend != cudaBackend ||
-        g_lastOverlayCleanViewport != cleanViewport ||
-        std::strncmp(g_lastOverlayStatus, g_workerUiStatus, sizeof(g_lastOverlayStatus)) != 0;
+        g_lastOverlayCleanViewport != cleanViewport;
 }
 
 void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
