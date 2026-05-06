@@ -1084,21 +1084,50 @@ const char* runtimeMeshAssetId(int sceneId) {
     switch (sceneId) {
     case 1: return "campfire";
     case 2: return "gas-burner-aver1";
+    case 0: return "room";
     default: return "";
     }
+}
+
+std::filesystem::path runtimeSceneDirectory(int sceneId) {
+    const char* assetId = runtimeMeshAssetId(sceneId);
+    if (assetId[0] == '\0') {
+        return {};
+    }
+    return std::filesystem::path("assets") / "fire-scenes" / assetId;
+}
+
+std::string readSceneContract(int sceneId) {
+    const std::filesystem::path dir = runtimeSceneDirectory(sceneId);
+    if (dir.empty()) {
+        return {};
+    }
+    return readTextFile(dir / "scene.json");
+}
+
+std::array<float, 3> jsonTripletForKey(const std::string& text, const char* key, std::array<float, 3> fallback) {
+    const std::vector<float> values = parseJsonFloats(jsonArrayForKey(text, key));
+    if (values.size() >= 3) {
+        return {values[0], values[1], values[2]};
+    }
+    return fallback;
 }
 
 bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     mesh = {};
     const char* assetId = runtimeMeshAssetId(sceneId);
-    if (assetId[0] == '\0') {
+    if (assetId[0] == '\0' || sceneId == 0) {
         return false;
     }
-    const std::filesystem::path path = std::filesystem::path("assets") / "fire-scenes" / assetId / "runtime-mesh.json";
+    const std::filesystem::path sceneDir = runtimeSceneDirectory(sceneId);
+    const std::filesystem::path path = sceneDir / "runtime-mesh.json";
     const std::string text = readTextFile(path);
     if (text.empty()) {
         return false;
     }
+    const std::string sceneContract = readSceneContract(sceneId);
+    const std::array<float, 3> meshTranslation =
+        jsonTripletForKey(sceneContract, "translationMeters", {0.0f, sceneId == 2 ? -0.24f : 0.0f, 0.0f});
     const std::vector<float> positions = parseJsonFloats(jsonArrayForKey(text, "vertices"));
     const std::vector<float> normals = parseJsonFloats(jsonArrayForKey(text, "normals"));
     const std::vector<float> colors = parseJsonFloats(jsonArrayForKey(text, "colors"));
@@ -1109,11 +1138,10 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     }
     const std::size_t vertexCount = positions.size() / 3;
     mesh.vertices.resize(vertexCount);
-    const float meshYOffset = sceneId == 2 ? -0.24f : 0.0f;
     for (std::size_t i = 0; i < vertexCount; ++i) {
-        mesh.vertices[i].px = positions[i * 3 + 0];
-        mesh.vertices[i].py = positions[i * 3 + 1] + meshYOffset;
-        mesh.vertices[i].pz = positions[i * 3 + 2];
+        mesh.vertices[i].px = positions[i * 3 + 0] + meshTranslation[0];
+        mesh.vertices[i].py = positions[i * 3 + 1] + meshTranslation[1];
+        mesh.vertices[i].pz = positions[i * 3 + 2] + meshTranslation[2];
         mesh.vertices[i].nx = normals.size() >= positions.size() ? normals[i * 3 + 0] : 0.0f;
         mesh.vertices[i].ny = normals.size() >= positions.size() ? normals[i * 3 + 1] : 1.0f;
         mesh.vertices[i].nz = normals.size() >= positions.size() ? normals[i * 3 + 2] : 0.0f;
@@ -1159,7 +1187,20 @@ bool createMeshBuffers(RuntimeSceneMesh& mesh) {
 
 SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     SceneEmitterParams params;
-    if (sceneId == 1) {
+    const std::string sceneContract = readSceneContract(sceneId);
+    if (!sceneContract.empty()) {
+        const std::array<float, 3> center = jsonTripletForKey(sceneContract, "centerMeters", {0.0f, 0.02f, 0.0f});
+        params.centerX = center[0];
+        params.centerZ = center[2];
+        params.heightNorm = (center[1] - 0.02f) / 2.03f;
+        float value = 0.0f;
+        if (jsonNumberForKey(sceneContract, "radiusMeters", value)) {
+            params.radius = value;
+        }
+        if (jsonNumberForKey(sceneContract, "heightBandMeters", value)) {
+            params.heightBandNorm = value / 2.03f;
+        }
+    } else if (sceneId == 1) {
         params.radius = 0.32f;
         params.heightNorm = (0.045f - 0.02f) / 2.03f;
         params.heightBandNorm = 0.20f / 2.03f;
@@ -1170,10 +1211,10 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     }
 
     const char* assetId = runtimeMeshAssetId(sceneId);
-    if (assetId[0] == '\0') {
+    if (assetId[0] == '\0' || sceneId == 0) {
         return params;
     }
-    const std::filesystem::path path = std::filesystem::path("assets") / "fire-scenes" / assetId / "emitter-mask.json";
+    const std::filesystem::path path = runtimeSceneDirectory(sceneId) / "emitter-mask.json";
     const std::string text = readTextFile(path);
     if (text.empty()) {
         return params;
