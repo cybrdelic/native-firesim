@@ -26,6 +26,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: lighting architecture"
+    & (Join-Path $PSScriptRoot "verify-lighting-architecture.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: imported scene assets"
     & (Join-Path $PSScriptRoot "verify-scene-assets.ps1")
     if ($LASTEXITCODE -ne 0) {
