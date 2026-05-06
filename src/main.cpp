@@ -998,10 +998,74 @@ std::vector<std::uint32_t> parseJsonUInts(const std::string& text) {
 
 const char* runtimeMeshAssetId(int sceneId) {
     switch (sceneId) {
-    case 1: return "fb573067b02f49e193e293b6112e7712";
-    case 2: return "9d24aac8a4c444a1b440647aa6f96438";
+    case 1: return "campfire";
+    case 2: return "gas-burner-aver1";
     default: return "";
     }
+}
+
+void appendMeshVertex(RuntimeSceneMesh& mesh, float x, float y, float z, float nx, float ny, float nz) {
+    mesh.vertices.push_back({x, y, z, nx, ny, nz});
+}
+
+void appendCylinder(RuntimeSceneMesh& mesh, float cx, float cy, float cz, float radius, float halfLength, float angle, int segments) {
+    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+    const float ca = std::cos(angle);
+    const float sa = std::sin(angle);
+    for (int side = 0; side < 2; ++side) {
+        const float localX = side == 0 ? -halfLength : halfLength;
+        for (int i = 0; i < segments; ++i) {
+            const float a = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
+            const float ly = std::sin(a) * radius;
+            const float lz = std::cos(a) * radius;
+            const float wx = cx + localX * ca - lz * sa;
+            const float wz = cz + localX * sa + lz * ca;
+            const float nx = -std::cos(a) * sa;
+            const float nz = std::cos(a) * ca;
+            appendMeshVertex(mesh, wx, cy + ly, wz, nx, std::sin(a), nz);
+        }
+    }
+    for (int i = 0; i < segments; ++i) {
+        const std::uint32_t a = base + static_cast<std::uint32_t>(i);
+        const std::uint32_t b = base + static_cast<std::uint32_t>((i + 1) % segments);
+        const std::uint32_t c = base + static_cast<std::uint32_t>(segments + i);
+        const std::uint32_t d = base + static_cast<std::uint32_t>(segments + ((i + 1) % segments));
+        mesh.indices.insert(mesh.indices.end(), {a, b, c, b, d, c});
+    }
+}
+
+void appendRing(RuntimeSceneMesh& mesh, float y, float innerRadius, float outerRadius, int segments) {
+    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (int i = 0; i < segments; ++i) {
+        const float a = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
+        const float c = std::cos(a);
+        const float s = std::sin(a);
+        appendMeshVertex(mesh, c * innerRadius, y, s * innerRadius, 0.0f, 1.0f, 0.0f);
+        appendMeshVertex(mesh, c * outerRadius, y, s * outerRadius, 0.0f, 1.0f, 0.0f);
+    }
+    for (int i = 0; i < segments; ++i) {
+        const std::uint32_t a = base + static_cast<std::uint32_t>(i * 2);
+        const std::uint32_t b = base + static_cast<std::uint32_t>(((i + 1) % segments) * 2);
+        const std::uint32_t c = a + 1;
+        const std::uint32_t d = b + 1;
+        mesh.indices.insert(mesh.indices.end(), {a, c, b, c, d, b});
+    }
+}
+
+RuntimeSceneMesh makeBuiltInSceneMesh(int sceneId) {
+    RuntimeSceneMesh mesh;
+    if (sceneId == 1) {
+        appendCylinder(mesh, -0.08f, 0.10f, 0.00f, 0.075f, 0.56f, 0.38f, 16);
+        appendCylinder(mesh, 0.10f, 0.11f, -0.02f, 0.072f, 0.54f, -0.58f, 16);
+        appendCylinder(mesh, 0.03f, 0.18f, 0.08f, 0.055f, 0.36f, 1.34f, 14);
+        appendRing(mesh, 0.026f, 0.10f, 0.48f, 28);
+    } else if (sceneId == 2) {
+        appendRing(mesh, 0.045f, 0.28f, 0.40f, 48);
+        appendRing(mesh, 0.055f, 0.13f, 0.22f, 32);
+        appendRing(mesh, 0.030f, 0.45f, 0.78f, 64);
+    }
+    mesh.loaded = !mesh.vertices.empty() && !mesh.indices.empty();
+    return mesh;
 }
 
 bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
@@ -1066,9 +1130,11 @@ bool createMeshBuffers(RuntimeSceneMesh& mesh) {
 void loadRuntimeSceneMeshes() {
     for (int scene = 0; scene < kSceneCount; ++scene) {
         RuntimeSceneMesh mesh;
-        if (loadRuntimeSceneMesh(scene, mesh) && createMeshBuffers(mesh)) {
-            g_sceneMeshes[scene] = std::move(mesh);
+        if ((!loadRuntimeSceneMesh(scene, mesh) || !createMeshBuffers(mesh)) && scene != 0) {
+            mesh = makeBuiltInSceneMesh(scene);
+            createMeshBuffers(mesh);
         }
+        g_sceneMeshes[scene] = std::move(mesh);
     }
 }
 
