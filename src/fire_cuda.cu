@@ -2301,6 +2301,12 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) packFp16SurfaceKernel(
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     float4* hdr,
     const float* heatField,
+    const float* charField,
+    const float* pyrolysisField,
+    const float* turbulenceEnergyField,
+    const float* uField,
+    const float* vField,
+    const float* wField,
     SimParams p) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int emberCount = min(max(p.emberCount, 0), kMaxEmberCount);
@@ -2326,44 +2332,80 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     if (p.sceneId == 2 && h0 > 0.14f) {
         return;
     }
-    const float sceneLift = p.sceneId == 1 ? 0.74f : (p.sceneId == 2 ? 0.24f : 0.86f);
-    const float life = fracf(p.time * (0.24f + h2 * 0.20f + (p.sceneId == 2 ? 0.42f : 0.0f)) + h0);
-    const float t = life * (p.sceneId == 1 ? 1.10f : (p.sceneId == 2 ? 0.42f : 1.18f));
-    const float spawnRadius = p.sceneId == 1 ? 0.62f : (p.sceneId == 2 ? 0.34f : 0.48f);
+    const float life = fracf(p.time * (0.20f + h2 * 0.18f + (p.sceneId == 2 ? 0.36f : 0.0f)) + h0);
     const float spawnAngle = h0 * 6.2831853f;
-    const float ringBias = p.sceneId == 2 ? 0.82f + h1 * 0.26f : sqrtf(h1);
-    const float startX = cosf(spawnAngle) * spawnRadius * ringBias;
-    const float startZ = sinf(spawnAngle) * spawnRadius * ringBias * (p.sceneId == 1 ? 0.72f : 1.0f);
+    float startX = 0.0f;
+    float startZ = 0.0f;
+    if (p.sceneId == 2) {
+        const float sourceRadius = fmaxf(0.04f, p.emitterRadius);
+        const float cx = p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
+        const float cz = p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
+        startX = cx + cosf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
+        startZ = cz + sinf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
+    } else if (p.sceneId == 1) {
+        const float logA = orientedCapsuleMask(cosf(spawnAngle) * 0.34f, sinf(spawnAngle) * 0.25f, -0.06f, 0.01f, 0.38f, 0.34f, 0.095f);
+        const float logB = orientedCapsuleMask(cosf(spawnAngle + 1.7f) * 0.35f, sinf(spawnAngle + 1.7f) * 0.25f, 0.07f, -0.02f, -0.58f, 0.33f, 0.092f);
+        const float contactBlend = saturate(logA + logB + h3 * 0.35f);
+        const float spawnRadius = lerpf(0.16f, 0.46f, sqrtf(h1));
+        startX = cosf(spawnAngle) * spawnRadius * (0.64f + contactBlend * 0.36f);
+        startZ = sinf(spawnAngle) * spawnRadius * (0.46f + contactBlend * 0.26f);
+    } else {
+        const float spawnRadius = 0.48f;
+        const float ringBias = sqrtf(h1);
+        startX = cosf(spawnAngle) * spawnRadius * ringBias;
+        startZ = sinf(spawnAngle) * spawnRadius * ringBias;
+    }
+    const float startU = saturate((startX / 2.10f) + 0.50f);
+    const float startW = saturate((startZ / 1.64f) + 0.50f);
+    const float startV = p.sceneId == 2 ? p.emitterHeightNorm : (p.sceneId == 1 ? 0.035f + h2 * 0.055f : 0.045f);
+    const float localHeat = sampleScalar(heatField, p, startU, startV, startW);
+    const float localChar = sampleScalar(charField, p, startU, startV, startW);
+    const float localPyrolysis = sampleScalar(pyrolysisField, p, startU, startV, startW);
+    const float localTurbulence = sampleScalar(turbulenceEnergyField, p, startU, startV, startW);
+    const float3 localVelocity = sampleVelocity(uField, vField, wField, p, startU, startV, startW);
+    const float materialGate = smoothstepf(0.018f, 0.40f, localChar + localPyrolysis * 0.34f + localHeat * 0.075f);
+    if (materialGate <= 0.0001f) {
+        return;
+    }
+    const float temperatureK = 620.0f + localHeat * 330.0f + localPyrolysis * 210.0f + localChar * 42.0f;
+    const float sceneLift = p.sceneId == 1 ? 0.86f : (p.sceneId == 2 ? 0.16f : 0.80f);
+    const float t = life * (p.sceneId == 1 ? 1.24f : (p.sceneId == 2 ? 0.34f : 1.10f));
+    const float drag = expf(-t * (p.sceneId == 2 ? 4.8f : 1.35f));
+    const float buoyantRise = (0.26f + h3 * 0.62f + localTurbulence * 0.11f) * t * sceneLift;
     const float3 sparkWorld = make_float3(
-        startX + ((h1 - 0.5f) * 0.42f + p.wind * 0.34f) * t,
-        0.035f + (0.38f + h3 * 0.72f) * t * sceneLift - (0.34f + h2 * 0.18f) * t * t,
-        startZ + (h2 - 0.5f) * 0.34f * t);
+        startX + (localVelocity.x * 0.34f + (h1 - 0.5f) * 0.20f + p.wind * 0.26f) * t * drag,
+        startV * 2.03f + 0.02f + buoyantRise - (0.22f + h2 * 0.16f) * t * t,
+        startZ + (localVelocity.z * 0.28f + (h2 - 0.5f) * 0.18f) * t * drag);
+    const float prevT = fmaxf(0.0f, t - 0.045f);
+    const float prevDrag = expf(-prevT * (p.sceneId == 2 ? 4.8f : 1.35f));
     const float3 prevWorld = make_float3(
-        startX + ((h1 - 0.5f) * 0.42f + p.wind * 0.34f) * fmaxf(0.0f, t - 0.045f),
-        0.035f + (0.38f + h3 * 0.72f) * fmaxf(0.0f, t - 0.045f) * sceneLift - (0.34f + h2 * 0.18f) * fmaxf(0.0f, t - 0.045f) * fmaxf(0.0f, t - 0.045f),
-        startZ + (h2 - 0.5f) * 0.34f * fmaxf(0.0f, t - 0.045f));
+        startX + (localVelocity.x * 0.34f + (h1 - 0.5f) * 0.20f + p.wind * 0.26f) * prevT * prevDrag,
+        startV * 2.03f + 0.02f + (0.26f + h3 * 0.62f + localTurbulence * 0.11f) * prevT * sceneLift - (0.22f + h2 * 0.16f) * prevT * prevT,
+        startZ + (localVelocity.z * 0.28f + (h2 - 0.5f) * 0.18f) * prevT * prevDrag);
     const float3 sparkScreen = projectPoint(cam, sparkWorld);
     const float3 prevScreen = projectPoint(cam, prevWorld);
     if (sparkScreen.z <= 0.0f || sparkScreen.x < -0.05f || sparkScreen.x > 1.05f || sparkScreen.y < -0.05f || sparkScreen.y > 1.05f) {
         return;
     }
 
-    const float radius = ((p.sceneId == 2 ? 0.00065f : 0.0011f) + h3 * (p.sceneId == 2 ? 0.00065f : 0.0018f)) / fmaxf(0.55f, sparkScreen.z);
+    const float emberSize = smoothstepf(720.0f, 1580.0f, temperatureK) * materialGate;
+    const float radius = ((p.sceneId == 2 ? 0.00042f : 0.00086f) + h3 * (p.sceneId == 2 ? 0.00042f : 0.00145f)) * (0.72f + emberSize * 0.90f) / fmaxf(0.55f, sparkScreen.z);
     const float centerX = sparkScreen.x * static_cast<float>(p.frameW) - 0.5f;
     const float centerY = sparkScreen.y * static_cast<float>(p.frameH) - 0.5f;
     const float2 rawTrail = sub2(make_float2(sparkScreen.x, sparkScreen.y), make_float2(prevScreen.x, prevScreen.y));
     const float rawTrailLen = sqrtf(dot2(rawTrail, rawTrail));
-    const float cappedTrailLen = fminf(rawTrailLen, p.sceneId == 1 ? 0.010f : 0.006f);
+    const float cappedTrailLen = fminf(rawTrailLen, p.sceneId == 1 ? 0.016f : 0.005f);
     const float2 trailDir = rawTrailLen > 0.000001f ? mul2(rawTrail, 1.0f / rawTrailLen) : make_float2(0.0f, -1.0f);
     const int pad = max(2, static_cast<int>(ceilf((radius + cappedTrailLen) * static_cast<float>(max(p.frameW, p.frameH)) * 3.0f)));
     const int minX = max(0, static_cast<int>(floorf(centerX)) - pad);
     const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
     const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
     const int maxY = min(p.frameH - 1, static_cast<int>(ceilf(centerY)) + pad);
-    const float3 hotCore = p.sceneId == 2 ? make_float3(0.42f, 0.66f, 1.22f) : make_float3(1.0f, 0.50f, 0.12f);
-    const float3 cooled = p.sceneId == 2 ? make_float3(0.12f, 0.20f, 0.36f) : make_float3(0.24f, 0.030f, 0.010f);
-    const float3 sparkColor = lerp3(hotCore, cooled, smoothstepf(0.18f, 0.88f, life));
-    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.20f, life) * sparkGate * (p.sceneId == 2 ? 0.18f : (p.sceneId == 1 ? 0.42f : 0.98f));
+    const float3 hotCore = p.sceneId == 2 ? make_float3(0.36f, 0.58f, 1.04f) : make_float3(1.0f, 0.42f, 0.090f);
+    const float3 cooled = p.sceneId == 2 ? make_float3(0.055f, 0.10f, 0.18f) : make_float3(0.18f, 0.026f, 0.008f);
+    const float cooling = smoothstepf(0.16f, 0.92f, life) * (1.0f - saturate(localHeat * 0.045f));
+    const float3 sparkColor = lerp3(hotCore, cooled, cooling);
+    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.16f, life) * sparkGate * materialGate * emberSize * (p.sceneId == 2 ? 0.055f : (p.sceneId == 1 ? 0.58f : 0.82f));
 
     for (int y = minY; y <= maxY; ++y) {
         const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH);
@@ -3196,7 +3238,16 @@ bool stepAndRenderInternal(
         return false;
     }
     if (params.emberCount > 0 && params.renderDebugMode == 0) {
-        emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_hdrFrameDevice, g_renderHeat[renderSlot], params);
+        emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(
+            g_hdrFrameDevice,
+            g_renderHeat[renderSlot],
+            g_renderChar[renderSlot],
+            g_renderPyrolysis[renderSlot],
+            g_renderTurbulenceEnergy[renderSlot],
+            g_renderU[renderSlot],
+            g_renderV[renderSlot],
+            g_renderW[renderSlot],
+            params);
         if (!check("emberHdrKernel launch", cudaGetLastError())) {
             return false;
         }
