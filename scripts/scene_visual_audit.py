@@ -67,6 +67,10 @@ def metrics(path: Path) -> dict:
 
 def issues_for(name: str, m: dict) -> list[str]:
     issues: list[str] = []
+    if m["maxLuma"] < 0.025:
+        issues.append("capture is effectively black")
+    if m["meanLuma"] < 0.006:
+        issues.append("capture has near-zero scene visibility")
     if name == "burner":
         if m["activeHeightFraction"] > 0.34:
             issues.append("burner flame is too tall for a stove source")
@@ -91,12 +95,16 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     report = {}
     thumbs = []
+    fail = False
     for name, path in SCENES.items():
         if not path.exists():
             report[name] = {"missing": str(path), "issues": ["capture missing"]}
+            fail = True
             continue
         m = metrics(path)
         m["issues"] = issues_for(name, m)
+        if any("black" in issue or "near-zero" in issue for issue in m["issues"]):
+            fail = True
         report[name] = m
         img = Image.open(path).convert("RGB").resize((480, 270))
         draw = ImageDraw.Draw(img, "RGBA")
@@ -110,6 +118,8 @@ def main() -> None:
         sheet.save(OUT / "scene-contact-sheet.png")
     (OUT / "scene-visual-audit.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+    if fail:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
