@@ -63,6 +63,12 @@ $commands.Add("")
 
 if ($Mode -eq "Benchmark" -or $Mode -eq "All") {
     Invoke-CheckedProcess -FilePath $exePath -Arguments $simArgs -Label "worker benchmark"
+    $benchmarkJson = Join-Path $benchDir "worker-benchmark.json"
+    $summaryPath = Join-Path $profileRoot "gpu-timing-summary.md"
+    python (Join-Path $PSScriptRoot "summarize-gpu-timings.py") $benchmarkJson $summaryPath
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 if ($Mode -eq "NsightCompute" -or $Mode -eq "All") {
@@ -145,6 +151,7 @@ $commands.Add('& "' + $exePath + '" ' + ($simArgs -join ' '))
 $commands.Add('```')
 $commands.Add("")
 $commands.Add("- Benchmark JSON: $benchDir\worker-benchmark.json")
+$commands.Add("- GPU timing summary: $profileRoot\gpu-timing-summary.md")
 $commands.Add("- Nsight Compute report: $profileRoot\firesim-speedoflight.ncu-rep")
 $commands.Add("- Compute Sanitizer log: $profileRoot\compute-sanitizer-memcheck.log")
 
