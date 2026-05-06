@@ -3906,7 +3906,8 @@ int runValidation(const std::string& args) {
            "heatSum,fuelSum,oxygenSum,sootSum,charSum,ashSum,pyrolysisSum,progressSum,"
            "turbulenceEnergySum,sootOpticalDepthSum,maxHeat,maxFuel,maxSoot,maxPyrolysis,"
            "maxProgress,maxTurbulenceEnergy,flameHeightMeters,"
-           "meanOpticalDepth,meanSceneLight,meanSceneShadow,heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
+           "meanOpticalDepth,meanSceneLight,meanSceneShadow,flameMassProxy,smokeMassProxy,flameSmokeOverlapProxy,"
+           "heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
            "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,invalidCells\n";
     csv << std::fixed << std::setprecision(6);
 
@@ -3974,7 +3975,9 @@ int runValidation(const std::string& args) {
             << metrics.turbulenceEnergySum << "," << metrics.sootOpticalDepthSum << ","
             << metrics.maxHeat << "," << metrics.maxFuel << "," << metrics.maxSoot << "," << metrics.maxPyrolysis << ","
             << metrics.maxProgress << "," << metrics.maxTurbulenceEnergy << "," << metrics.flameHeightMeters << ","
-            << metrics.meanOpticalDepth << "," << metrics.meanSceneLight << "," << metrics.meanSceneShadow << "," << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
+            << metrics.meanOpticalDepth << "," << metrics.meanSceneLight << "," << metrics.meanSceneShadow << ","
+            << metrics.flameMassProxy << "," << metrics.smokeMassProxy << "," << metrics.flameSmokeOverlapProxy << ","
+            << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
             << metrics.divergenceAfterL2 << "," << metrics.divergenceBeforeMax << "," << metrics.divergenceAfterMax << ","
             << metrics.divergenceReduction << "," << metrics.invalidCells << "\n";
 
@@ -4184,6 +4187,9 @@ int runValidation(const std::string& args) {
     json << "  \"finalMeanOpticalDepth\": " << finalMetrics.meanOpticalDepth << ",\n";
     json << "  \"finalMeanSceneLight\": " << finalMetrics.meanSceneLight << ",\n";
     json << "  \"finalMeanSceneShadow\": " << finalMetrics.meanSceneShadow << ",\n";
+    json << "  \"finalFlameMassProxy\": " << finalMetrics.flameMassProxy << ",\n";
+    json << "  \"finalSmokeMassProxy\": " << finalMetrics.smokeMassProxy << ",\n";
+    json << "  \"finalFlameSmokeOverlapProxy\": " << finalMetrics.flameSmokeOverlapProxy << ",\n";
     json << "  \"finalHeatReleaseProxy\": " << finalMetrics.heatReleaseProxy << ",\n";
     json << "  \"finalCharSum\": " << finalMetrics.charSum << ",\n";
     json << "  \"finalAshSum\": " << finalMetrics.ashSum << ",\n";
@@ -4272,6 +4278,7 @@ int runDiagnostics() {
     out << "hdrCameraPipeline=" << kHdrCameraPipeline << "\n";
     out << "uiOverlayAfterCameraResponse=true\n";
     out << "meshLightingPass=lit-scene-mesh\n";
+    out << "volumeSmokeFlameSeparation=resolved flame-sheet mask suppresses soot absorption and scattering inside emissive samples\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
