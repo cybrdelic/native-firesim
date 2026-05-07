@@ -163,7 +163,9 @@ float* g_renderV[kRenderSnapshotSlots] = {};
 float* g_renderW[kRenderSnapshotSlots] = {};
 float4* g_renderSceneLight[kRenderSnapshotSlots] = {};
 float* g_renderSceneShadow[kRenderSnapshotSlots] = {};
-cudaGraphicsResource* g_d3dFp16Resource = nullptr;
+constexpr int kMaxD3DInteropSlots = 4;
+cudaGraphicsResource* g_d3dFp16Resources[kMaxD3DInteropSlots] = {};
+int g_activeD3DInteropSlot = 0;
 cudaEvent_t g_stepStartEvent = nullptr;
 cudaEvent_t g_afterVelocityEvent = nullptr;
 cudaEvent_t g_afterReactionEvent = nullptr;
@@ -2484,10 +2486,13 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) overlayKernel(
 }
 
 void freeDeviceMemory() {
-    if (g_d3dFp16Resource != nullptr) {
-        cudaGraphicsUnregisterResource(g_d3dFp16Resource);
-        g_d3dFp16Resource = nullptr;
+    for (cudaGraphicsResource*& resource : g_d3dFp16Resources) {
+        if (resource != nullptr) {
+            cudaGraphicsUnregisterResource(resource);
+            resource = nullptr;
+        }
     }
+    g_activeD3DInteropSlot = 0;
     cudaFree(g_heat);
     cudaFree(g_heatNext);
     cudaFree(g_fuel);
@@ -3105,7 +3110,11 @@ bool stepAndRenderInternal(
         std::snprintf(g_lastError, sizeof(g_lastError), "Output pixel pointer was null.");
         return false;
     }
-    if (renderOutput && writeD3DInterop && g_d3dFp16Resource == nullptr) {
+    cudaGraphicsResource* activeD3DResource =
+        (g_activeD3DInteropSlot >= 0 && g_activeD3DInteropSlot < kMaxD3DInteropSlots)
+            ? g_d3dFp16Resources[g_activeD3DInteropSlot]
+            : nullptr;
+    if (renderOutput && writeD3DInterop && activeD3DResource == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 FP16 interop texture is not registered.");
         return false;
     }
@@ -3361,11 +3370,11 @@ bool stepAndRenderInternal(
         return false;
     }
     if (writeD3DInterop) {
-        if (!check("cudaGraphicsMapResources d3d fp16", cudaGraphicsMapResources(1, &g_d3dFp16Resource, 0))) {
+        if (!check("cudaGraphicsMapResources d3d fp16", cudaGraphicsMapResources(1, &activeD3DResource, 0))) {
             return false;
         }
         cudaArray_t d3dArray = nullptr;
-        bool wroteToD3D = check("cudaGraphicsSubResourceGetMappedArray d3d fp16", cudaGraphicsSubResourceGetMappedArray(&d3dArray, g_d3dFp16Resource, 0, 0));
+        bool wroteToD3D = check("cudaGraphicsSubResourceGetMappedArray d3d fp16", cudaGraphicsSubResourceGetMappedArray(&d3dArray, activeD3DResource, 0, 0));
         cudaSurfaceObject_t surface = 0;
         if (wroteToD3D) {
             cudaResourceDesc surfaceDesc = {};
@@ -3384,7 +3393,7 @@ bool stepAndRenderInternal(
         if (surface != 0) {
             wroteToD3D = check("cudaDestroySurfaceObject d3d fp16", cudaDestroySurfaceObject(surface)) && wroteToD3D;
         }
-        const bool unmappedD3D = check("cudaGraphicsUnmapResources d3d fp16", cudaGraphicsUnmapResources(1, &g_d3dFp16Resource, 0));
+        const bool unmappedD3D = check("cudaGraphicsUnmapResources d3d fp16", cudaGraphicsUnmapResources(1, &activeD3DResource, 0));
         if (!wroteToD3D || !unmappedD3D) {
             return false;
         }
@@ -3557,15 +3566,35 @@ bool fireCudaSelectDeviceForD3D11(void* d3d11Device) {
 }
 
 bool fireCudaRegisterD3D11Texture(void* d3d11Texture) {
+    return fireCudaRegisterD3D11TextureSlot(0, d3d11Texture) && fireCudaSetD3D11TextureSlot(0);
+}
+
+bool fireCudaRegisterD3D11TextureSlot(int slot, void* d3d11Texture) {
+    if (slot < 0 || slot >= kMaxD3DInteropSlots) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 texture slot %d is outside the supported interop slot range.", slot);
+        return false;
+    }
     if (d3d11Texture == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 texture pointer was null.");
         return false;
     }
-    fireCudaUnregisterD3D11Texture();
+    if (g_d3dFp16Resources[slot] != nullptr) {
+        cudaGraphicsUnregisterResource(g_d3dFp16Resources[slot]);
+        g_d3dFp16Resources[slot] = nullptr;
+    }
     auto* resource = static_cast<ID3D11Resource*>(d3d11Texture);
     return check(
         "cudaGraphicsD3D11RegisterResource fp16 texture",
-        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resource, resource, cudaGraphicsRegisterFlagsSurfaceLoadStore));
+        cudaGraphicsD3D11RegisterResource(&g_d3dFp16Resources[slot], resource, cudaGraphicsRegisterFlagsSurfaceLoadStore));
+}
+
+bool fireCudaSetD3D11TextureSlot(int slot) {
+    if (slot < 0 || slot >= kMaxD3DInteropSlots || g_d3dFp16Resources[slot] == nullptr) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "D3D11 texture slot %d is not registered.", slot);
+        return false;
+    }
+    g_activeD3DInteropSlot = slot;
+    return true;
 }
 
 bool fireCudaStepAndRenderD3D11(const FireSettings& settings) {
@@ -3589,10 +3618,13 @@ bool fireCudaRenderD3D11(const FireSettings& settings) {
 }
 
 void fireCudaUnregisterD3D11Texture() {
-    if (g_d3dFp16Resource != nullptr) {
-        cudaGraphicsUnregisterResource(g_d3dFp16Resource);
-        g_d3dFp16Resource = nullptr;
+    for (cudaGraphicsResource*& resource : g_d3dFp16Resources) {
+        if (resource != nullptr) {
+            cudaGraphicsUnregisterResource(resource);
+            resource = nullptr;
+        }
     }
+    g_activeD3DInteropSlot = 0;
 }
 
 bool fireCudaSynchronize() {

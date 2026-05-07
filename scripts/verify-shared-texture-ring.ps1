@@ -12,6 +12,12 @@ function Require-Text($text, $needle, $message) {
 
 Require-Text $main "constexpr int kSharedFrameSlots = 3" "shared ring slot count must stay explicit"
 Require-Text $main "constexpr int kDisplayFrameSlots = 3" "display ring slot count must stay explicit"
+if ($main.Contains("const int publishSlot = 0")) {
+    Write-Error "worker publish path must not collapse the shared texture ring to slot 0"
+}
+Require-Text $main "fireCudaRegisterD3D11TextureSlot(slot" "CUDA interop must register every shared texture slot"
+Require-Text $main "fireCudaSetD3D11TextureSlot(publishSlot)" "worker must select the CUDA interop texture matching the published slot"
+Require-Text $main "nextPublishSlot = (publishSlot + 1) % kSharedFrameSlots" "worker producer must rotate through shared texture slots"
 Require-Text $main "AcquireSync(1, 0)" "host copy path must use bounded nonblocking keyed mutex acquire"
 Require-Text $main "g_sharedRingAcquireTimeouts" "ring acquire timeout telemetry is missing"
 Require-Text $main "g_sharedRingNoCandidateFrames" "ring no-candidate telemetry is missing"

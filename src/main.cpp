@@ -3379,7 +3379,14 @@ int runCudaWorker(const std::string& args) {
         return 3;
     }
     appendRuntimeEvent("worker-cuda-initialized", "");
-    if (!fireCudaRegisterD3D11Texture(d3dTarget.sharedTextures[0].Get())) {
+    bool registeredSharedInterop = true;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        if (!fireCudaRegisterD3D11TextureSlot(slot, d3dTarget.sharedTextures[slot].Get())) {
+            registeredSharedInterop = false;
+            break;
+        }
+    }
+    if (!registeredSharedInterop || !fireCudaSetD3D11TextureSlot(0)) {
         g_sharedViewport->workerStatus = -3;
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
@@ -3405,6 +3412,7 @@ int runCudaWorker(const std::string& args) {
     auto last = Clock::now();
     int framesSincePhysics = kWorkerPhysicsFrameInterval;
     float accumulatedPhysicsDt = 0.0f;
+    int nextPublishSlot = 0;
     while (g_sharedViewport->shutdownRequested == 0) {
         if (parentProcess != nullptr && WaitForSingleObject(parentProcess, 0) != WAIT_TIMEOUT) {
             break;
@@ -3426,10 +3434,18 @@ int runCudaWorker(const std::string& args) {
         settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
         applyCanonicalFireSettings(settings);
         applySceneEmitterParams(settings);
-        const int publishSlot = 0;
+        int publishSlot = -1;
         const auto frameStart = Clock::now();
-        HRESULT acquire = d3dTarget.sharedMutexes[publishSlot]->AcquireSync(0, 0);
-        if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+        HRESULT acquire = static_cast<HRESULT>(WAIT_TIMEOUT);
+        for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
+            const int candidate = (nextPublishSlot + attempt) % kSharedFrameSlots;
+            acquire = d3dTarget.sharedMutexes[candidate]->AcquireSync(0, 0);
+            if (acquire != static_cast<HRESULT>(WAIT_TIMEOUT)) {
+                publishSlot = candidate;
+                break;
+            }
+        }
+        if (publishSlot < 0) {
             g_sharedViewport->workerHeartbeatTickMs = tickMs();
             g_sharedViewport->workerCudaMicros = 0;
             g_sharedViewport->workerFrameMicros = 0;
@@ -3450,6 +3466,15 @@ int runCudaWorker(const std::string& args) {
 
         const LONG writingSequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->slotFrameSequences[publishSlot] = writingSequence;
+        if (!fireCudaSetD3D11TextureSlot(publishSlot)) {
+            d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(0);
+            g_sharedViewport->workerStatus = -3;
+            InterlockedIncrement(&g_sharedViewport->workerErrorCount);
+            g_sharedViewport->workerExitCode = 5;
+            std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA select FP16 shared slot failed: %.120s", fireCudaLastError());
+            appendRuntimeEvent("worker-cuda-d3d-select-failed", g_sharedViewport->statusText);
+            break;
+        }
         if (!(advancePhysics ? fireCudaStepAndRenderD3D11(settings) : fireCudaRenderD3D11(settings))) {
             d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(0);
             g_sharedViewport->workerStatus = -2;
@@ -3489,6 +3514,7 @@ int runCudaWorker(const std::string& args) {
         const LONG readySequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
         g_sharedViewport->slotFrameSequences[publishSlot] = readySequence;
         g_sharedViewport->latestFrameSlot = publishSlot;
+        nextPublishSlot = (publishSlot + 1) % kSharedFrameSlots;
         InterlockedIncrement(&g_sharedViewport->workerPublishedFrames);
         if (advancePhysics) {
             InterlockedIncrement(&g_sharedViewport->workerPhysicsFrames);
