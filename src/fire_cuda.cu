@@ -761,7 +761,7 @@ __device__ float gasBurnerPortSource(float x, float z, const SimParams& p) {
     return saturate((outerPortRing * (0.18f + portMask * 4.20f) + innerPilotRing * 0.30f) * attachmentClamp * noPoolCenter + pilot);
 }
 
-__device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
+__device__ float solidFuelBedMaterial(float x, float z, const SimParams& p) {
     if (p.sceneId == 1) {
         const float logA = orientedCapsuleMask(x, z, -0.06f, 0.01f, 0.38f, 0.34f, 0.060f);
         const float logB = orientedCapsuleMask(x, z, 0.07f, -0.02f, -0.58f, 0.33f, 0.058f);
@@ -777,7 +777,7 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
         return saturate((logA * 0.72f + logB * 0.70f + logC * 0.54f + coalBed * 0.84f + contactPyrolysis * 1.18f) * (1.0f - cracks * 0.24f));
     }
     if (p.sceneId == 2) {
-        return gasBurnerPortSource(x, z, p);
+        return 0.0f;
     }
     const float tray = smoothstepf(1.08f, 0.030f, fabsf(x)) * smoothstepf(0.56f, 0.026f, fabsf(z));
     const float emberMat = smoothstepf(1.00f, 0.018f, fabsf(x)) * smoothstepf(0.50f, 0.020f, fabsf(z));
@@ -792,11 +792,26 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
     return saturate(tray * porousFuel * (1.0f - cracks * 0.46f) * (1.0f - voids * 0.34f));
 }
 
+__device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
+    return solidFuelBedMaterial(x, z, p);
+}
+
+__device__ float gasBurnerPortEmitter(float x, float z, float h, const SimParams& p) {
+    const float port = gasBurnerPortSource(x, z, p);
+    const float height = smoothstepf(
+        fmaxf(0.005f, p.emitterHeightBandNorm * 0.34f),
+        fmaxf(0.0015f, p.emitterHeightBandNorm * 0.055f),
+        fabsf(h - p.emitterHeightNorm));
+    const float portFlicker = 0.92f + 0.08f * fbm(make_float2(x * 22.0f + p.time * 0.080f, z * 24.0f - p.time * 0.060f));
+    return saturate(port * height * portFlicker);
+}
+
 __device__ float fuelBedSource(float x, float z, float h, const SimParams& p) {
-    const float material = fuelBedMaterial(x, z, p);
-    const float height = p.sceneId == 2
-        ? smoothstepf(fmaxf(0.005f, p.emitterHeightBandNorm * 0.34f), fmaxf(0.0015f, p.emitterHeightBandNorm * 0.055f), fabsf(h - p.emitterHeightNorm))
-        : smoothstepf(p.sceneId == 1 ? 0.245f : 0.145f, 0.00f, h);
+    if (p.sceneId == 2) {
+        return gasBurnerPortEmitter(x, z, h, p);
+    }
+    const float material = solidFuelBedMaterial(x, z, p);
+    const float height = smoothstepf(p.sceneId == 1 ? 0.245f : 0.145f, 0.00f, h);
     const float emberBreathing = 0.84f + 0.16f * fbm(make_float2(x * 9.0f + p.time * 0.035f, z * 11.0f - p.time * 0.025f));
     const float exposedFuel = saturate(material * emberBreathing);
     return saturate(height * exposedFuel);
@@ -828,17 +843,17 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) resetScalarsKernel(
     const float w = (static_cast<float>(z) + 0.5f) / static_cast<float>(p.nz);
     const float worldX = (u - 0.50f) * 2.10f;
     const float worldZ = (w - 0.50f) * 1.64f;
-    const float material = fuelBedMaterial(worldX, worldZ, p);
+    const float material = solidFuelBedMaterial(worldX, worldZ, p);
     const float chunkNoise = fbm(make_float2(worldX * 18.0f + worldZ * 2.0f, worldZ * 22.0f - worldX * 5.0f));
     const float bed = fuelBedSource(worldX, worldZ, v, p);
-    const float charScale = p.sceneId == 2 ? 0.004f : (p.sceneId == 1 ? 1.18f : 1.0f);
+    const float charScale = p.sceneId == 2 ? 0.0f : (p.sceneId == 1 ? 1.18f : 1.0f);
     const float sootScale = p.sceneId == 2 ? 0.004f : (p.sceneId == 1 ? 0.92f : 1.0f);
     heat[idx] = bed * (p.sceneId == 2 ? 3.20f : (p.sceneId == 1 ? 0.78f + chunkNoise * 0.26f : 0.86f + chunkNoise * 0.24f));
     fuel[idx] = bed * (p.sceneId == 2 ? 2.40f : (p.sceneId == 1 ? 1.05f + chunkNoise * 0.30f : 1.08f + chunkNoise * 0.26f));
     oxygen[idx] = 1.0f;
     soot[idx] = bed * (p.sceneId == 2 ? 0.00065f : 0.018f) * sootScale;
     charField[idx] = material * (0.92f + chunkNoise * 0.72f) * charScale;
-    ash[idx] = material * (0.018f + smoothstepf(0.56f, 0.86f, chunkNoise) * 0.055f) * (p.sceneId == 2 ? 0.10f : 1.0f);
+    ash[idx] = material * (0.018f + smoothstepf(0.56f, 0.86f, chunkNoise) * 0.055f) * (p.sceneId == 2 ? 0.0f : 1.0f);
     pyrolysis[idx] = bed * (p.sceneId == 2 ? 0.12f : (p.sceneId == 1 ? 0.060f + chunkNoise * 0.034f : 0.058f + chunkNoise * 0.028f));
     progress[idx] = bed * (p.sceneId == 2 ? 0.35f : (p.sceneId == 1 ? 0.24f : 0.21f));
     turbulenceEnergy[idx] = bed * (p.sceneId == 2 ? 0.050f : (p.sceneId == 1 ? 0.082f : 0.065f));
@@ -1019,7 +1034,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
 
     const float worldX = (u - 0.50f) * 2.10f;
     const float worldZ = (w - 0.50f) * 1.64f;
-    const float material = fuelBedMaterial(worldX, worldZ, p);
+    const float material = solidFuelBedMaterial(worldX, worldZ, p);
     const float sourceNoise = 0.70f + 0.48f * fbm(make_float2(worldX * 13.0f + worldZ * 3.0f + p.time * 0.38f, v * 31.0f + worldZ * 11.0f));
     const float exposedChar = saturate(charMass / fmaxf(0.055f, charMass + ash * 1.75f));
     const float charEdges = smoothstepf(0.06f, 0.78f, material) * smoothstepf(0.92f, 0.02f, ash);
@@ -1036,9 +1051,13 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float heatFlux = saturate((tempK - 405.0f) / 900.0f) + bed * 0.34f + sootOptics * 0.024f;
     const float charRelease = fminf(charMass, charMass * heatFlux * solidOxygen * (0.14f + radiativeFeedback * 1.38f) * p.dt);
     pyrolysisRate += (bed * (0.34f + radiativeFeedback * 1.05f) * p.dt + charRelease * (2.45f + sourceNoise * 0.72f)) * scenePyrolysisGain;
-    charMass += material * p.dt * (p.sceneId == 2 ? 0.00005f : (p.sceneId == 1 ? 0.050f : 0.026f));
+    charMass += material * p.dt * (p.sceneId == 2 ? 0.0f : (p.sceneId == 1 ? 0.050f : 0.026f));
     charMass -= charRelease * 0.92f;
-    ash += charRelease * (p.sceneId == 2 ? 0.025f : 0.16f + 0.22f * saturate(1.0f - oxygen));
+    ash += charRelease * (p.sceneId == 2 ? 0.0f : 0.16f + 0.22f * saturate(1.0f - oxygen));
+    if (p.sceneId == 2) {
+        charMass = 0.0f;
+        ash = 0.0f;
+    }
 
     heat += (bed * (p.sceneId == 2 ? 14.20f : 6.20f) * p.dt * (1.0f + radiativeFeedback * 1.12f) + charRelease * 3.35f) * sceneHeatGain;
     fuel += pyrolysisRate * (p.sceneId == 2 ? 1.34f : 3.70f) * sceneFuelGain;
@@ -1112,6 +1131,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float particleGrowth = saturate(incomplete * 0.36f + ash * 0.13f + soot * 0.055f + smoothstepf(0.65f, 1.55f, tempK / 1000.0f) * 0.18f);
     sootOptics = soot * (1.04f + 0.28f * sqrtf(fmaxf(0.0f, heat)) + 0.24f * ash + 0.46f * particleGrowth);
     sootOptics = lerpf(sootOptics, sootOptics * 0.48f, saturate(sootOxidation * 0.92f));
+    if (p.sceneId == 2) {
+        sootOptics *= 0.18f;
+    }
 
     heatOut[idx] = fminf(8.8f, fmaxf(0.0f, heat));
     fuelOut[idx] = fminf(5.5f, fmaxf(0.0f, fuel));
@@ -1671,10 +1693,20 @@ __device__ void sourceModelOverlay(float2 uv, const CameraState& cam, const SimP
     const float sourceY = p.emitterHeightNorm * 2.03f + 0.02f;
     const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
     const float3 c = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
-    const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
-    const float inner = smoothstepf(0.112f, 0.086f, fabsf(uv.x - c.x)) * smoothstepf(0.039f, 0.027f, fabsf(uv.y - c.y));
-    alpha = saturate((tray - inner * 0.55f) * 0.65f);
-    modelColor = lerp3(make_float3(0.015f, 0.013f, 0.011f), make_float3(0.13f, 0.12f, 0.10f), alpha);
+    if (p.sceneId == 2) {
+        const float dx = uv.x - c.x;
+        const float dy = uv.y - c.y;
+        const float d = sqrtf(dx * dx + dy * dy);
+        const float ring = smoothstepf(0.006f, 0.0015f, fabsf(d - 0.030f));
+        const float pilot = smoothstepf(0.005f, 0.0022f, d);
+        alpha = saturate(ring * 0.52f + pilot * 0.42f);
+        modelColor = lerp3(make_float3(0.006f, 0.009f, 0.014f), make_float3(0.040f, 0.12f, 0.34f), alpha);
+    } else {
+        const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
+        const float inner = smoothstepf(0.112f, 0.086f, fabsf(uv.x - c.x)) * smoothstepf(0.039f, 0.027f, fabsf(uv.y - c.y));
+        alpha = saturate((tray - inner * 0.55f) * 0.65f);
+        modelColor = lerp3(make_float3(0.015f, 0.013f, 0.011f), make_float3(0.13f, 0.12f, 0.10f), alpha);
+    }
     if (alpha > 0.001f) {
         *color = lerp3(*color, modelColor, saturate(alpha));
     }
@@ -1769,7 +1801,7 @@ __device__ float3 roomBackgroundRay(
             const float dz = hit.z - sourceZ;
             const float radius = sqrtf(dx * dx + dz * dz);
             const float plate = smoothstepf(0.58f, 0.46f, radius);
-            const float burner = fuelBedMaterial(hit.x, hit.z, p);
+            const float burner = gasBurnerPortSource(hit.x, hit.z, p);
             const float radialGrooves = floorGrid(radius, 0.0f, 18.0f, 0.005f);
             color = lerp3(color, make_float3(0.022f, 0.025f, 0.030f), plate * 0.62f);
             color = lerp3(color, make_float3(0.008f, 0.010f, 0.014f), burner * 0.46f);
