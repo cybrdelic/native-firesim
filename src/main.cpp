@@ -178,6 +178,7 @@ struct SceneEmitterParams {
     float radius = 0.48f;
     int burnerCenterCount = 0;
     float burnerCenterX[4] = {};
+    float burnerCenterY[4] = {};
     float burnerCenterZ[4] = {};
 };
 
@@ -351,6 +352,7 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
     for (int i = 0; i < 4; ++i) {
         burnerCentersSame = burnerCentersSame &&
             a.burnerCenterX[i] == b.burnerCenterX[i] &&
+            a.burnerCenterY[i] == b.burnerCenterY[i] &&
             a.burnerCenterZ[i] == b.burnerCenterZ[i];
     }
     return a.width == b.width &&
@@ -439,6 +441,7 @@ void applySceneEmitterParams(FireSettings& settings) {
     settings.burnerCenterCount = emitter.burnerCenterCount;
     for (int i = 0; i < 4; ++i) {
         settings.burnerCenterX[i] = emitter.burnerCenterX[i];
+        settings.burnerCenterY[i] = emitter.burnerCenterY[i];
         settings.burnerCenterZ[i] = emitter.burnerCenterZ[i];
     }
 }
@@ -1463,7 +1466,11 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
             },
             meshTranslation);
         params.burnerCenterX[i] = burnerPoint[0];
+        params.burnerCenterY[i] = burnerPoint[1];
         params.burnerCenterZ[i] = burnerPoint[2];
+    }
+    if (sceneId == 2 && params.burnerCenterCount > 0) {
+        params.heightNorm = (params.burnerCenterY[0] - 0.02f) / 2.03f;
     }
     return params;
 }
@@ -2075,9 +2082,10 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
             char label[24] = {};
             std::snprintf(label, sizeof(label), i == 0 ? "SRC ACTIVE" : "PORT %d", i);
             const float alphaBias = i == 0 ? 1.0f : 0.72f;
+            const float burnerY = settings.burnerCenterY[i] > 0.0f ? settings.burnerCenterY[i] : emitterY;
             drawProjectedEmitterMarker(
                 pixels,
-                {settings.burnerCenterX[i], emitterY, settings.burnerCenterZ[i]},
+                {settings.burnerCenterX[i], burnerY, settings.burnerCenterZ[i]},
                 settings.emitterRadius,
                 label,
                 0.18f * alphaBias,

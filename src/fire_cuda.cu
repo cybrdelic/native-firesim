@@ -59,6 +59,7 @@ struct SimParams {
     float emitterRadius;
     int burnerCenterCount;
     float burnerCenterX[4];
+    float burnerCenterY[4];
     float burnerCenterZ[4];
     int launchZStart;
     int launchZEnd;
@@ -3162,7 +3163,11 @@ bool stepAndRenderInternal(
     params.burnerCenterCount = std::max(0, std::min(4, settings.burnerCenterCount));
     for (int i = 0; i < 4; ++i) {
         params.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i]));
+        params.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i]));
         params.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i]));
+    }
+    if (params.sceneId == 2 && params.burnerCenterCount > 0) {
+        params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (params.burnerCenterY[0] - 0.02f) / 2.03f));
     }
     updateCameraCache(params);
 
