@@ -61,6 +61,9 @@ def analyze(path: Path) -> dict:
     presented = [int(number(row, "presented")) for row in rows]
     copied = [int(number(row, "copied")) for row in rows]
     reused = [int(number(row, "reusedDisplayFrame")) for row in rows]
+    worker_published = [int(number(row, "workerPublishedFrames")) for row in rows]
+    worker_physics = [int(number(row, "workerPhysicsFrames")) for row in rows]
+    worker_render_only = [int(number(row, "workerRenderOnlyFrames")) for row in rows]
     tick_ms = [number(row, "tickMs") for row in rows]
     frame_us = [number(row, "frameUs") for row in rows]
     present_us = [number(row, "presentUs") for row in rows if int(number(row, "presented")) == 1]
@@ -75,6 +78,15 @@ def analyze(path: Path) -> dict:
     present_rate = sum(presented) / len(presented)
     copy_rate = sum(copied) / len(copied)
     reuse_rate = sum(reused) / len(reused)
+    physics_deltas = [max(0, b - a) for a, b in zip(worker_physics, worker_physics[1:])]
+    render_only_deltas = [max(0, b - a) for a, b in zip(worker_render_only, worker_render_only[1:])]
+    published_deltas = [max(0, b - a) for a, b in zip(worker_published, worker_published[1:])]
+    physics_steps = sum(physics_deltas)
+    render_only_steps = sum(render_only_deltas)
+    published_steps = sum(published_deltas)
+    simulated_worker_steps = physics_steps + render_only_steps
+    worker_physics_ratio = physics_steps / max(1, simulated_worker_steps)
+    longest_render_only_run = longest_run([1 if value > 0 else 0 for value in render_only_deltas], 1)
     issues: list[str] = []
 
     if present_rate < 0.70:
@@ -89,6 +101,10 @@ def analyze(path: Path) -> dict:
         issues.append("presentation misses have periodic every-N-frame pattern")
     if copy_rate < 0.02 and reuse_rate < 0.20:
         issues.append("trace lacks copied or intentionally reused CUDA frames")
+    if simulated_worker_steps >= 8 and worker_physics_ratio < 0.92:
+        issues.append("worker physics cadence is below published frame cadence")
+    if longest_render_only_run > 0:
+        issues.append("worker emitted render-only frames between physics updates")
 
     return {
         "path": str(path),
@@ -96,6 +112,12 @@ def analyze(path: Path) -> dict:
         "presentRate": present_rate,
         "copyRate": copy_rate,
         "reuseRate": reuse_rate,
+        "workerPhysicsRatio": worker_physics_ratio,
+        "workerPhysicsSteps": physics_steps,
+        "workerRenderOnlySteps": render_only_steps,
+        "workerPublishedSteps": published_steps,
+        "simulatedWorkerSteps": simulated_worker_steps,
+        "longestRenderOnlyRun": longest_render_only_run,
         "meanFrameIntervalMs": statistics.fmean(frame_intervals) if frame_intervals else 0.0,
         "meanPresentIntervalMs": mean_present_interval,
         "p95PresentIntervalMs": p95_present_interval,

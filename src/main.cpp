@@ -68,7 +68,7 @@ constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
-constexpr int kWorkerPhysicsFrameInterval = 3;
+constexpr int kWorkerPhysicsFrameInterval = 1;
 constexpr int kSceneCount = 3;
 
 struct UiRect {
