@@ -293,6 +293,13 @@ double g_workerPublishedHz = 0.0;
 double g_workerPhysicsHz = 0.0;
 double g_workerRenderOnlyHz = 0.0;
 unsigned long long g_displayFrameAgeMs = 0;
+unsigned long long g_sharedRingAcquireTimeouts = 0;
+unsigned long long g_sharedRingNoCandidateFrames = 0;
+unsigned long long g_sharedRingCopyStarvationFrames = 0;
+unsigned long long g_sharedRingSkippedActiveDisplaySlot = 0;
+LONG g_sharedRingLastCopiedSharedSlot = -1;
+LONG g_sharedRingLastCopiedDisplaySlot = -1;
+LONG g_sharedRingLastCopiedSequence = 0;
 bool g_uiTextureUploaded = false;
 
 void stopCudaWorker();
@@ -898,14 +905,15 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | present %.0fhz | worker %.0fhz | reuse %.0fhz | age %llums | %s scene | %s | %.48s",
+        "Native FireSim %s | present %.0fhz | worker %.0fhz | reuse %.0fhz | ring %ld>%ld | age %llums | %s | %.44s",
         g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
         displayedFps,
         g_workerPublishedHz,
         g_liveReusedPresentHz,
+        static_cast<long>(g_sharedRingLastCopiedSharedSlot),
+        static_cast<long>(g_sharedRingLastCopiedDisplaySlot),
         g_displayFrameAgeMs,
         sceneName(g_activeScene),
-        toolName(g_activeGizmo),
         g_workerUiStatus);
     SetWindowTextA(g_window, title);
 }
@@ -1653,7 +1661,9 @@ bool copyD3DWorkerFrame() {
     }
 
     int copiedSlot = -1;
+    int copiedDisplaySlot = -1;
     LONG copiedSequence = g_lastCopiedWorkerSequence;
+    bool sawReadyNewerSequence = false;
     bool skipped[kSharedFrameSlots] = {};
     for (int attempt = 0; attempt < kSharedFrameSlots; ++attempt) {
         int newestSlot = -1;
@@ -1668,6 +1678,7 @@ bool copyD3DWorkerFrame() {
                 continue;
             }
             if (sequence > newestSequence) {
+                sawReadyNewerSequence = true;
                 newestSlot = slot;
                 newestSequence = sequence;
             }
@@ -1678,6 +1689,7 @@ bool copyD3DWorkerFrame() {
 
         const HRESULT acquire = g_d3d.sharedSimMutexes[newestSlot]->AcquireSync(1, 0);
         if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+            ++g_sharedRingAcquireTimeouts;
             skipped[newestSlot] = true;
             continue;
         }
@@ -1691,12 +1703,14 @@ bool copyD3DWorkerFrame() {
         if (copyCandidate) {
             int targetSlot = g_d3d.nextDisplaySimSlot;
             if (targetSlot == g_d3d.activeDisplaySimSlot) {
+                ++g_sharedRingSkippedActiveDisplaySlot;
                 targetSlot = (targetSlot + 1) % kDisplayFrameSlots;
             }
             g_d3d.context->CopyResource(g_d3d.displaySimTextures[targetSlot].Get(), g_d3d.sharedSimTextures[newestSlot].Get());
             g_d3d.activeDisplaySimSlot = targetSlot;
             g_d3d.nextDisplaySimSlot = (targetSlot + 1) % kDisplayFrameSlots;
             copiedSlot = newestSlot;
+            copiedDisplaySlot = targetSlot;
             copiedSequence = sequenceB;
         }
 
@@ -1711,10 +1725,18 @@ bool copyD3DWorkerFrame() {
         skipped[newestSlot] = true;
     }
     if (copiedSlot < 0) {
+        if (sawReadyNewerSequence) {
+            ++g_sharedRingCopyStarvationFrames;
+        } else {
+            ++g_sharedRingNoCandidateFrames;
+        }
         return false;
     }
 
     g_lastCopiedWorkerSequence = copiedSequence;
+    g_sharedRingLastCopiedSharedSlot = copiedSlot;
+    g_sharedRingLastCopiedDisplaySlot = copiedDisplaySlot;
+    g_sharedRingLastCopiedSequence = copiedSequence;
     g_d3d.hasSimFrame = true;
     return true;
 }
@@ -2793,12 +2815,14 @@ void serviceCudaWorkerWatchdog() {
             std::snprintf(
                 g_workerUiStatus,
                 sizeof(g_workerUiStatus),
-                "app %.0f present %.0f copy %.0f reuse %.0f pub %.0f age %llums gpu %.1fms pub %.1fms",
+                "app %.0f present %.0f copy %.0f reuse %.0f pub %.0f ring %ld>%ld age %llums gpu %.1fms pub %.1fms",
                 g_visualFps,
                 g_livePresentHz,
                 g_liveCopiedHz,
                 g_liveReusedPresentHz,
                 g_workerPublishedHz,
+                static_cast<long>(g_sharedRingLastCopiedSharedSlot),
+                static_cast<long>(g_sharedRingLastCopiedDisplaySlot),
                 frameAge,
                 cudaMs,
                 publishMs);
@@ -4273,6 +4297,9 @@ int runDiagnostics() {
     out << "mainViewportMode=real CUDA worker volume; no animated simulation fallback\n";
     out << "workerProcessIsolation=true\n";
     out << "sharedFrameTransport=" << kSharedViewportName << "\n";
+    out << "sharedTextureRingAudit=nonblocking keyed mutex acquire, newest-even sequence selection, display-slot rotation, timeout/no-candidate/starvation telemetry\n";
+    out << "sharedTextureRingSlots=" << kSharedFrameSlots << "\n";
+    out << "displayTextureRingSlots=" << kDisplayFrameSlots << "\n";
     out << "workerFrameStaleMs=" << kWorkerFrameStaleMs << "\n";
     out << "workerHeartbeatStaleMs=" << kWorkerHeartbeatStaleMs << "\n";
     out << "workerKillStaleMs=" << kWorkerKillStaleMs << "\n";
@@ -4392,7 +4419,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         CreateDirectoryA("out", nullptr);
         frameTrace.open("out\\live-frame-trace.csv", std::ios::binary);
         if (frameTrace) {
-            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,reusedDisplayFrame,uploadUi,backend,seq,slot,frameAgeMs,workerPublishedFrames,workerPhysicsFrames,workerRenderOnlyFrames,workerFrameUs,workerCudaUs,workerPublishUs\n";
+            frameTrace << "tickMs,dtMs,copyUs,presentUs,frameUs,copied,presented,reusedDisplayFrame,uploadUi,backend,seq,slot,frameAgeMs,ringSharedSlot,ringDisplaySlot,ringTimeouts,ringNoCandidate,ringStarved,workerPublishedFrames,workerPhysicsFrames,workerRenderOnlyFrames,workerFrameUs,workerCudaUs,workerPublishUs\n";
         }
     }
 
@@ -4517,6 +4544,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 << static_cast<long>(g_lastCopiedWorkerSequence) << ","
                 << (g_sharedViewport == nullptr ? -1L : static_cast<long>(g_sharedViewport->latestFrameSlot)) << ","
                 << g_displayFrameAgeMs << ","
+                << static_cast<long>(g_sharedRingLastCopiedSharedSlot) << ","
+                << static_cast<long>(g_sharedRingLastCopiedDisplaySlot) << ","
+                << g_sharedRingAcquireTimeouts << ","
+                << g_sharedRingNoCandidateFrames << ","
+                << g_sharedRingCopyStarvationFrames << ","
                 << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerPublishedFrames)) << ","
                 << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerPhysicsFrames)) << ","
                 << (g_sharedViewport == nullptr ? 0L : static_cast<long>(g_sharedViewport->workerRenderOnlyFrames)) << ","

@@ -56,6 +56,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: shared texture ring"
+    & (Join-Path $PSScriptRoot "verify-shared-texture-ring.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: imported scene assets"
     & (Join-Path $PSScriptRoot "verify-scene-assets.ps1")
     if ($LASTEXITCODE -ne 0) {
