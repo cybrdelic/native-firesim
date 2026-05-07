@@ -743,6 +743,24 @@ __device__ float orientedCapsuleMask(float x, float z, float cx, float cz, float
     return smoothstepf(radius, radius * 0.22f, dist);
 }
 
+__device__ float gasBurnerPortSource(float x, float z, const SimParams& p) {
+    const float sourceRadius = fmaxf(0.04f, p.emitterRadius);
+    const float cx = p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
+    const float cz = p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
+    const float px = x - cx;
+    const float pz = z - cz;
+    const float radius = sqrtf(px * px + pz * pz);
+    const float angle = atan2f(pz, px);
+    const float outerPortRing = smoothstepf(sourceRadius * 0.050f, sourceRadius * 0.010f, fabsf(radius - sourceRadius * 0.72f));
+    const float innerPilotRing = smoothstepf(sourceRadius * 0.035f, sourceRadius * 0.008f, fabsf(radius - sourceRadius * 0.35f));
+    const float ports = 0.5f + 0.5f * cosf(angle * 32.0f);
+    const float portMask = smoothstepf(0.86f, 0.995f, ports);
+    const float attachmentClamp = smoothstepf(sourceRadius * 0.92f, sourceRadius * 0.76f, radius);
+    const float noPoolCenter = smoothstepf(sourceRadius * 0.17f, sourceRadius * 0.34f, radius);
+    const float pilot = smoothstepf(sourceRadius * 0.11f, 0.000f, radius) * 0.020f;
+    return saturate((outerPortRing * portMask * 2.35f + innerPilotRing * 0.12f) * attachmentClamp * noPoolCenter + pilot);
+}
+
 __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
     if (p.sceneId == 1) {
         const float logA = orientedCapsuleMask(x, z, -0.06f, 0.01f, 0.38f, 0.34f, 0.060f);
@@ -759,25 +777,7 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
         return saturate((logA * 0.72f + logB * 0.70f + logC * 0.54f + coalBed * 0.84f + contactPyrolysis * 1.18f) * (1.0f - cracks * 0.24f));
     }
     if (p.sceneId == 2) {
-        const float sourceRadius = fmaxf(0.04f, p.emitterRadius);
-        float source = 0.0f;
-        const int centerCount = 1;
-        for (int i = 0; i < centerCount; ++i) {
-            const float cx = p.burnerCenterCount > 0 ? p.burnerCenterX[i] : p.emitterCenterX;
-            const float cz = p.burnerCenterCount > 0 ? p.burnerCenterZ[i] : p.emitterCenterZ;
-            const float px = x - cx;
-            const float pz = z - cz;
-            const float radius = sqrtf(px * px + pz * pz);
-            const float angle = atan2f(pz, px);
-            const float ring = smoothstepf(sourceRadius * 0.072f, sourceRadius * 0.014f, fabsf(radius - sourceRadius));
-            const float innerRing = smoothstepf(sourceRadius * 0.052f, sourceRadius * 0.012f, fabsf(radius - sourceRadius * 0.52f));
-            const float ports = 0.5f + 0.5f * cosf(angle * 32.0f);
-            const float portMask = smoothstepf(0.80f, 0.992f, ports);
-            const float centerPilot = smoothstepf(sourceRadius * 0.22f, 0.000f, radius) * 0.045f;
-            source = fmaxf(source, (ring * (0.035f + portMask * 1.72f) + innerRing * 0.055f + centerPilot) *
-                smoothstepf(sourceRadius * 1.28f, sourceRadius * 1.05f, radius));
-        }
-        return saturate(source);
+        return gasBurnerPortSource(x, z, p);
     }
     const float tray = smoothstepf(1.08f, 0.030f, fabsf(x)) * smoothstepf(0.56f, 0.026f, fabsf(z));
     const float emberMat = smoothstepf(1.00f, 0.018f, fabsf(x)) * smoothstepf(0.50f, 0.020f, fabsf(z));
@@ -795,7 +795,7 @@ __device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
 __device__ float fuelBedSource(float x, float z, float h, const SimParams& p) {
     const float material = fuelBedMaterial(x, z, p);
     const float height = p.sceneId == 2
-        ? smoothstepf(fmaxf(0.005f, p.emitterHeightBandNorm * 0.34f), fmaxf(0.0015f, p.emitterHeightBandNorm * 0.055f), fabsf(h - p.emitterHeightNorm))
+        ? smoothstepf(fmaxf(0.004f, p.emitterHeightBandNorm * 0.24f), fmaxf(0.0015f, p.emitterHeightBandNorm * 0.045f), fabsf(h - p.emitterHeightNorm))
         : smoothstepf(p.sceneId == 1 ? 0.245f : 0.145f, 0.00f, h);
     const float emberBreathing = 0.84f + 0.16f * fbm(make_float2(x * 9.0f + p.time * 0.035f, z * 11.0f - p.time * 0.025f));
     const float exposedFuel = saturate(material * emberBreathing);
