@@ -22,7 +22,7 @@ foreach ($entry in $expected) {
 }
 
 if ($missing.Count -gt 0) {
-    Write-Host "scene asset check: built-in native mesh fallback will be used"
+    Write-Host "scene asset check failed: required imported runtime meshes are missing"
     foreach ($path in $missing) {
         Write-Host "missing: $path"
     }

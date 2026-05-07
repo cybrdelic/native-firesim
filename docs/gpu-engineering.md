@@ -28,7 +28,7 @@ NativeFireSim treats GPU work as production kernel code, not shader toy code. A 
 - There is one canonical runtime configuration: 384x240 requested grid, 104 raymarch steps, and 176 embers.
 - The recursive `smoothstepf` helper was replaced with a non-recursive inverted-edge implementation.
 - The main app starts an isolated CUDA worker for real 3D volume frames and shows explicit stale-worker state if worker frames are not fresh.
-- The shared frame transport is a 3-slot FP16 D3D11 keyed-mutex texture ring exposed through `Local\NativeFireSimViewportFrameV7`.
+- The shared frame transport is a 3-slot FP16 D3D11 keyed-mutex texture ring exposed through `Local\NativeFireSimViewportFrameV9`.
 - The presenter uses a flip-model FP16 swap chain when available and non-blocking present, so a full compositor queue drops a present instead of blocking the UI thread.
 - The live worker owns its timer-resolution scope, paces publish at 180 FPS, and reports worker timing plus fresh copied-frame throughput separately.
 - The host presents only fresh CUDA frames or overlay changes; stale worker metadata does not trigger duplicate GPU presents.

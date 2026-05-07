@@ -19,6 +19,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-runtime-contract-drift.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Write-Host "roadmap gate: worker lifecycle"
     & (Join-Path $PSScriptRoot "verify-worker-lifecycle.ps1")
