@@ -386,6 +386,33 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         burnerCentersSame;
 }
 
+const char* fireStreamHealthLabel() {
+    if (!g_cudaWorkerRequested || g_sharedViewport == nullptr) {
+        return "fire-stream disabled";
+    }
+    if (g_sharedViewport->workerStatus < 0) {
+        return "fire-stream worker error";
+    }
+    if (g_displayFrameAgeMs > kWorkerFrameStaleMs ||
+        g_sharedRingCopyStarvationFrames > 0 ||
+        g_sharedRingNoCandidateFrames > 12) {
+        return "fire-stream stale";
+    }
+    if (g_workerPhysicsHz > 1.0 && g_liveCopiedHz > 1.0 && g_liveCopiedHz < g_workerPhysicsHz * 0.45) {
+        return "fire-stream copy lag";
+    }
+    if (g_sharedRingAcquireTimeouts > 12) {
+        return "fire-stream ring pressure";
+    }
+    return "fire-stream healthy";
+}
+
+bool fireStreamNeedsOperatorWarning() {
+    const char* health = fireStreamHealthLabel();
+    return std::strcmp(health, "fire-stream healthy") != 0 &&
+           std::strcmp(health, "fire-stream disabled") != 0;
+}
+
 bool overlayStateDirty(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
     return !g_haveLastOverlaySettings ||
         !sameFireSettings(g_lastOverlaySettings, settings) ||
@@ -971,10 +998,12 @@ void updateTitle(float fps) {
     std::snprintf(
         title,
         sizeof(title),
-        "Native FireSim %s | present %.0fhz | worker %.0fhz | reuse %.0fhz | ring %ld>%ld | age %llums | %s | %.44s",
+        "Native FireSim %s | %s | present %.0fhz | worker %.0fhz | copy %.0fhz | reuse %.0fhz | ring %ld>%ld | age %llums | %s | %.44s",
         g_useCudaBackend ? "CUDA 3D volume" : "CUDA worker waiting",
+        fireStreamHealthLabel(),
         displayedFps,
         g_workerPublishedHz,
+        g_liveCopiedHz,
         g_liveReusedPresentHz,
         static_cast<long>(g_sharedRingLastCopiedSharedSlot),
         static_cast<long>(g_sharedRingLastCopiedDisplaySlot),
@@ -2968,22 +2997,20 @@ void serviceCudaWorkerWatchdog() {
         g_lastWorkerStatusFormatTickMs = now;
     } else if (g_sharedViewport->lastFrameTickMs != 0 && frameAge <= kWorkerFrameStaleMs) {
         if (now - g_lastWorkerStatusFormatTickMs >= kWorkerStatusUiUpdateMs) {
-            const double cudaMs = static_cast<double>(g_sharedViewport->workerCudaMicros) / 1000.0;
-            const double publishMs = static_cast<double>(g_sharedViewport->workerPublishMicros) / 1000.0;
             std::snprintf(
                 g_workerUiStatus,
                 sizeof(g_workerUiStatus),
-                "app %.0f present %.0f copy %.0f reuse %.0f pub %.0f ring %ld>%ld age %llums gpu %.1fms pub %.1fms",
+                "%s app %.0f present %.0f copy %.0f physics %.0f pub %.0f ring %ld>%ld age %llums starved %llu",
+                fireStreamNeedsOperatorWarning() ? "WARN" : "OK",
                 g_visualFps,
                 g_livePresentHz,
                 g_liveCopiedHz,
-                g_liveReusedPresentHz,
+                g_workerPhysicsHz,
                 g_workerPublishedHz,
                 static_cast<long>(g_sharedRingLastCopiedSharedSlot),
                 static_cast<long>(g_sharedRingLastCopiedDisplaySlot),
                 frameAge,
-                cudaMs,
-                publishMs);
+                g_sharedRingCopyStarvationFrames);
             g_lastWorkerStatusFormatTickMs = now;
         }
     } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
@@ -4818,7 +4845,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             std::snprintf(
                 profileDetail,
                 sizeof(profileDetail),
-                "appFps=%.1f presentHz=%.1f copiedHz=%.1f reusedPresentHz=%.1f workerPublishHz=%.1f physicsHz=%.1f renderOnlyHz=%.1f frameAgeMs=%llu copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
+                "health=%s appFps=%.1f presentHz=%.1f copiedHz=%.1f reusedPresentHz=%.1f workerPublishHz=%.1f physicsHz=%.1f renderOnlyHz=%.1f frameAgeMs=%llu ringTimeouts=%llu ringNoCandidate=%llu ringStarved=%llu copyMs=%.3f presentMs=%.3f seq=%ld slot=%ld",
+                fireStreamHealthLabel(),
                 g_visualFps,
                 g_livePresentHz,
                 g_liveCopiedHz,
@@ -4827,6 +4855,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
                 g_workerPhysicsHz,
                 g_workerRenderOnlyHz,
                 g_displayFrameAgeMs,
+                g_sharedRingAcquireTimeouts,
+                g_sharedRingNoCandidateFrames,
+                g_sharedRingCopyStarvationFrames,
                 g_liveIntervalCopyMs,
                 g_liveIntervalPresentMs,
                 static_cast<long>(g_lastCopiedWorkerSequence),
