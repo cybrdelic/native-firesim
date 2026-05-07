@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "fire_cuda.h"
@@ -3091,13 +3092,24 @@ int runWorkerBenchmark(const std::string& args) {
     const double averageSubmitMs = totalCudaMs / frames;
     const double averagePublishMs = totalPublishMs / frames;
     const double averageFrameMs = totalFrameMs / frames;
-    const double averageCudaMs = averageFrameMs;
+    const double averageCudaMs = averageSubmitMs;
     const double averageVelocityMs = totalVelocityMs / measuredMetricFrames;
     const double averageReactionMs = totalReactionMs / measuredMetricFrames;
     const double averageProjectionMs = totalProjectionMs / measuredMetricFrames;
     const double averageLightingMs = totalLightingMs / measuredMetricFrames;
     const double averageRaymarchMs = totalRaymarchMs / measuredMetricFrames;
     const double averagePackMs = totalPackMs / measuredMetricFrames;
+    std::array<std::pair<const char*, double>, 6> hotspots = {{
+        {"velocity", averageVelocityMs},
+        {"reaction", averageReactionMs},
+        {"projection", averageProjectionMs},
+        {"lighting", averageLightingMs},
+        {"raymarch", averageRaymarchMs},
+        {"pack", averagePackMs},
+    }};
+    std::sort(hotspots.begin(), hotspots.end(), [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
     const std::string reportPath = joinPath(outputDir, "worker-benchmark.json");
     std::ofstream report(reportPath, std::ios::binary);
     if (!report) {
@@ -3129,6 +3141,13 @@ int runWorkerBenchmark(const std::string& args) {
     report << "  \"averageGpuRaymarchMs\": " << averageRaymarchMs << ",\n";
     report << "  \"averageGpuPackMs\": " << averagePackMs << ",\n";
     report << "  \"effectiveFps\": " << (averageFrameMs > 0.0 ? 1000.0 / averageFrameMs : 0.0) << ",\n";
+    report << "  \"hotspotRanking\": [\n";
+    for (std::size_t i = 0; i < hotspots.size(); ++i) {
+        report << "    {\"pass\": \"" << hotspots[i].first << "\", \"averageMs\": " << hotspots[i].second << "}";
+        report << (i + 1 == hotspots.size() ? "\n" : ",\n");
+    }
+    report << "  ],\n";
+    report << "  \"hotspotPolicy\": \"rank measured CUDA passes before optimizing; do not lower quality to improve FPS in this pass\",\n";
     report << "  \"output\": \"" << jsonEscape(reportPath) << "\"\n";
     report << "}\n";
     return stable ? 0 : 4;
@@ -4308,6 +4327,7 @@ int runDiagnostics() {
     out << "presentationTargetFps=" << static_cast<int>(kDisplayMaxPresentFps) << "\n";
     out << "presentationPacing=2:1 fixed app pump to present cadence with intentional display-frame reuse\n";
     out << "presentVsync=false\n";
+    out << "kernelHotspotProfiling=worker benchmark reports true CUDA submit time, publish time, frame time, and sorted measured pass hotspots without quality reduction\n";
     out << "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "renderGraphPasses=" << kRenderGraphPasses << "\n";
