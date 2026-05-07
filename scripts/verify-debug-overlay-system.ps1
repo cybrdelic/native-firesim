@@ -13,7 +13,10 @@ Require-Text $main "applyPlacementOverrides(settings)" "placement debug offsets 
 Require-Text $main "MeshOffset.xyz" "placement debug offsets are not applied to GLTF mesh vertices"
 Require-Text $main "copyPlacementToClipboard" "placement debug coordinates cannot be copied"
 Require-Text $main '"SRC XYZ %.3f %.3f %.3f"' "placement debug source coordinate readout is missing"
-Require-Text $main '"P TARGET H/L X I/M Z"' "placement debug key help is missing"
+Require-Text $main "hitTestPlacementHandle" "placement debug handles cannot be selected directly"
+Require-Text $main "beginPlacementDrag" "placement debug drag start is missing"
+Require-Text $main "updatePlacementDrag" "placement debug drag update is missing"
+Require-Text $main '"DRAG CENTER XZ"' "placement debug drag help is missing"
 Require-Text $main "debugOverlaySystem=source markers, selected burner ports, GLB bounds, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness" "diagnostics debug overlay string is missing from source"
 if (Test-Path $diag) {
     $diagText = Get-Content $diag -Raw

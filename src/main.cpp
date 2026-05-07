@@ -198,6 +198,12 @@ struct SceneInstance {
     bool hasSelectedBurner = false;
 };
 
+struct Vec3 {
+    float x;
+    float y;
+    float z;
+};
+
 struct D3DDisplayState {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -295,6 +301,7 @@ bool g_leftDown = false;
 bool g_leftInViewport = false;
 bool g_rightDown = false;
 bool g_orbiting = false;
+bool g_placementDragging = false;
 bool g_needsReset = false;
 int g_resetFramesRemaining = 0;
 bool g_showGizmos = true;
@@ -308,6 +315,15 @@ int g_pointerFrameX = 0;
 int g_pointerFrameY = 0;
 bool g_pointerInViewport = false;
 int g_dragControl = 0;
+int g_placementDragAxis = 0;
+int g_placementDragStartX = 0;
+int g_placementDragStartY = 0;
+float g_placementDragStartSourceX = 0.0f;
+float g_placementDragStartSourceY = 0.0f;
+float g_placementDragStartSourceZ = 0.0f;
+float g_placementDragStartMeshX = 0.0f;
+float g_placementDragStartMeshY = 0.0f;
+float g_placementDragStartMeshZ = 0.0f;
 float g_wind = 0.0f;
 float g_turbulence = 1.00f;
 float g_cameraYaw = 0.0f;
@@ -371,11 +387,13 @@ float g_sourceNudgeZ[kSceneCount] = {};
 float g_meshNudgeX[kSceneCount] = {};
 float g_meshNudgeY[kSceneCount] = {};
 float g_meshNudgeZ[kSceneCount] = {};
-char g_placementStatus[192] = "P TARGET  H/L X  I/M Z  Q/E Y  K COPY";
+char g_placementStatus[192] = "DRAG CENTER XZ  DRAG TOP Y  P TARGET  K COPY";
 
 void stopCudaWorker();
 void appendRuntimeEvent(const char* event, const char* detail);
 const char* placementTargetName();
+bool projectWorldToViewport(Vec3 world, int& sx, int& sy, float& depth);
+Vec3 activePlacementWorld();
 
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
     bool burnerCentersSame = a.burnerCenterCount == b.burnerCenterCount;
@@ -972,6 +990,21 @@ void drawViewportOverlays(std::vector<std::uint32_t>& pixels, const FireSettings
     drawLinePx(pixels, ax, ay, ax + 44, ay, 1.0f, 0.12f, 0.08f, 0.86f);
     drawLinePx(pixels, ax, ay, ax, ay - 42, 0.18f, 1.0f, 0.25f, 0.86f);
     drawLinePx(pixels, ax, ay, ax - 30, ay + 20, 0.20f, 0.42f, 1.0f, 0.86f);
+
+    int hx = 0;
+    int hy = 0;
+    float depth = 0.0f;
+    if (projectWorldToViewport(activePlacementWorld(), hx, hy, depth)) {
+        const bool sourceTarget = g_placementTarget == 0;
+        const float r = sourceTarget ? 1.0f : 0.58f;
+        const float g = sourceTarget ? 0.42f : 0.72f;
+        const float b = sourceTarget ? 0.06f : 1.0f;
+        drawCirclePx(pixels, hx, hy, 18, r, g, b, 0.95f);
+        drawLinePx(pixels, hx, hy, hx, hy - 58, r, g, b, 0.82f);
+        drawCirclePx(pixels, hx, hy - 58, 13, 0.20f, 0.95f, 0.28f, 0.92f);
+        drawText(pixels, hx + 22, hy - 8, sourceTarget ? "SOURCE XZ" : "MESH XZ", 1, r, g, b, 0.94f);
+        drawText(pixels, hx + 18, hy - 66, "Y", 1, 0.20f, 0.95f, 0.28f, 0.94f);
+    }
 }
 
 void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
@@ -1025,14 +1058,14 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
     drawText(pixels, 790, 378, "OR KEYS 1-4", 1, 0.54f, 0.56f, 0.53f, 0.78f);
     drawText(pixels, 790, 404, placementTargetName(), 1, 0.70f, 0.78f, 1.0f, 0.88f);
     drawClippedText(pixels, 790, 422, g_placementStatus, 31, 1, 0.70f, 0.82f, 0.98f, 0.86f);
-    drawText(pixels, 790, 440, "P TARGET H/L X I/M Z", 1, 0.50f, 0.56f, 0.60f, 0.78f);
-    drawText(pixels, 790, 458, "SHIFT FAST   K COPY", 1, 0.50f, 0.56f, 0.60f, 0.78f);
+    drawText(pixels, 790, 440, "DRAG CENTER XZ", 1, 0.50f, 0.56f, 0.60f, 0.78f);
+    drawText(pixels, 790, 458, "DRAG TOP Y   K COPY", 1, 0.50f, 0.56f, 0.60f, 0.78f);
 
     drawText(
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   P PLACE TARGET   H/L X  I/M Z  Q/E Y   K COPY COORDS   S SCENE   D DEBUG" : "NO LIVE CUDA FRAME   P PLACE TARGET   H/L X  I/M Z  Q/E Y   K COPY COORDS   D DEBUG",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   DRAG HANDLE TO PLACE   P SOURCE/MESH   K COPY COORDS   S SCENE   D DEBUG" : "NO LIVE CUDA FRAME   DRAG HANDLE TO PLACE   P SOURCE/MESH   K COPY COORDS   D DEBUG",
         1,
         0.76f,
         0.78f,
@@ -1163,6 +1196,105 @@ void nudgePlacement(float dx, float dy, float dz) {
         g_meshNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeX[scene] + dx));
         g_meshNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_meshNudgeY[scene] + dy));
         g_meshNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeZ[scene] + dz));
+        markPlacementChanged(false);
+    }
+}
+
+Vec3 activeSourceWorldFromEmitters() {
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const SceneEmitterParams& emitter = g_sceneEmitters[scene];
+    Vec3 source = {
+        emitter.centerX + g_sourceNudgeX[scene],
+        emitter.heightNorm * 2.03f + 0.02f + g_sourceNudgeY[scene],
+        emitter.centerZ + g_sourceNudgeZ[scene]};
+    if (scene == 2 && emitter.burnerCenterCount > 0) {
+        source = {
+            emitter.burnerCenterX[0] + g_sourceNudgeX[scene],
+            emitter.burnerCenterY[0] + g_sourceNudgeY[scene],
+            emitter.burnerCenterZ[0] + g_sourceNudgeZ[scene]};
+    }
+    return source;
+}
+
+Vec3 activeMeshCenterWorld() {
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const RuntimeSceneMesh& mesh = g_sceneMeshes[scene];
+    if (!mesh.loaded) {
+        return {g_meshNudgeX[scene], g_meshNudgeY[scene], g_meshNudgeZ[scene]};
+    }
+    return {
+        (mesh.minX + mesh.maxX) * 0.5f + g_meshNudgeX[scene],
+        (mesh.minY + mesh.maxY) * 0.5f + g_meshNudgeY[scene],
+        (mesh.minZ + mesh.maxZ) * 0.5f + g_meshNudgeZ[scene]};
+}
+
+Vec3 activePlacementWorld() {
+    return g_placementTarget == 0 ? activeSourceWorldFromEmitters() : activeMeshCenterWorld();
+}
+
+int hitTestPlacementHandle(int frameX, int frameY) {
+    if (!g_showGizmos || g_cleanViewportMode) {
+        return 0;
+    }
+    int sx = 0;
+    int sy = 0;
+    float depth = 0.0f;
+    if (!projectWorldToViewport(activePlacementWorld(), sx, sy, depth)) {
+        return 0;
+    }
+    const int dx = frameX - sx;
+    const int dy = frameY - sy;
+    if (dx * dx + dy * dy <= 18 * 18) {
+        return 1;
+    }
+    const int hx = sx;
+    const int hy = sy - 58;
+    const int hdx = frameX - hx;
+    const int hdy = frameY - hy;
+    if (hdx * hdx + hdy * hdy <= 16 * 16) {
+        return 2;
+    }
+    return 0;
+}
+
+void beginPlacementDrag(int axis) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    g_placementDragging = true;
+    g_placementDragAxis = axis;
+    g_placementDragStartX = g_pointerFrameX;
+    g_placementDragStartY = g_pointerFrameY;
+    g_placementDragStartSourceX = g_sourceNudgeX[scene];
+    g_placementDragStartSourceY = g_sourceNudgeY[scene];
+    g_placementDragStartSourceZ = g_sourceNudgeZ[scene];
+    g_placementDragStartMeshX = g_meshNudgeX[scene];
+    g_placementDragStartMeshY = g_meshNudgeY[scene];
+    g_placementDragStartMeshZ = g_meshNudgeZ[scene];
+    markPlacementChanged(false);
+}
+
+void updatePlacementDrag() {
+    if (!g_placementDragging) {
+        return;
+    }
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const float scale = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.0048f : 0.0024f;
+    const float dx = static_cast<float>(g_pointerFrameX - g_placementDragStartX) * scale;
+    const float dy = static_cast<float>(g_pointerFrameY - g_placementDragStartY) * scale;
+    if (g_placementTarget == 0) {
+        if (g_placementDragAxis == 1) {
+            g_sourceNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceX + dx));
+            g_sourceNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceZ - dy));
+        } else {
+            g_sourceNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_placementDragStartSourceY - dy));
+        }
+        markPlacementChanged(true);
+    } else {
+        if (g_placementDragAxis == 1) {
+            g_meshNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshX + dx));
+            g_meshNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshZ - dy));
+        } else {
+            g_meshNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_placementDragStartMeshY - dy));
+        }
         markPlacementChanged(false);
     }
 }
@@ -2172,12 +2304,6 @@ bool copyD3DWorkerFrame() {
     return true;
 }
 
-struct Vec3 {
-    float x;
-    float y;
-    float z;
-};
-
 Vec3 sub3(Vec3 a, Vec3 b) {
     return {a.x - b.x, a.y - b.y, a.z - b.z};
 }
@@ -2658,12 +2784,22 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (g_pointerInViewport) {
+            const int placementAxis = hitTestPlacementHandle(g_pointerFrameX, g_pointerFrameY);
+            if (placementAxis != 0) {
+                beginPlacementDrag(placementAxis);
+                g_leftInViewport = false;
+                return 0;
+            }
+        }
+        if (g_pointerInViewport) {
             g_leftInViewport = true;
         }
         return 0;
     case WM_LBUTTONUP:
         g_leftDown = false;
         g_leftInViewport = false;
+        g_placementDragging = false;
+        g_placementDragAxis = 0;
         g_dragControl = 0;
         if (!g_rightDown) {
             ReleaseCapture();
@@ -2692,6 +2828,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_cameraYaw += static_cast<float>(dx) * 0.0085f;
             g_cameraPitch += static_cast<float>(dy) * 0.0060f;
             g_cameraPitch = std::max(-0.55f, std::min(0.52f, g_cameraPitch));
+        } else if (g_placementDragging) {
+            updatePlacementDrag();
         } else if (g_dragControl != 0) {
             applyPanelDrag();
         }
