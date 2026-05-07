@@ -161,6 +161,12 @@ struct RuntimeSceneMesh {
     std::vector<std::uint32_t> indices;
     ComPtr<ID3D11Buffer> vertexBuffer;
     ComPtr<ID3D11Buffer> indexBuffer;
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float minZ = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    float maxZ = 0.0f;
     bool loaded = false;
 };
 
@@ -1244,6 +1250,18 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
             mesh.vertices[i].cg = 0.036f;
             mesh.vertices[i].cb = 0.039f;
         }
+        if (i == 0) {
+            mesh.minX = mesh.maxX = mesh.vertices[i].px;
+            mesh.minY = mesh.maxY = mesh.vertices[i].py;
+            mesh.minZ = mesh.maxZ = mesh.vertices[i].pz;
+        } else {
+            mesh.minX = std::min(mesh.minX, mesh.vertices[i].px);
+            mesh.minY = std::min(mesh.minY, mesh.vertices[i].py);
+            mesh.minZ = std::min(mesh.minZ, mesh.vertices[i].pz);
+            mesh.maxX = std::max(mesh.maxX, mesh.vertices[i].px);
+            mesh.maxY = std::max(mesh.maxY, mesh.vertices[i].py);
+            mesh.maxZ = std::max(mesh.maxZ, mesh.vertices[i].pz);
+        }
     }
     mesh.indices = indices;
     mesh.loaded = true;
@@ -1887,9 +1905,60 @@ void drawProjectedEmitterMarker(
     drawText(pixels, cx + 10, cy - 18, label, 1, cr, cg, cb, 0.88f);
 }
 
+void drawProjectedBoxOverlay(std::vector<std::uint32_t>& pixels, Vec3 minCorner, Vec3 maxCorner, const char* label, float r, float g, float b) {
+    const Vec3 corners[8] = {
+        {minCorner.x, minCorner.y, minCorner.z},
+        {maxCorner.x, minCorner.y, minCorner.z},
+        {maxCorner.x, maxCorner.y, minCorner.z},
+        {minCorner.x, maxCorner.y, minCorner.z},
+        {minCorner.x, minCorner.y, maxCorner.z},
+        {maxCorner.x, minCorner.y, maxCorner.z},
+        {maxCorner.x, maxCorner.y, maxCorner.z},
+        {minCorner.x, maxCorner.y, maxCorner.z},
+    };
+    int sx[8] = {};
+    int sy[8] = {};
+    bool visible[8] = {};
+    for (int i = 0; i < 8; ++i) {
+        float depth = 0.0f;
+        visible[i] = projectWorldToViewport(corners[i], sx[i], sy[i], depth);
+    }
+    const int edges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    for (const auto& edge : edges) {
+        if (visible[edge[0]] && visible[edge[1]]) {
+            drawLinePx(pixels, sx[edge[0]], sy[edge[0]], sx[edge[1]], sy[edge[1]], r, g, b, 0.62f);
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (visible[i]) {
+            drawText(pixels, sx[i] + 4, sy[i] - 10, label, 1, r, g, b, 0.72f);
+            break;
+        }
+    }
+}
+
 void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport) {
     if (cleanViewport || (settings.showGizmos == 0 && settings.renderDebugMode == 0)) {
         return;
+    }
+
+    drawProjectedBoxOverlay(pixels, {-1.05f, 0.02f, -0.82f}, {1.05f, 2.03f, 0.82f}, "VOLUME", 0.14f, 0.58f, 1.0f);
+    drawProjectedBoxOverlay(pixels, {-0.92f, 0.0f, -0.66f}, {0.92f, 0.16f, 0.66f}, "FUEL BED", 1.0f, 0.54f, 0.10f);
+    drawLinePx(pixels, 900, 478, 950, 478, 1.0f, 0.10f, 0.08f, 0.86f);
+    drawLinePx(pixels, 900, 478, 900, 428, 0.08f, 1.0f, 0.18f, 0.86f);
+    drawLinePx(pixels, 900, 478, 866, 504, 0.20f, 0.50f, 1.0f, 0.86f);
+    char frameLabel[96] = {};
+    std::snprintf(frameLabel, sizeof(frameLabel), "FRAME AGE %llums  RING %ld>%ld", g_displayFrameAgeMs, static_cast<long>(g_sharedRingLastCopiedSharedSlot), static_cast<long>(g_sharedRingLastCopiedDisplaySlot));
+    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 28, frameLabel, 1, 0.58f, 0.92f, 0.72f, 0.92f);
+    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 46, "OVERLAY: SOURCE / VOLUME / FUEL BED / AXES / FRESHNESS", 1, 0.76f, 0.80f, 0.72f, 0.86f);
+
+    const RuntimeSceneMesh& mesh = g_sceneMeshes[std::max(0, std::min(kSceneCount - 1, settings.sceneId))];
+    if (mesh.loaded) {
+        drawProjectedBoxOverlay(pixels, {mesh.minX, mesh.minY, mesh.minZ}, {mesh.maxX, mesh.maxY, mesh.maxZ}, "GLB BOUNDS", 0.82f, 0.72f, 1.0f);
     }
 
     const float emitterY = std::max(0.02f, settings.emitterHeightNorm * 2.03f + 0.02f);
@@ -4428,6 +4497,7 @@ int runDiagnostics() {
     out << "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "renderGraphPasses=" << kRenderGraphPasses << "\n";
+    out << "debugOverlaySystem=source markers, selected burner ports, GLB bounds, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness\n";
     out << "renderGraphOwnsCameraResponse=true\n";
     out << "hdrCameraPipeline=" << kHdrCameraPipeline << "\n";
     out << "uiOverlayAfterCameraResponse=true\n";
