@@ -228,6 +228,20 @@ enum class RuntimeTransitionReason {
     OverlayChanged
 };
 
+enum class WorkerLifecycleReason {
+    StartRequested,
+    CreateProcessFailed,
+    RestartBlocked,
+    StaleHeartbeatKill,
+    StopRequested,
+    ForcedTerminate,
+    Exited,
+    GpuInitFailed,
+    InteropFailed,
+    RenderFailed,
+    CleanExit
+};
+
 struct CanonicalRuntimeState {
     int sceneId = 0;
     int debugMode = 0;
@@ -2596,6 +2610,28 @@ void appendRuntimeEvent(const char* event, const char* detail = "") {
     log << tickMs() << "," << event << "," << detail << "\n";
 }
 
+const char* workerLifecycleReasonName(WorkerLifecycleReason reason) {
+    switch (reason) {
+    case WorkerLifecycleReason::StartRequested: return "start-requested";
+    case WorkerLifecycleReason::CreateProcessFailed: return "createprocess-failed";
+    case WorkerLifecycleReason::RestartBlocked: return "restart-blocked";
+    case WorkerLifecycleReason::StaleHeartbeatKill: return "stale-heartbeat-kill";
+    case WorkerLifecycleReason::StopRequested: return "stop-requested";
+    case WorkerLifecycleReason::ForcedTerminate: return "forced-terminate";
+    case WorkerLifecycleReason::Exited: return "exited";
+    case WorkerLifecycleReason::GpuInitFailed: return "gpu-init-failed";
+    case WorkerLifecycleReason::InteropFailed: return "interop-failed";
+    case WorkerLifecycleReason::RenderFailed: return "render-failed";
+    default: return "clean-exit";
+    }
+}
+
+void appendWorkerLifecycleEvent(WorkerLifecycleReason reason, const char* detail = "") {
+    char event[96] = {};
+    std::snprintf(event, sizeof(event), "worker-lifecycle:%s", workerLifecycleReasonName(reason));
+    appendRuntimeEvent(event, detail);
+}
+
 bool initializeSharedViewport(bool reset) {
     if (g_sharedViewport != nullptr) {
         return true;
@@ -2725,6 +2761,7 @@ bool cudaWorkerProcessAlive() {
         char detail[96] = {};
         std::snprintf(detail, sizeof(detail), "exitCode=%lu", static_cast<unsigned long>(exitCode));
         appendRuntimeEvent("worker-exited", detail);
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::Exited, detail);
         if (g_sharedViewport != nullptr) {
             g_sharedViewport->workerExitCode = static_cast<LONG>(exitCode);
             std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker exited: %lu", static_cast<unsigned long>(exitCode));
@@ -2751,6 +2788,7 @@ bool startCudaWorker() {
     if (g_workerRestartCount >= kWorkerRestartLimit) {
         g_workerRestartBlockedUntilMs = now + kWorkerRestartWindowMs;
         appendRuntimeEvent("worker-restart-blocked", "restart limit reached");
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::RestartBlocked, "restart limit reached");
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker disabled for cooldown after repeated exits");
         return false;
     }
@@ -2768,6 +2806,7 @@ bool startCudaWorker() {
     g_sharedViewport->workerStartTickMs = now;
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "starting CUDA worker");
     appendRuntimeEvent("worker-starting", "");
+    appendWorkerLifecycleEvent(WorkerLifecycleReason::StartRequested);
 
     char exePath[MAX_PATH] = {};
     if (GetModuleFileNameA(nullptr, exePath, static_cast<DWORD>(sizeof(exePath))) == 0) {
@@ -2798,6 +2837,7 @@ bool startCudaWorker() {
     if (!created) {
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CreateProcess failed: %lu", static_cast<unsigned long>(GetLastError()));
         appendRuntimeEvent("worker-createprocess-failed", g_sharedViewport->statusText);
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::CreateProcessFailed, g_sharedViewport->statusText);
         return false;
     }
     CloseHandle(process.hThread);
@@ -2807,11 +2847,13 @@ bool startCudaWorker() {
 }
 
 void stopCudaWorker() {
+    appendWorkerLifecycleEvent(WorkerLifecycleReason::StopRequested);
     if (g_sharedViewport != nullptr) {
         g_sharedViewport->shutdownRequested = 1;
     }
     if (g_cudaWorkerProcess != nullptr) {
         if (WaitForSingleObject(g_cudaWorkerProcess, 1800) == WAIT_TIMEOUT) {
+            appendWorkerLifecycleEvent(WorkerLifecycleReason::ForcedTerminate, "stop timeout");
             TerminateProcess(g_cudaWorkerProcess, 0);
         }
         CloseHandle(g_cudaWorkerProcess);
@@ -2834,6 +2876,7 @@ void serviceCudaWorkerWatchdog() {
 
     if (alive && g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge > kWorkerKillStaleMs) {
         appendRuntimeEvent("worker-stale-kill", "heartbeat exceeded kill threshold");
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::StaleHeartbeatKill, "heartbeat exceeded kill threshold");
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker heartbeat stale; restarting");
         g_sharedViewport->shutdownRequested = 1;
         if (g_cudaWorkerProcess != nullptr) {
@@ -3236,7 +3279,8 @@ int runCudaWorker(const std::string& args) {
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D FP16 target init failed");
-        appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
+            appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
+            appendWorkerLifecycleEvent(WorkerLifecycleReason::InteropFailed, g_sharedViewport->statusText);
         if (parentProcess != nullptr) {
             CloseHandle(parentProcess);
         }
@@ -3259,6 +3303,7 @@ int runCudaWorker(const std::string& args) {
         g_sharedViewport->workerExitCode = 3;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA init failed: %.150s", fireCudaLastError());
         appendRuntimeEvent("worker-cuda-init-failed", g_sharedViewport->statusText);
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::GpuInitFailed, g_sharedViewport->statusText);
         if (parentProcess != nullptr) {
             CloseHandle(parentProcess);
         }
@@ -3272,6 +3317,7 @@ int runCudaWorker(const std::string& args) {
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D/CUDA FP16 interop init failed");
         appendRuntimeEvent("worker-cuda-d3d-register-failed", fireCudaLastError());
         appendRuntimeEvent("worker-d3d-interop-init-failed", g_sharedViewport->statusText);
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::InteropFailed, g_sharedViewport->statusText);
         fireCudaShutdown();
         if (parentProcess != nullptr) {
             CloseHandle(parentProcess);
@@ -3342,6 +3388,7 @@ int runCudaWorker(const std::string& args) {
             g_sharedViewport->workerExitCode = 4;
             std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA %s failed: %.142s", advancePhysics ? "step" : "render", fireCudaLastError());
             appendRuntimeEvent("worker-cuda-render-failed", g_sharedViewport->statusText);
+            appendWorkerLifecycleEvent(WorkerLifecycleReason::RenderFailed, g_sharedViewport->statusText);
             break;
         }
         if (!fireCudaSynchronize()) {
@@ -3413,6 +3460,7 @@ int runCudaWorker(const std::string& args) {
     g_sharedViewport->workerStopTickMs = tickMs();
     std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "CUDA worker stopped");
     appendRuntimeEvent("worker-process-exiting", "");
+    appendWorkerLifecycleEvent(WorkerLifecycleReason::CleanExit);
     if (parentProcess != nullptr) {
         CloseHandle(parentProcess);
     }
@@ -4370,6 +4418,8 @@ int runDiagnostics() {
     out << "workerHeartbeatStaleMs=" << kWorkerHeartbeatStaleMs << "\n";
     out << "workerKillStaleMs=" << kWorkerKillStaleMs << "\n";
     out << "workerRestartLimitPerMinute=" << kWorkerRestartLimit << "\n";
+    out << "workerLifecycleReasons=start-requested,createprocess-failed,restart-blocked,stale-heartbeat-kill,stop-requested,forced-terminate,exited,gpu-init-failed,interop-failed,render-failed,clean-exit\n";
+    out << "workerLifecycleEvents=worker-lifecycle:<reason> entries in out/worker-events.log\n";
     out << "appPumpFps=" << static_cast<int>(kAppPumpFps) << "\n";
     out << "presentationTargetFps=" << static_cast<int>(kDisplayMaxPresentFps) << "\n";
     out << "presentationPacing=2:1 fixed app pump to present cadence with intentional display-frame reuse\n";
