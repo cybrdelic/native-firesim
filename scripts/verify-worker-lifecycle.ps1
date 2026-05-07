@@ -12,6 +12,10 @@ Require-Text $main "WorkerLifecycleReason::ForcedTerminate" "forced termination 
 Require-Text $main "WorkerLifecycleReason::GpuInitFailed" "GPU init failure reason is missing"
 Require-Text $main "WorkerLifecycleReason::InteropFailed" "interop failure reason is missing"
 Require-Text $main "WorkerLifecycleReason::RenderFailed" "render failure reason is missing"
+Require-Text $main "invalidateDisplayedCudaFrame()" "scene/reset path must invalidate stale displayed CUDA frames"
+Require-Text $main "g_d3d.activeDisplaySimSlot = -1" "display slot state must be cleared on scene/reset invalidation"
+Require-Text $main "clearSimulationFrame(g_simFrame)" "scene/reset invalidation must clear stale fire pixels"
+Require-Text $main "stopCudaWorker()" "scene switch must restart the worker boundary"
 Require-Text $main "worker-lifecycle:%s" "worker event prefix is missing"
 Require-Text $main "workerLifecycleReasons=start-requested,createprocess-failed,restart-blocked,stale-heartbeat-kill,stop-requested,forced-terminate,exited,gpu-init-failed,interop-failed,render-failed,clean-exit" "diagnostics worker lifecycle string is missing from source"
 if (Test-Path $diag) {

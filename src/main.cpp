@@ -476,6 +476,19 @@ void clearSimulationFrame(std::vector<std::uint32_t>& pixels) {
     pixels.assign(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, packBgra(0.006f, 0.007f, 0.008f));
 }
 
+void invalidateDisplayedCudaFrame() {
+    g_d3d.hasSimFrame = false;
+    g_d3d.activeDisplaySimSlot = -1;
+    g_d3d.nextDisplaySimSlot = 0;
+    g_cudaWorkerFrameLive = false;
+    g_useCudaBackend = false;
+    g_lastCopiedWorkerSequence = g_sharedViewport == nullptr ? 0 : g_sharedViewport->frameSequence;
+    g_sharedRingLastCopiedSharedSlot = -1;
+    g_sharedRingLastCopiedDisplaySlot = -1;
+    g_sharedRingLastCopiedSequence = 0;
+    clearSimulationFrame(g_simFrame);
+}
+
 void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
     if (x < 0 || y < 0 || x >= kFrameWidth || y >= kFrameHeight || alpha <= 0.0f) {
         return;
@@ -749,7 +762,7 @@ void applyRuntimeTransition(RuntimeTransitionReason reason) {
 void requestSimulationReset() {
     g_needsReset = true;
     g_resetFramesRemaining = 3;
-    g_lastCopiedWorkerSequence = g_sharedViewport == nullptr ? 0 : g_sharedViewport->frameSequence;
+    invalidateDisplayedCudaFrame();
     g_haveLastWorkerSettings = false;
     g_haveLastOverlaySettings = false;
     g_uiTextureUploaded = false;
@@ -762,7 +775,6 @@ void switchScene(int scene) {
         return;
     }
     g_activeScene = nextScene;
-    g_d3d.hasSimFrame = false;
     stopCudaWorker();
     g_lastWorkerStartTickMs = 0;
     requestSimulationReset();
@@ -4763,6 +4775,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.cameraPitch = g_cameraPitch;
         settings.cameraDistance = g_cameraDistance;
         if (settings.reset != 0) {
+            invalidateDisplayedCudaFrame();
             g_needsReset = false;
             if (g_resetFramesRemaining > 0) {
                 --g_resetFramesRemaining;
