@@ -207,6 +207,8 @@ struct D3DDisplayState {
     std::array<HANDLE, kSharedFrameSlots> sharedSimHandles = {};
     std::array<ComPtr<ID3D11Texture2D>, kDisplayFrameSlots> displaySimTextures;
     std::array<ComPtr<ID3D11ShaderResourceView>, kDisplayFrameSlots> displaySimSrvs;
+    ComPtr<ID3D11Texture2D> meshDepthTexture;
+    ComPtr<ID3D11DepthStencilView> meshDepthView;
     ComPtr<ID3D11Texture2D> uiTexture;
     ComPtr<ID3D11ShaderResourceView> uiSrv;
     ComPtr<ID3D11SamplerState> sampler;
@@ -1674,12 +1676,7 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float3 coolFill = float3(0.022, 0.026, 0.034) * (0.30 + rim * 0.62);
     float3 material = max(input.color, MeshBaseColor.rgb);
     float3 color = material * (0.075 + ndl * 0.34 + rim * 0.08) + fireBounce + coolFill;
-    float2 screenUv = saturate(input.pos.xy / float2(960.0, 540.0));
-    float sceneLuma = Luma(FrameTex.Sample(LinearSampler, screenUv).rgb);
-    float hotVolume = smoothstep(0.12, 0.55, sceneLuma);
-    float sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.22;
-    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.18) * (1.0 - sourceOcclusionRelief);
-    return float4(color, alpha);
+    return float4(color, 1.0);
 }
 )HLSL";
 }
@@ -1753,6 +1750,20 @@ bool initializeD3D(HWND hwnd) {
     hr = g_d3d.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(backBuffer.GetAddressOf()));
     if (FAILED(hr) || FAILED(g_d3d.device->CreateRenderTargetView(backBuffer.Get(), nullptr, g_d3d.renderTargetView.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 render target setup failed");
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC meshDepthDesc = {};
+    meshDepthDesc.Width = kFrameWidth;
+    meshDepthDesc.Height = kFrameHeight;
+    meshDepthDesc.MipLevels = 1;
+    meshDepthDesc.ArraySize = 1;
+    meshDepthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    meshDepthDesc.SampleDesc.Count = 1;
+    meshDepthDesc.Usage = D3D11_USAGE_DEFAULT;
+    meshDepthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    hr = g_d3d.device->CreateTexture2D(&meshDepthDesc, nullptr, g_d3d.meshDepthTexture.GetAddressOf());
+    if (FAILED(hr) || FAILED(g_d3d.device->CreateDepthStencilView(g_d3d.meshDepthTexture.Get(), nullptr, g_d3d.meshDepthView.GetAddressOf()))) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh depth buffer setup failed");
         return false;
     }
 
@@ -1865,8 +1876,8 @@ bool initializeD3D(HWND hwnd) {
         return false;
     }
     D3D11_DEPTH_STENCIL_DESC depthDesc = {};
-    depthDesc.DepthEnable = FALSE;
-    depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    depthDesc.DepthEnable = TRUE;
+    depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
     depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     if (FAILED(g_d3d.device->CreateDepthStencilState(&depthDesc, g_d3d.meshDepthState.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh depth state failed");
@@ -2329,6 +2340,9 @@ void renderRuntimeSceneMesh(float exposure) {
     const UINT offset = 0;
     ID3D11Buffer* vertexBuffers[] = {mesh.vertexBuffer.Get()};
     ID3D11Buffer* constantBuffers[] = {g_d3d.meshConstants.Get()};
+    ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
+    g_d3d.context->OMSetRenderTargets(1, renderTargets, g_d3d.meshDepthView.Get());
+    g_d3d.context->ClearDepthStencilView(g_d3d.meshDepthView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     g_d3d.context->IASetInputLayout(g_d3d.meshInputLayout.Get());
     g_d3d.context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
     g_d3d.context->IASetIndexBuffer(mesh.indexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);
@@ -2339,6 +2353,7 @@ void renderRuntimeSceneMesh(float exposure) {
     g_d3d.context->RSSetState(g_d3d.meshRasterizerState.Get());
     g_d3d.context->OMSetDepthStencilState(g_d3d.meshDepthState.Get(), 0);
     g_d3d.context->DrawIndexed(static_cast<UINT>(mesh.indices.size()), 0, 0);
+    g_d3d.context->OMSetRenderTargets(1, renderTargets, nullptr);
     g_d3d.context->RSSetState(nullptr);
     g_d3d.context->OMSetDepthStencilState(nullptr, 0);
     g_d3d.context->IASetInputLayout(nullptr);
@@ -2406,7 +2421,7 @@ void renderD3DSceneMeshPass(float exposure) {
         g_sceneMeshes[g_activeScene].indexBuffer != nullptr &&
         !g_sceneMeshes[g_activeScene].indices.empty();
     const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
+    g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
     renderRuntimeSceneMesh(exposure);
     ++g_renderGraphStats.sceneMeshPasses;
     g_renderGraphStats.lastFrameHadMesh = hasMesh;
@@ -2414,12 +2429,13 @@ void renderD3DSceneMeshPass(float exposure) {
 }
 
 void renderD3DUiOverlayPass() {
+    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_d3d.context->OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu);
     ID3D11ShaderResourceView* uiSrvs[] = {g_d3d.uiSrv.Get()};
     g_d3d.context->PSSetShaderResources(0, 1, uiSrvs);
     g_d3d.context->PSSetShader(g_d3d.uiPixelShader.Get(), nullptr, 0);
     g_d3d.context->Draw(3, 0);
     ID3D11ShaderResourceView* nullSrvs[] = {nullptr};
-    const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_d3d.context->PSSetShaderResources(0, 1, nullSrvs);
     g_d3d.context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
     ++g_renderGraphStats.uiOverlayPasses;

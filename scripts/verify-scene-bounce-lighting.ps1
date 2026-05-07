@@ -20,7 +20,7 @@ Require-Text $cuda "floorGlowColor = p.sceneId == 2 ? make_float3(0.030f, 0.12f,
 Require-Text $cuda "wallGlowColor = p.sceneId == 2 ? make_float3(0.020f, 0.060f, 0.18f)" "burner wall spill must be blue and scene-specific"
 Require-Text $main "length(input.worldPos.xz - MeshLightPos.xz)" "mesh fire bounce is still centered at world origin instead of source position"
 Require-Text $main "normalize(MeshLightPos.xyz - input.worldPos)" "mesh fire-facing term is still centered at world origin instead of source position"
-Require-Text $main "sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.22" "gas burner mesh pass still over-occludes the selected source opening"
+Require-Text $main "return float4(color, 1.0)" "gas burner mesh pass must be opaque instead of source-occlusion ghosted"
 Require-Text $main "emitter.burnerCenterX[0]" "gas burner mesh light no longer follows selected burner source"
 Require-Text $main "emitter.burnerCenterZ[0]" "gas burner mesh light no longer follows selected burner source"
 Require-Text $main "lowSource * 0.88" "mesh fire bounce low-source term is missing"
