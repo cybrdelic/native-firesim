@@ -13,9 +13,12 @@ function Require-Text($text, $needle, $message) {
 
 Require-Text $main "FIRESIM_TRACE_FRAMES" "live frame tracing must stay available for stutter capture"
 Require-Text $main "out\\live-frame-trace.csv" "live frame trace output path is missing"
+Require-Text $main "constexpr int kWorkerPhysicsFrameInterval = 1" "CUDA worker must advance physics every published frame"
 Require-Text $main "reusedDisplayFrame" "trace must include display-frame reuse"
 Require-Text $main "workerFrameUs,workerCudaUs,workerPublishUs" "trace must include worker timing columns"
 Require-Text $analyzer "presentation misses have periodic every-N-frame pattern" "periodic skip detector is missing"
+Require-Text $analyzer "worker physics cadence is below published frame cadence" "physics cadence detector is missing"
+Require-Text $analyzer "worker emitted render-only frames between physics updates" "render-only worker cadence detector is missing"
 Require-Text $analyzer "presentation cadence jitter is above stability budget" "cadence jitter detector is missing"
 Require-Text $analyzer "presentation has large skipped-frame interval" "skipped frame interval detector is missing"
 Require-Text $analyzer "longestMissedPresentRun" "missed present run metric is missing"
@@ -45,6 +48,12 @@ python $analyzerPath --trace $fixture --out $reportPath | Out-Host
 $report = Get-Content $reportPath -Raw | ConvertFrom-Json
 if (-not ($report.issues -contains "presentation misses have periodic every-N-frame pattern")) {
     Write-Error "temporal analyzer did not detect periodic skip fixture"
+}
+if (-not ($report.issues -contains "worker physics cadence is below published frame cadence")) {
+    Write-Error "temporal analyzer did not detect sparse worker physics cadence"
+}
+if (-not ($report.issues -contains "worker emitted render-only frames between physics updates")) {
+    Write-Error "temporal analyzer did not detect render-only worker frames"
 }
 
 Write-Host "temporal visual stability gate ok"
