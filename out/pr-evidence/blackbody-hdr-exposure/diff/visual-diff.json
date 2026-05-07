@@ -1,0 +1,10 @@
+{
+  "before": "out\\pr-evidence\\blackbody-hdr-exposure\\before\\validation-frame.bmp",
+  "after": "out\\pr-evidence\\blackbody-hdr-exposure\\after\\validation-frame.bmp",
+  "meanAbsDelta": 0.00017541403940413147,
+  "meanLumaDelta": 0.0002686651423573494,
+  "maxLumaDelta": 0.07042744755744934,
+  "changedPixelFraction": 0.0045042438271604935,
+  "minChangedFraction": 0.0001,
+  "passed": true
+}
