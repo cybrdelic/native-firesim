@@ -219,11 +219,32 @@ struct RenderGraphStats {
     bool lastFrameHadUi = false;
 };
 
+enum class RuntimeTransitionReason {
+    Startup,
+    SceneSwitch,
+    UserReset,
+    WorkerStale,
+    WorkerFrameCopied,
+    OverlayChanged
+};
+
+struct CanonicalRuntimeState {
+    int sceneId = 0;
+    int debugMode = 0;
+    int activeGizmo = 1;
+    bool needsReset = false;
+    bool cudaWorkerLive = false;
+    bool uiOverlayDirty = true;
+    unsigned long long transitionCount = 0;
+    RuntimeTransitionReason lastReason = RuntimeTransitionReason::Startup;
+};
+
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
 D3DDisplayState g_d3d;
 RenderGraphStats g_renderGraphStats;
+CanonicalRuntimeState g_runtimeState;
 std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
 std::array<SceneEmitterParams, kSceneCount> g_sceneEmitters;
 HANDLE g_sharedViewportMap = nullptr;
@@ -656,6 +677,28 @@ const char* sceneName(int scene) {
     }
 }
 
+const char* transitionReasonName(RuntimeTransitionReason reason) {
+    switch (reason) {
+    case RuntimeTransitionReason::SceneSwitch: return "scene-switch";
+    case RuntimeTransitionReason::UserReset: return "user-reset";
+    case RuntimeTransitionReason::WorkerStale: return "worker-stale";
+    case RuntimeTransitionReason::WorkerFrameCopied: return "worker-frame-copied";
+    case RuntimeTransitionReason::OverlayChanged: return "overlay-changed";
+    default: return "startup";
+    }
+}
+
+void applyRuntimeTransition(RuntimeTransitionReason reason) {
+    g_runtimeState.sceneId = g_activeScene;
+    g_runtimeState.debugMode = g_renderDebugMode;
+    g_runtimeState.activeGizmo = g_activeGizmo;
+    g_runtimeState.needsReset = g_needsReset || g_resetFramesRemaining > 0;
+    g_runtimeState.cudaWorkerLive = g_cudaWorkerFrameLive;
+    g_runtimeState.uiOverlayDirty = !g_haveLastOverlaySettings || !g_uiTextureUploaded;
+    g_runtimeState.lastReason = reason;
+    ++g_runtimeState.transitionCount;
+}
+
 void requestSimulationReset() {
     g_needsReset = true;
     g_resetFramesRemaining = 3;
@@ -663,6 +706,7 @@ void requestSimulationReset() {
     g_haveLastWorkerSettings = false;
     g_haveLastOverlaySettings = false;
     g_uiTextureUploaded = false;
+    applyRuntimeTransition(RuntimeTransitionReason::UserReset);
 }
 
 void switchScene(int scene) {
@@ -675,6 +719,7 @@ void switchScene(int scene) {
     stopCudaWorker();
     g_lastWorkerStartTickMs = 0;
     requestSimulationReset();
+    applyRuntimeTransition(RuntimeTransitionReason::SceneSwitch);
 }
 
 void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport);
@@ -4308,6 +4353,8 @@ int runDiagnostics() {
     }
 
     out << "runtimeBackend=CUDA\n";
+    out << "canonicalRuntimeState=scene,camera,controls,worker,frame,debug,and overlay transitions flow through CanonicalRuntimeState\n";
+    out << "runtimeTransitionReasons=startup,scene-switch,user-reset,worker-stale,worker-frame-copied,overlay-changed\n";
     out << "liveCudaDefault=isolated-worker\n";
     out << "mainViewportKernelLaunches=false\n";
     out << "interactiveCudaViewport=FP16 D3D11 shared texture from isolated CUDA worker\n";
@@ -4509,9 +4556,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         g_useCudaBackend = g_cudaWorkerFrameLive;
         if (!g_cudaWorkerFrameLive && !copiedWorkerFrame && settings.reset == 0) {
             clearSimulationFrame(g_simFrame);
+            applyRuntimeTransition(RuntimeTransitionReason::WorkerStale);
+        } else if (copiedWorkerFrame) {
+            applyRuntimeTransition(RuntimeTransitionReason::WorkerFrameCopied);
         }
         g_displayExposure = settings.exposure;
         const bool overlayDirty = overlayStateDirty(settings, g_useCudaBackend, g_cleanViewportMode);
+        if (overlayDirty) {
+            applyRuntimeTransition(RuntimeTransitionReason::OverlayChanged);
+        }
         const bool presentDirty = copiedWorkerFrame || overlayDirty || !g_cudaWorkerFrameLive;
         bool presented = false;
         bool reusedDisplayFrame = false;

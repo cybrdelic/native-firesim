@@ -14,6 +14,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: canonical app state"
+    & (Join-Path $PSScriptRoot "verify-canonical-app-state.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: render architecture"
     & (Join-Path $PSScriptRoot "verify-render-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
