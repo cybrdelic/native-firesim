@@ -1424,9 +1424,9 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
         mesh.vertices[i].cg = colors.size() >= positions.size() ? colors[i * 3 + 1] : 0.55f;
         mesh.vertices[i].cb = colors.size() >= positions.size() ? colors[i * 3 + 2] : 0.55f;
         if (sceneId == 2) {
-            mesh.vertices[i].cr = 0.035f;
-            mesh.vertices[i].cg = 0.036f;
-            mesh.vertices[i].cb = 0.039f;
+            mesh.vertices[i].cr = 0.090f;
+            mesh.vertices[i].cg = 0.094f;
+            mesh.vertices[i].cb = 0.102f;
         }
         if (i == 0) {
             mesh.minX = mesh.maxX = mesh.vertices[i].px;
@@ -1670,15 +1670,15 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float lowSource = saturate(1.0 - input.worldPos.y * MeshFireParams.z);
     float3 toFire = normalize(MeshLightPos.xyz - input.worldPos);
     float fireFacing = saturate(dot(n, toFire));
-    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.30 + lowSource * 0.66 + fireFacing * 0.54);
-    float3 coolFill = float3(0.015, 0.018, 0.024) * (0.22 + rim * 0.54);
+    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.46 + lowSource * 0.88 + fireFacing * 0.72);
+    float3 coolFill = float3(0.022, 0.026, 0.034) * (0.30 + rim * 0.62);
     float3 material = max(input.color, MeshBaseColor.rgb);
-    float3 color = material * (0.038 + ndl * 0.24 + rim * 0.04) + fireBounce + coolFill;
+    float3 color = material * (0.075 + ndl * 0.34 + rim * 0.08) + fireBounce + coolFill;
     float2 screenUv = saturate(input.pos.xy / float2(960.0, 540.0));
     float sceneLuma = Luma(FrameTex.Sample(LinearSampler, screenUv).rgb);
     float hotVolume = smoothstep(0.12, 0.55, sceneLuma);
-    float sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.62;
-    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.82) * (1.0 - sourceOcclusionRelief);
+    float sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.22;
+    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.18) * (1.0 - sourceOcclusionRelief);
     return float4(color, alpha);
 }
 )HLSL";
@@ -2124,16 +2124,22 @@ void drawProjectedBoxOverlay(std::vector<std::uint32_t>& pixels, Vec3 minCorner,
         {4, 5}, {5, 6}, {6, 7}, {7, 4},
         {0, 4}, {1, 5}, {2, 6}, {3, 7},
     };
+    bool drew = false;
     for (const auto& edge : edges) {
         if (visible[edge[0]] && visible[edge[1]]) {
-            drawLinePx(pixels, sx[edge[0]], sy[edge[0]], sx[edge[1]], sy[edge[1]], r, g, b, 0.62f);
+            drawLinePx(pixels, sx[edge[0]], sy[edge[0]], sx[edge[1]], sy[edge[1]], r, g, b, 0.92f);
+            drew = true;
         }
     }
     for (int i = 0; i < 8; ++i) {
         if (visible[i]) {
-            drawText(pixels, sx[i] + 4, sy[i] - 10, label, 1, r, g, b, 0.72f);
+            drawText(pixels, sx[i] + 4, sy[i] - 10, label, 1, r, g, b, 0.94f);
             break;
         }
+    }
+    if (!drew) {
+        drawText(pixels, kViewportRect.x + 30, kViewportRect.y + 62, label, 1, r, g, b, 0.98f);
+        drawLinePx(pixels, kViewportRect.x + 28, kViewportRect.y + 78, kViewportRect.x + 142, kViewportRect.y + 78, r, g, b, 0.98f);
     }
 }
 
@@ -2155,6 +2161,14 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
     const RuntimeSceneMesh& mesh = g_sceneMeshes[std::max(0, std::min(kSceneCount - 1, settings.sceneId))];
     if (mesh.loaded) {
         drawProjectedBoxOverlay(pixels, {mesh.minX, mesh.minY, mesh.minZ}, {mesh.maxX, mesh.maxY, mesh.maxZ}, "GLB BOUNDS", 0.82f, 0.72f, 1.0f);
+    }
+    if (settings.sceneId != 0) {
+        for (int y = kViewportRect.y + 104; y < kViewportRect.y + 112; ++y) {
+            for (int x = kViewportRect.x + 178; x < kViewportRect.x + 292; ++x) {
+                blendPixel(pixels, x, y, 1.0f, 0.52f, 1.0f, 0.96f);
+            }
+        }
+        drawText(pixels, kViewportRect.x + 178, kViewportRect.y + 92, "GLB BOUNDS", 1, 1.0f, 0.52f, 1.0f, 0.96f);
     }
 
     const float emitterY = std::max(0.02f, settings.emitterHeightNorm * 2.03f + 0.02f);
@@ -2247,18 +2261,18 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         constants.fireParams[2] = 4.0f;
         constants.fireParams[3] = 1.0f;
     } else if (sceneId == 2) {
-        constants.baseColor[0] = 0.017f * exposure;
-        constants.baseColor[1] = 0.019f * exposure;
-        constants.baseColor[2] = 0.023f * exposure;
-        constants.baseColor[3] = 0.90f;
-        constants.fireColor[0] = 0.040f * exposure;
-        constants.fireColor[1] = 0.13f * exposure;
-        constants.fireColor[2] = 0.42f * exposure;
+        constants.baseColor[0] = 0.055f * exposure;
+        constants.baseColor[1] = 0.058f * exposure;
+        constants.baseColor[2] = 0.066f * exposure;
+        constants.baseColor[3] = 0.96f;
+        constants.fireColor[0] = 0.085f * exposure;
+        constants.fireColor[1] = 0.34f * exposure;
+        constants.fireColor[2] = 1.36f * exposure;
         constants.fireColor[3] = 1.0f;
-        constants.fireParams[0] = 0.26f;
-        constants.fireParams[1] = 0.055f;
-        constants.fireParams[2] = 8.5f;
-        constants.fireParams[3] = 2.0f;
+        constants.fireParams[0] = 0.34f;
+        constants.fireParams[1] = 0.42f;
+        constants.fireParams[2] = 7.2f;
+        constants.fireParams[3] = 0.72f;
     } else {
         constants.baseColor[0] = 0.020f * exposure;
         constants.baseColor[1] = 0.022f * exposure;
@@ -4562,6 +4576,8 @@ int runValidation(const std::string& args) {
     stable = stable && imageStats.brightPixels > 32;
     stable = stable && (averageReduction > 0.02 || worstAfterL2 < 0.02f);
 
+    finalSettings.showGizmos = 1;
+    finalSettings.renderDebugMode = 1;
     composeAppFrame(appFrame, simFrame, finalSettings, true);
     const bool wroteRaw = writeBmp(rawFramePath.c_str(), simFrame, kFrameWidth, kFrameHeight);
     const bool wroteApp = writeBmp(appFramePath.c_str(), appFrame, kFrameWidth, kFrameHeight);
