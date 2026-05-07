@@ -51,6 +51,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-flame-sheet-breakup.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Write-Host "roadmap gate: lighting architecture"
     & (Join-Path $PSScriptRoot "verify-lighting-architecture.ps1")

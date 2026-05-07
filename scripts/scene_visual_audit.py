@@ -27,6 +27,7 @@ def metrics(path: Path) -> dict:
     blue = (arr[..., 2] > arr[..., 0] * 1.08) & (arr[..., 2] > arr[..., 1] * 1.02) & (luma > 0.10)
     hot = luma > 0.64
     dark_smoke = (luma < 0.18) & (sat < 0.45)
+    active_mask = warm | blue | hot
     yy, xx = np.where(warm | blue | hot)
     bbox = [0, 0, 0, 0]
     height_fraction = 0.0
@@ -36,6 +37,8 @@ def metrics(path: Path) -> dict:
     center_y_fraction = 0.0
     local_dark_smoke = 0.0
     plume_dark_smoke = 0.0
+    active_edge_density = 0.0
+    active_fragment_count = 0
     if yy.size:
         bbox = [int(xx.min()), int(yy.min()), int(xx.max()), int(yy.max())]
         active_width = xx.max() - xx.min() + 1
@@ -58,6 +61,32 @@ def metrics(path: Path) -> dict:
         plume_x1 = min(image.width, bbox[2] + 19)
         plume_region = dark_smoke[plume_y0:plume_y1, plume_x0:plume_x1]
         plume_dark_smoke = float(plume_region.mean()) if plume_region.size else 0.0
+        active_region = active_mask[y0:y1, x0:x1]
+        if active_region.size:
+            padded = np.pad(active_region, 1, mode="constant", constant_values=False)
+            eroded = (
+                padded[1:-1, 1:-1]
+                & padded[:-2, 1:-1]
+                & padded[2:, 1:-1]
+                & padded[1:-1, :-2]
+                & padded[1:-1, 2:]
+            )
+            edges = active_region & ~eroded
+            active_edge_density = float(edges.sum() / max(1, active_region.sum()))
+            visited = np.zeros(active_region.shape, dtype=bool)
+            active_points = np.argwhere(active_region)
+            for sy, sx in active_points:
+                if visited[sy, sx]:
+                    continue
+                active_fragment_count += 1
+                stack = [(int(sy), int(sx))]
+                visited[sy, sx] = True
+                while stack:
+                    cy, cx = stack.pop()
+                    for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                        if 0 <= ny < active_region.shape[0] and 0 <= nx < active_region.shape[1] and active_region[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
     top_hot = float(((warm | blue | hot) & (np.indices(luma.shape)[0] < image.height * 0.30)).mean())
     return {
         "path": str(path),
@@ -73,6 +102,8 @@ def metrics(path: Path) -> dict:
         "activeWidthFraction": width_fraction,
         "activeAspectRatio": aspect_ratio,
         "activeCenter": [center_x_fraction, center_y_fraction],
+        "activeEdgeDensity": active_edge_density,
+        "activeFragmentCount": int(active_fragment_count),
         "topActiveFraction": top_hot,
         "activeBBox": bbox,
     }
@@ -125,6 +156,10 @@ def issues_for(name: str, m: dict) -> list[str]:
             issues.append("campfire smoke is too weak or not dark enough")
         if m["activeHeightFraction"] < 0.22:
             issues.append("campfire flame body is too short or underdeveloped")
+        if m["activeEdgeDensity"] < 0.30:
+            issues.append("campfire flame sheets are too smooth and under-broken")
+        if m["activeFragmentCount"] < 8:
+            issues.append("campfire flame region has too few separated tongues")
     elif name == "room":
         if m["warmFraction"] < 0.015:
             issues.append("room fire has too little warm flame coverage")
