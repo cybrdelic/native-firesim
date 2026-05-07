@@ -64,6 +64,11 @@ def analyze(path: Path) -> dict:
     worker_published = [int(number(row, "workerPublishedFrames")) for row in rows]
     worker_physics = [int(number(row, "workerPhysicsFrames")) for row in rows]
     worker_render_only = [int(number(row, "workerRenderOnlyFrames")) for row in rows]
+    ring_shared_slots = [int(number(row, "ringSharedSlot", -1)) for row in rows]
+    ring_timeouts = [int(number(row, "ringTimeouts")) for row in rows]
+    ring_no_candidate = [int(number(row, "ringNoCandidate")) for row in rows]
+    ring_starved = [int(number(row, "ringStarved")) for row in rows]
+    frame_age_ms = [number(row, "frameAgeMs") for row in rows]
     tick_ms = [number(row, "tickMs") for row in rows]
     frame_us = [number(row, "frameUs") for row in rows]
     present_us = [number(row, "presentUs") for row in rows if int(number(row, "presented")) == 1]
@@ -81,12 +86,27 @@ def analyze(path: Path) -> dict:
     physics_deltas = [max(0, b - a) for a, b in zip(worker_physics, worker_physics[1:])]
     render_only_deltas = [max(0, b - a) for a, b in zip(worker_render_only, worker_render_only[1:])]
     published_deltas = [max(0, b - a) for a, b in zip(worker_published, worker_published[1:])]
+    timeout_deltas = [max(0, b - a) for a, b in zip(ring_timeouts, ring_timeouts[1:])]
+    no_candidate_deltas = [max(0, b - a) for a, b in zip(ring_no_candidate, ring_no_candidate[1:])]
+    starved_deltas = [max(0, b - a) for a, b in zip(ring_starved, ring_starved[1:])]
     physics_steps = sum(physics_deltas)
     render_only_steps = sum(render_only_deltas)
     published_steps = sum(published_deltas)
     simulated_worker_steps = physics_steps + render_only_steps
     worker_physics_ratio = physics_steps / max(1, simulated_worker_steps)
     longest_render_only_run = longest_run([1 if value > 0 else 0 for value in render_only_deltas], 1)
+    longest_copy_miss_run = longest_run(copied, 0)
+    valid_shared_slots = [slot for slot in ring_shared_slots if slot >= 0]
+    slot_coverage = len(set(valid_shared_slots))
+    repeated_slot_flags = [
+        1 if b >= 0 and a == b and copied[i] == 1 else 0
+        for i, (a, b) in enumerate(zip(ring_shared_slots, ring_shared_slots[1:]), start=1)
+    ]
+    longest_repeated_shared_slot_run = longest_run(repeated_slot_flags, 1)
+    max_frame_age_ms = max(frame_age_ms) if frame_age_ms else 0.0
+    timeout_events = sum(timeout_deltas)
+    no_candidate_events = sum(no_candidate_deltas)
+    starved_events = sum(starved_deltas)
     issues: list[str] = []
 
     if present_rate < 0.70:
@@ -105,6 +125,20 @@ def analyze(path: Path) -> dict:
         issues.append("worker physics cadence is below published frame cadence")
     if longest_render_only_run > 0:
         issues.append("worker emitted render-only frames between physics updates")
+    if longest_copy_miss_run > 3 and published_steps > 0:
+        issues.append("CUDA fire frames have consecutive copy misses")
+    if max_frame_age_ms > 40.0 and copy_rate < 0.75:
+        issues.append("CUDA fire frame age exceeded freshness budget")
+    if timeout_events > max(2, len(rows) // 12):
+        issues.append("shared texture ring has keyed-mutex timeout pressure")
+    if no_candidate_events > max(2, len(rows) // 10):
+        issues.append("shared texture ring produced no copy candidates")
+    if starved_events > 0:
+        issues.append("shared texture ring copy path starved")
+    if published_steps >= 8 and slot_coverage <= 1:
+        issues.append("shared texture producer did not rotate slots")
+    if longest_repeated_shared_slot_run > 5 and published_steps >= 8:
+        issues.append("shared texture ring repeatedly copied the same slot")
 
     return {
         "path": str(path),
@@ -118,6 +152,13 @@ def analyze(path: Path) -> dict:
         "workerPublishedSteps": published_steps,
         "simulatedWorkerSteps": simulated_worker_steps,
         "longestRenderOnlyRun": longest_render_only_run,
+        "maxFrameAgeMs": max_frame_age_ms,
+        "longestCopyMissRun": longest_copy_miss_run,
+        "ringTimeoutEvents": timeout_events,
+        "ringNoCandidateEvents": no_candidate_events,
+        "ringStarvedEvents": starved_events,
+        "sharedSlotCoverage": slot_coverage,
+        "longestRepeatedSharedSlotRun": longest_repeated_shared_slot_run,
         "meanFrameIntervalMs": statistics.fmean(frame_intervals) if frame_intervals else 0.0,
         "meanPresentIntervalMs": mean_present_interval,
         "p95PresentIntervalMs": p95_present_interval,
