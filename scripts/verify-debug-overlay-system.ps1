@@ -9,6 +9,11 @@ Require-Text $main '"FUEL BED"' "fuel-bed bounds overlay is missing"
 Require-Text $main '"GLB BOUNDS"' "GLB bounds overlay is missing"
 Require-Text $main '"FRAME AGE %llums  RING %ld>%ld"' "frame age and ring freshness overlay is missing"
 Require-Text $main '"SRC ACTIVE"' "selected burner/source overlay is missing"
+Require-Text $main "applyPlacementOverrides(settings)" "placement debug offsets are not applied to CUDA source settings"
+Require-Text $main "MeshOffset.xyz" "placement debug offsets are not applied to GLTF mesh vertices"
+Require-Text $main "copyPlacementToClipboard" "placement debug coordinates cannot be copied"
+Require-Text $main '"SRC XYZ %.3f %.3f %.3f"' "placement debug source coordinate readout is missing"
+Require-Text $main '"P TARGET H/L X I/M Z"' "placement debug key help is missing"
 Require-Text $main "debugOverlaySystem=source markers, selected burner ports, GLB bounds, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness" "diagnostics debug overlay string is missing from source"
 if (Test-Path $diag) {
     $diagText = Get-Content $diag -Raw

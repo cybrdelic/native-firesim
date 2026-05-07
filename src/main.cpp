@@ -156,6 +156,7 @@ struct MeshConstants {
     float baseColor[4];
     float fireColor[4];
     float fireParams[4];
+    float meshOffset[4];
 };
 
 struct RuntimeSceneMesh {
@@ -363,8 +364,18 @@ LONG g_sharedRingLastCopiedSharedSlot = -1;
 LONG g_sharedRingLastCopiedDisplaySlot = -1;
 LONG g_sharedRingLastCopiedSequence = 0;
 bool g_uiTextureUploaded = false;
+int g_placementTarget = 0;
+float g_sourceNudgeX[kSceneCount] = {};
+float g_sourceNudgeY[kSceneCount] = {};
+float g_sourceNudgeZ[kSceneCount] = {};
+float g_meshNudgeX[kSceneCount] = {};
+float g_meshNudgeY[kSceneCount] = {};
+float g_meshNudgeZ[kSceneCount] = {};
+char g_placementStatus[192] = "P TARGET  H/L X  I/M Z  Q/E Y  K COPY";
 
 void stopCudaWorker();
+void appendRuntimeEvent(const char* event, const char* detail);
+const char* placementTargetName();
 
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
     bool burnerCentersSame = a.burnerCenterCount == b.burnerCenterCount;
@@ -479,6 +490,22 @@ const SceneInstance& activeSceneInstanceFor(int sceneId) {
     return g_sceneInstances[scene];
 }
 
+void applyPlacementOverrides(FireSettings& settings) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+    const float sourceDx = g_sourceNudgeX[scene];
+    const float sourceDy = g_sourceNudgeY[scene];
+    const float sourceDz = g_sourceNudgeZ[scene];
+    settings.emitterCenterX = std::max(-1.05f, std::min(1.05f, settings.emitterCenterX + sourceDx));
+    settings.emitterCenterZ = std::max(-0.82f, std::min(0.82f, settings.emitterCenterZ + sourceDz));
+    const float emitterY = std::max(0.02f, std::min(1.97f, settings.emitterHeightNorm * 2.03f + 0.02f + sourceDy));
+    settings.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (emitterY - 0.02f) / 2.03f));
+    for (int i = 0; i < settings.burnerCenterCount && i < 4; ++i) {
+        settings.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i] + sourceDx));
+        settings.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i] + sourceDy));
+        settings.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i] + sourceDz));
+    }
+}
+
 void applySceneEmitterParams(FireSettings& settings) {
     const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
     const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
@@ -497,6 +524,7 @@ void applySceneEmitterParams(FireSettings& settings) {
         settings.burnerCenterY[i] = emitter.burnerCenterY[i];
         settings.burnerCenterZ[i] = emitter.burnerCenterZ[i];
     }
+    applyPlacementOverrides(settings);
 }
 
 float clamp01(float v) {
@@ -995,12 +1023,16 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
 
     drawText(pixels, 790, 360, "DRAG SLIDERS", 1, 0.54f, 0.56f, 0.53f, 0.78f);
     drawText(pixels, 790, 378, "OR KEYS 1-4", 1, 0.54f, 0.56f, 0.53f, 0.78f);
+    drawText(pixels, 790, 404, placementTargetName(), 1, 0.70f, 0.78f, 1.0f, 0.88f);
+    drawClippedText(pixels, 790, 422, g_placementStatus, 31, 1, 0.70f, 0.82f, 0.98f, 0.86f);
+    drawText(pixels, 790, 440, "P TARGET H/L X I/M Z", 1, 0.50f, 0.56f, 0.60f, 0.78f);
+    drawText(pixels, 790, 458, "SHIFT FAST   K COPY", 1, 0.50f, 0.56f, 0.60f, 0.78f);
 
     drawText(
         pixels,
         276,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   S SCENE   D DEBUG   C CLEAN   G OVERLAY   R RESET   ESC QUIT" : "NO LIVE CUDA FRAME   S SCENE   WORKER STARTING/STALE   D DEBUG   C CLEAN",
+        cudaBackend ? "REAL CUDA WORKER VOLUME   P PLACE TARGET   H/L X  I/M Z  Q/E Y   K COPY COORDS   S SCENE   D DEBUG" : "NO LIVE CUDA FRAME   P PLACE TARGET   H/L X  I/M Z  Q/E Y   K COPY COORDS   D DEBUG",
         1,
         0.76f,
         0.78f,
@@ -1071,6 +1103,93 @@ void applyPanelDrag() {
         const float t = clamp01(static_cast<float>(g_pointerFrameX - kTurbulenceSliderRect.x) / static_cast<float>(std::max(1, kTurbulenceSliderRect.w)));
         g_turbulence = 0.05f + t * 1.45f;
     }
+}
+
+const char* placementTargetName() {
+    return g_placementTarget == 0 ? "SOURCE" : "MESH";
+}
+
+void formatPlacementStatus(char* out, std::size_t outSize) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const SceneEmitterParams& emitter = g_sceneEmitters[scene];
+    float sourceX = emitter.centerX + g_sourceNudgeX[scene];
+    float sourceY = emitter.heightNorm * 2.03f + 0.02f + g_sourceNudgeY[scene];
+    float sourceZ = emitter.centerZ + g_sourceNudgeZ[scene];
+    if (scene == 2 && emitter.burnerCenterCount > 0) {
+        sourceX = emitter.burnerCenterX[0] + g_sourceNudgeX[scene];
+        sourceY = emitter.burnerCenterY[0] + g_sourceNudgeY[scene];
+        sourceZ = emitter.burnerCenterZ[0] + g_sourceNudgeZ[scene];
+    }
+    if (g_placementTarget == 0) {
+        std::snprintf(
+            out,
+            outSize,
+            "PLACE SOURCE scene=%s x=%.4f y=%.4f z=%.4f offset=(%.4f,%.4f,%.4f)",
+            sceneName(scene),
+            sourceX,
+            sourceY,
+            sourceZ,
+            g_sourceNudgeX[scene],
+            g_sourceNudgeY[scene],
+            g_sourceNudgeZ[scene]);
+    } else {
+        std::snprintf(
+            out,
+            outSize,
+            "PLACE MESH scene=%s offset=(%.4f,%.4f,%.4f)",
+            sceneName(scene),
+            g_meshNudgeX[scene],
+            g_meshNudgeY[scene],
+            g_meshNudgeZ[scene]);
+    }
+}
+
+void markPlacementChanged(bool resetFire) {
+    formatPlacementStatus(g_placementStatus, sizeof(g_placementStatus));
+    g_haveLastOverlaySettings = false;
+    if (resetFire) {
+        requestSimulationReset();
+    }
+}
+
+void nudgePlacement(float dx, float dy, float dz) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    if (g_placementTarget == 0) {
+        g_sourceNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_sourceNudgeX[scene] + dx));
+        g_sourceNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_sourceNudgeY[scene] + dy));
+        g_sourceNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_sourceNudgeZ[scene] + dz));
+        markPlacementChanged(true);
+    } else {
+        g_meshNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeX[scene] + dx));
+        g_meshNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_meshNudgeY[scene] + dy));
+        g_meshNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeZ[scene] + dz));
+        markPlacementChanged(false);
+    }
+}
+
+void copyPlacementToClipboard(HWND hwnd) {
+    char text[256] = {};
+    formatPlacementStatus(text, sizeof(text));
+    const SIZE_T bytes = std::strlen(text) + 1;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory == nullptr) {
+        return;
+    }
+    void* dst = GlobalLock(memory);
+    if (dst != nullptr) {
+        std::memcpy(dst, text, bytes);
+        GlobalUnlock(memory);
+    }
+    if (OpenClipboard(hwnd)) {
+        EmptyClipboard();
+        SetClipboardData(CF_TEXT, memory);
+        CloseClipboard();
+        std::snprintf(g_placementStatus, sizeof(g_placementStatus), "COPIED %s", text);
+        appendRuntimeEvent("placement-copied", text);
+        g_haveLastOverlaySettings = false;
+        return;
+    }
+    GlobalFree(memory);
 }
 
 void updateMouseFromLParam(LPARAM lParam) {
@@ -1615,6 +1734,7 @@ cbuffer MeshConstants : register(b1) {
     float4 MeshBaseColor;
     float4 MeshFireColor;
     float4 MeshFireParams;
+    float4 MeshOffset;
 }
 
 float Luma(float3 c) {
@@ -1652,9 +1772,10 @@ float4 UiPS(VSOut input) : SV_TARGET {
 
 MeshVSOut MeshVS(MeshVSIn input) {
     MeshVSOut outp;
-    float4 wp = float4(input.pos, 1.0);
+    float3 world = input.pos + MeshOffset.xyz;
+    float4 wp = float4(world, 1.0);
     outp.pos = mul(wp, MeshViewProj);
-    outp.worldPos = input.pos;
+    outp.worldPos = world;
     outp.normal = normalize(input.normal);
     outp.color = saturate(input.color);
     return outp;
@@ -2196,7 +2317,15 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
 
     const RuntimeSceneMesh& mesh = g_sceneMeshes[std::max(0, std::min(kSceneCount - 1, settings.sceneId))];
     if (mesh.loaded) {
-        drawProjectedBoxOverlay(pixels, {mesh.minX, mesh.minY, mesh.minZ}, {mesh.maxX, mesh.maxY, mesh.maxZ}, "GLB BOUNDS", 0.82f, 0.72f, 1.0f);
+        const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+        drawProjectedBoxOverlay(
+            pixels,
+            {mesh.minX + g_meshNudgeX[scene], mesh.minY + g_meshNudgeY[scene], mesh.minZ + g_meshNudgeZ[scene]},
+            {mesh.maxX + g_meshNudgeX[scene], mesh.maxY + g_meshNudgeY[scene], mesh.maxZ + g_meshNudgeZ[scene]},
+            "GLB BOUNDS",
+            0.82f,
+            0.72f,
+            1.0f);
     }
     if (settings.sceneId != 0) {
         for (int y = kViewportRect.y + 104; y < kViewportRect.y + 112; ++y) {
@@ -2208,7 +2337,16 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
     }
 
     const float emitterY = std::max(0.02f, settings.emitterHeightNorm * 2.03f + 0.02f);
+    char sourceCoords[128] = {};
     if (settings.sceneId == 2 && settings.burnerCenterCount > 0) {
+        std::snprintf(
+            sourceCoords,
+            sizeof(sourceCoords),
+            "SRC XYZ %.3f %.3f %.3f",
+            settings.burnerCenterX[0],
+            emitterY,
+            settings.burnerCenterZ[0]);
+        drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 38, sourceCoords, 1, 0.70f, 0.86f, 1.0f, 0.96f);
         const int count = std::min(4, settings.burnerCenterCount);
         for (int i = 0; i < count; ++i) {
             char label[24] = {};
@@ -2227,6 +2365,14 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
         return;
     }
 
+    std::snprintf(
+        sourceCoords,
+        sizeof(sourceCoords),
+        "SRC XYZ %.3f %.3f %.3f",
+        settings.emitterCenterX,
+        emitterY,
+        settings.emitterCenterZ);
+    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 38, sourceCoords, 1, 1.0f, 0.62f, 0.18f, 0.96f);
     drawProjectedEmitterMarker(
         pixels,
         {settings.emitterCenterX, emitterY, settings.emitterCenterZ},
@@ -2323,6 +2469,11 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         constants.fireParams[2] = 5.0f;
         constants.fireParams[3] = 0.0f;
     }
+    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
+    constants.meshOffset[0] = g_meshNudgeX[scene];
+    constants.meshOffset[1] = g_meshNudgeY[scene];
+    constants.meshOffset[2] = g_meshNudgeZ[scene];
+    constants.meshOffset[3] = 0.0f;
     return constants;
 }
 
@@ -2575,6 +2726,37 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == 'S') {
             switchScene((g_activeScene + 1) % kSceneCount);
+            return 0;
+        }
+        if (wParam == 'P') {
+            g_placementTarget = (g_placementTarget + 1) % 2;
+            markPlacementChanged(false);
+            return 0;
+        }
+        if (wParam == 'K') {
+            copyPlacementToClipboard(hwnd);
+            return 0;
+        }
+        if (wParam == 'H' || wParam == 'L' || wParam == 'I' || wParam == 'M' || wParam == 'Q' || wParam == 'E' || wParam == 'W' || wParam == 'A') {
+            const float step = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.050f : 0.010f;
+            if (wParam == 'H' || wParam == 'A') {
+                nudgePlacement(-step, 0.0f, 0.0f);
+            } else if (wParam == 'L') {
+                nudgePlacement(step, 0.0f, 0.0f);
+            } else if (wParam == 'I' || wParam == 'W') {
+                nudgePlacement(0.0f, 0.0f, step);
+            } else if (wParam == 'M') {
+                nudgePlacement(0.0f, 0.0f, -step);
+            } else if (wParam == 'Q') {
+                nudgePlacement(0.0f, -step, 0.0f);
+            } else {
+                nudgePlacement(0.0f, step, 0.0f);
+            }
+            return 0;
+        }
+        if (wParam == VK_SPACE) {
+            const float step = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.050f : 0.010f;
+            nudgePlacement(0.0f, 0.0f, -step);
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
