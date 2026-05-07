@@ -20,6 +20,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: worker lifecycle"
+    & (Join-Path $PSScriptRoot "verify-worker-lifecycle.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: render architecture"
     & (Join-Path $PSScriptRoot "verify-render-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
