@@ -2077,7 +2077,16 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.38f, 0.92f, shearNoise + (0.72f - fv) * 0.12f + reactionFront * 0.10f) *
                 smoothstepf(1.0f, 0.02f, fv) *
                 fieldEdge;
-            const float sourceLocalV = p.sceneId == 2 ? fmaxf(0.0f, fv - p.emitterHeightNorm) : fv;
+            const float sourceSignedV = p.sceneId == 2 ? fv - p.emitterHeightNorm : fv;
+            const float sourceAboveV = p.sceneId == 2 ? fmaxf(0.0f, sourceSignedV) : fv;
+            const float sourceCellV = 1.0f / static_cast<float>(p.ny);
+            const float sourceBelowTolerance = fmaxf(sourceCellV * 0.55f, p.emitterHeightBandNorm * 0.030f);
+            const float sourcePlaneGate = p.sceneId == 2
+                ? smoothstepf(
+                    p.emitterHeightNorm - sourceBelowTolerance,
+                    p.emitterHeightNorm + p.emitterHeightBandNorm * 0.03f,
+                    fv)
+                : 1.0f;
             const float burnerLowJet = p.sceneId == 2 ? smoothstepf(fmaxf(0.012f, p.emitterHeightBandNorm * 0.68f), fmaxf(0.003f, p.emitterHeightBandNorm * 0.10f), fabsf(fv - p.emitterHeightNorm)) * smoothstepf(0.05f, 0.58f, fuel + heat * 0.025f) * smoothstepf(0.50f, 1.0f, oxygen) : 0.0f;
             const float burnerPortJet = p.sceneId == 2 ? burnerLowJet * smoothstepf(0.68f, 0.98f, fineNoise + shearNoise * 0.18f) : 0.0f;
             const float campTongueBias = p.sceneId == 1 ? smoothstepf(0.035f, 0.72f, fuel + pyrolysis * 0.50f + charMass * 0.12f) * smoothstepf(0.76f, 0.035f, fv) : 0.0f;
@@ -2086,7 +2095,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float breakup = smoothstepf(0.34f, 0.88f, fineNoise * 0.48f + shearNoise * 0.42f + holeNoise * 0.24f + heat * 0.026f);
             const float verticalFade = smoothstepf(0.96f, 0.025f, fv);
             const float flameHeightFade = p.sceneId == 2 ? smoothstepf(p.emitterHeightNorm + p.emitterHeightBandNorm * 0.72f, p.emitterHeightNorm - p.emitterHeightBandNorm * 0.05f, fv) : smoothstepf(p.sceneId == 1 ? 0.72f : 0.76f, 0.10f, fv);
-            const float lowerWhite = smoothstepf(0.060f, 0.00f, sourceLocalV) * smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
+            const float lowerWhite = (p.sceneId == 2
+                ? smoothstepf(fmaxf(0.012f, p.emitterHeightBandNorm * 0.44f), 0.0f, fabsf(sourceSignedV)) * sourcePlaneGate
+                : smoothstepf(0.060f, 0.00f, fv)) *
+                smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
             const float tempK = 293.0f + heat * 360.0f + fuel * 44.0f + pyrolysis * 90.0f + fieldFilament * 560.0f + convectiveSheet * 420.0f + lowerWhite * 110.0f + progress * 64.0f;
             const float combustion =
                 smoothstepf(740.0f, 1630.0f, tempK) *
@@ -2101,7 +2113,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.55f, 0.94f, fineNoise * 0.46f + shearNoise * 0.44f + plumeNoise * 0.18f + reactionFront * 0.15f + heat * 0.014f - fv * 0.050f) *
                     (1.0f - sheetHole * (0.74f + lesBreakup * 0.12f)) *
                     (1.0f - flameSheetTear * 0.18f),
-                smoothstepf(0.18f, 0.030f, sourceLocalV) * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
+                smoothstepf(0.18f, 0.030f, sourceAboveV) * sourcePlaneGate * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
             const float coherentSheet = saturate(fieldFilament * 0.86f + convectiveSheet * 0.55f + thinFront * 0.74f);
             const float sheetConfinement = saturate(coherentSheet + reactionFront * 0.08f);
             const float roomCoverageBoost = p.sceneId == 0 ? (0.72f + roomTraySheet * 1.24f) : 1.0f;
@@ -2110,7 +2122,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 (0.052f + breakup * 0.78f + raggedEdge * 0.56f + lesBreakup * 0.34f) *
                 (0.18f + thinFront * 2.55f) *
                 (0.060f + sheetConfinement * 0.94f + burnerPortJet * 0.72f + campTongueBias * 0.34f) *
-                flameHeightFade * roomCoverageBoost;
+                flameHeightFade * roomCoverageBoost * sourcePlaneGate;
             const float plumeVoid = smoothstepf(0.54f, 0.90f, holeNoise + fineNoise * 0.26f + shearNoise * 0.22f + fv * 0.20f);
             const float topDissolve = smoothstepf(p.sceneId == 1 ? 0.82f : 0.88f, p.sceneId == 1 ? 0.34f : 0.42f, fv);
             const float raggedPlume = 1.0f - plumeVoid * smoothstepf(0.18f, 0.74f, fv) * 0.96f;

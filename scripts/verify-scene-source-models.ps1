@@ -42,8 +42,15 @@ Require-Text $main "params.burnerCenterY[i] = burnerPoint[1]" "burner center hei
 Require-Text $main "params.heightNorm = (params.burnerCenterY[0] - 0.02f) / 2.03f" "burner source height is not driven by selected burner geometry"
 Require-Text $cuda "params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (params.burnerCenterY[0] - 0.02f) / 2.03f))" "CUDA source height is not locked to selected burner geometry"
 Require-Text $cuda "p.burnerCenterY[0]" "CUDA source overlays no longer use selected burner height"
-Require-Text $cuda "sourceLocalV = p.sceneId == 2 ? fmaxf(0.0f, fv - p.emitterHeightNorm) : fv" "burner flame masks are not source-height-relative"
-Require-Text $cuda "smoothstepf(0.060f, 0.00f, sourceLocalV)" "burner lower white core is no longer source-height-relative"
+if ($cuda.Contains("sourceLocalV = p.sceneId == 2 ? fmaxf(0.0f, fv - p.emitterHeightNorm) : fv")) {
+    throw "burner flame masks clamp below-source samples onto the source plane"
+}
+Require-Text $cuda "sourceSignedV = p.sceneId == 2 ? fv - p.emitterHeightNorm : fv" "burner flame masks no longer use a signed source-plane coordinate"
+Require-Text $cuda "sourceAboveV = p.sceneId == 2 ? fmaxf(0.0f, sourceSignedV) : fv" "burner upward flame masks no longer use the signed source coordinate"
+Require-Text $cuda "sourceCellV = 1.0f / static_cast<float>(p.ny)" "burner flame masks no longer account for vertical grid-cell sampling"
+Require-Text $cuda "sourcePlaneGate = p.sceneId == 2" "burner masks no longer reject samples below the selected source plane"
+Require-Text $cuda "fabsf(sourceSignedV)) * sourcePlaneGate" "burner lower white core is no longer source-plane gated"
+Require-Text $cuda "flameHeightFade * roomCoverageBoost * sourcePlaneGate" "burner flame density is no longer source-plane gated"
 Require-Text $cuda "const int centerCount = 1;" "gas burner material no longer forces a single selected burner source"
 Require-Text $cuda "cosf(angle * 32.0f)" "gas burner source no longer uses narrow port-driven jets"
 Require-Text $cuda "sceneBuoyancyScale = p.sceneId == 2 ? 0.42f" "stove/gas burner buoyancy is no longer constrained"
