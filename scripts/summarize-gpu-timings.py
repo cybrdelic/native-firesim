@@ -47,6 +47,7 @@ def main() -> None:
         "",
         f"- Source: `{source}`",
         f"- Effective FPS: `{float(data.get('effectiveFps', 0.0)):.2f}`",
+        f"- Hotspot policy: `{data.get('hotspotPolicy', 'measure before optimizing; do not reduce quality')}`",
         f"- Grid: `{data.get('requestedGrid', [])}`",
         f"- Raymarch steps: `{data.get('raymarchSteps', 'unknown')}`",
         f"- Pressure iterations: `{data.get('pressureIterations', 'unknown')}`",
@@ -58,6 +59,19 @@ def main() -> None:
         share = (value / breakdown_total) * 100.0 if key in BREAKDOWN_KEYS else 0.0
         share_text = f"{share:.1f}%" if key in BREAKDOWN_KEYS else "live/frame metric"
         lines.append(f"| `{key}` | {value:.4f} | {share_text} |")
+    hotspot_ranking = data.get("hotspotRanking", [])
+    if hotspot_ranking:
+        lines.extend(
+            [
+                "",
+                "## Hotspot Ranking",
+                "",
+                "| Rank | CUDA pass | average ms |",
+                "| ---: | --- | ---: |",
+            ]
+        )
+        for index, item in enumerate(hotspot_ranking, start=1):
+            lines.append(f"| {index} | `{item.get('pass', 'unknown')}` | {float(item.get('averageMs', 0.0)):.4f} |")
     lines.extend(
         [
             "",
