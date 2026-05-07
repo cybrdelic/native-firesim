@@ -126,6 +126,43 @@ def app_metrics(path: Path) -> dict:
         & (luma > 0.08)
         & (luma < 0.38)
     )
+    viewport = arr[80 : h - 72, 145 : w - 250]
+    viewport_luma = luma[80 : h - 72, 145 : w - 250]
+    source_overlay = (
+        (viewport[..., 0] > 0.78)
+        & (viewport[..., 1] > 0.18)
+        & (viewport[..., 1] < 0.55)
+        & (viewport[..., 2] < 0.16)
+    )
+    glb_overlay = (
+        (viewport[..., 0] > 0.48)
+        & (viewport[..., 1] > 0.36)
+        & (viewport[..., 2] > 0.62)
+    )
+    active_fire = (
+        ((viewport[..., 0] > viewport[..., 1] * 1.08) & (viewport[..., 0] > viewport[..., 2] * 1.45) & (viewport_luma > 0.18))
+        | ((viewport[..., 2] > viewport[..., 0] * 1.08) & (viewport[..., 2] > viewport[..., 1] * 1.02) & (viewport_luma > 0.10))
+        | (viewport_luma > 0.64)
+    )
+    source_yx = np.argwhere(source_overlay)
+    active_yx = np.argwhere(active_fire)
+    source_center = [0.0, 0.0]
+    active_center = [0.0, 0.0]
+    alignment_delta = 0.0
+    if source_yx.size:
+        source_center = [
+            float(source_yx[:, 1].mean() / max(1, viewport.shape[1])),
+            float(source_yx[:, 0].mean() / max(1, viewport.shape[0])),
+        ]
+    if active_yx.size:
+        active_center = [
+            float(active_yx[:, 1].mean() / max(1, viewport.shape[1])),
+            float(active_yx[:, 0].mean() / max(1, viewport.shape[0])),
+        ]
+    if source_yx.size and active_yx.size:
+        alignment_delta = float(
+            ((source_center[0] - active_center[0]) ** 2 + (source_center[1] - active_center[1]) ** 2) ** 0.5
+        )
     return {
         "appPath": str(path),
         "uiTopMean": float(top_bar.mean()) if top_bar.size else 0.0,
@@ -135,6 +172,11 @@ def app_metrics(path: Path) -> dict:
         "centerMean": float(center.mean()) if center.size else 0.0,
         "gridArtifactScore": float(max(vertical_edges.mean(), horizontal_edges.mean())),
         "warmSmokeFraction": float(warm_smoke.mean()),
+        "sourceOverlayFraction": float(source_overlay.mean()) if source_overlay.size else 0.0,
+        "glbBoundsOverlayFraction": float(glb_overlay.mean()) if glb_overlay.size else 0.0,
+        "sourceOverlayCenter": source_center,
+        "activeFireCenter": active_center,
+        "sourceFireAlignmentDelta": alignment_delta,
     }
 
 
@@ -201,6 +243,12 @@ def app_issues_for(name: str, m: dict) -> list[str]:
         issues.append("app frame is missing expected UI chrome")
     if name in {"campfire", "burner"} and m["centerMean"] < 0.010:
         issues.append("app frame center is too dark; GLB or scene content may be missing")
+    if name in {"campfire", "burner"} and m["glbBoundsOverlayFraction"] < 0.00002:
+        issues.append("app frame is missing GLB bounds overlay signal")
+    if name == "burner" and m["sourceOverlayFraction"] < 0.00004:
+        issues.append("burner app frame is missing selected-source overlay signal")
+    if name == "burner" and m["sourceFireAlignmentDelta"] > 0.24:
+        issues.append("burner fire body is visibly offset from selected source overlay")
     if m["gridArtifactScore"] > 0.085:
         issues.append("app frame has excessive grid/line artifact score")
     if m["warmSmokeFraction"] > 0.26:
