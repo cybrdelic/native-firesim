@@ -56,6 +56,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: room source coverage"
+    & (Join-Path $PSScriptRoot "verify-room-source-coverage.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: ember system"
     & (Join-Path $PSScriptRoot "verify-ember-system.ps1")
     if ($LASTEXITCODE -ne 0) {

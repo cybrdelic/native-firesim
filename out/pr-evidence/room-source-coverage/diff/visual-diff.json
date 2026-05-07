@@ -1,0 +1,10 @@
+{
+  "before": "out\\pr-evidence\\room-source-coverage\\before\\validation-app-frame.bmp",
+  "after": "out\\pr-evidence\\room-source-coverage\\after\\validation-app-frame.bmp",
+  "meanAbsDelta": 0.022433048114180565,
+  "meanLumaDelta": 0.023240195587277412,
+  "maxLumaDelta": 0.75868159532547,
+  "changedPixelFraction": 0.09827546296296297,
+  "minChangedFraction": 0.002,
+  "passed": true
+}
