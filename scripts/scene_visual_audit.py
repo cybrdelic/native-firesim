@@ -30,11 +30,21 @@ def metrics(path: Path) -> dict:
     yy, xx = np.where(warm | blue | hot)
     bbox = [0, 0, 0, 0]
     height_fraction = 0.0
+    width_fraction = 0.0
+    aspect_ratio = 0.0
+    center_x_fraction = 0.0
+    center_y_fraction = 0.0
     local_dark_smoke = 0.0
     plume_dark_smoke = 0.0
     if yy.size:
         bbox = [int(xx.min()), int(yy.min()), int(xx.max()), int(yy.max())]
-        height_fraction = float((yy.max() - yy.min() + 1) / image.height)
+        active_width = xx.max() - xx.min() + 1
+        active_height = yy.max() - yy.min() + 1
+        height_fraction = float(active_height / image.height)
+        width_fraction = float(active_width / image.width)
+        aspect_ratio = float(active_width / active_height) if active_height else 0.0
+        center_x_fraction = float((xx.min() + xx.max()) * 0.5 / image.width)
+        center_y_fraction = float((yy.min() + yy.max()) * 0.5 / image.height)
         pad = 42
         x0 = max(0, bbox[0] - pad)
         y0 = max(0, bbox[1] - pad)
@@ -60,6 +70,9 @@ def metrics(path: Path) -> dict:
         "localDarkSmokeFraction": local_dark_smoke,
         "plumeDarkSmokeFraction": plume_dark_smoke,
         "activeHeightFraction": height_fraction,
+        "activeWidthFraction": width_fraction,
+        "activeAspectRatio": aspect_ratio,
+        "activeCenter": [center_x_fraction, center_y_fraction],
         "topActiveFraction": top_hot,
         "activeBBox": bbox,
     }
@@ -120,6 +133,33 @@ def issues_for(name: str, m: dict) -> list[str]:
     return issues
 
 
+def silhouette_issues(report: dict) -> dict[str, list[str]]:
+    issues = {name: [] for name in report}
+    metrics_by_scene = {name: data for name, data in report.items() if "activeBBox" in data}
+    if len(metrics_by_scene) < 3:
+        return issues
+    room = metrics_by_scene.get("room")
+    campfire = metrics_by_scene.get("campfire")
+    burner = metrics_by_scene.get("burner")
+    if not room or not campfire or not burner:
+        return issues
+
+    if room["activeWidthFraction"] <= burner["activeWidthFraction"] * 1.65:
+        issues["room"].append("room fire silhouette is not wider than burner source")
+    if campfire["activeHeightFraction"] <= room["activeHeightFraction"] * 0.58:
+        issues["campfire"].append("campfire silhouette is too similar to low room tray flame")
+    if burner["activeHeightFraction"] >= campfire["activeHeightFraction"] * 0.52:
+        issues["burner"].append("burner silhouette is too tall compared with campfire")
+    if (
+        abs(room["activeCenter"][0] - campfire["activeCenter"][0]) < 0.020
+        and abs(campfire["activeCenter"][0] - burner["activeCenter"][0]) < 0.020
+    ):
+        issues["room"].append("scene silhouettes share the same centered plume alignment")
+        issues["campfire"].append("scene silhouettes share the same centered plume alignment")
+        issues["burner"].append("scene silhouettes share the same centered plume alignment")
+    return issues
+
+
 def app_issues_for(name: str, m: dict) -> list[str]:
     issues: list[str] = []
     if m["uiTopMean"] < 0.010 or m["uiLeftMean"] < 0.010 or m["uiRightMean"] < 0.010 or m["uiBottomMean"] < 0.010:
@@ -162,6 +202,9 @@ def main() -> None:
         draw.rectangle((0, 0, 480, 34), fill=(0, 0, 0, 190))
         draw.text((12, 10), f"{name}: {len(m['issues'])} issues", fill=(255, 220, 170))
         thumbs.append(img)
+    for name, scene_issues in silhouette_issues(report).items():
+        if scene_issues and name in report:
+            report[name].setdefault("issues", []).extend(scene_issues)
     if thumbs:
         sheet = Image.new("RGB", (480 * len(thumbs), 270), (0, 0, 0))
         for i, img in enumerate(thumbs):

@@ -107,6 +107,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-scene-silhouette-targets.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
     & (Join-Path $PSScriptRoot "verify-visual-regression.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
