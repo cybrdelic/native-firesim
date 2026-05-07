@@ -80,6 +80,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: temporal visual stability"
+    & (Join-Path $PSScriptRoot "verify-temporal-visual-stability.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: shared texture ring"
     & (Join-Path $PSScriptRoot "verify-shared-texture-ring.ps1")
     if ($LASTEXITCODE -ne 0) {
