@@ -1931,6 +1931,31 @@ bool copyD3DWorkerFrame() {
         return false;
     }
 
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        const LONG sequence = g_sharedViewport->slotFrameSequences[slot];
+        const LONG slotEpoch = g_sharedViewport->slotSceneEpochs[slot];
+        if (slotEpoch != g_sceneEpoch ||
+            sequence <= 0 ||
+            (sequence & 1) != 0 ||
+            sequence > g_lastCopiedWorkerSequence ||
+            g_d3d.sharedSimMutexes[slot] == nullptr) {
+            continue;
+        }
+        const HRESULT acquire = g_d3d.sharedSimMutexes[slot]->AcquireSync(1, 0);
+        if (acquire == static_cast<HRESULT>(WAIT_TIMEOUT)) {
+            continue;
+        }
+        if (FAILED(acquire)) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D stale shared frame drain failed: %s", hresultString(acquire).c_str());
+            return false;
+        }
+        const HRESULT release = g_d3d.sharedSimMutexes[slot]->ReleaseSync(0);
+        if (FAILED(release)) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D stale shared frame drain release failed: %s", hresultString(release).c_str());
+            return false;
+        }
+    }
+
     int copiedSlot = -1;
     int copiedDisplaySlot = -1;
     LONG copiedSequence = g_lastCopiedWorkerSequence;

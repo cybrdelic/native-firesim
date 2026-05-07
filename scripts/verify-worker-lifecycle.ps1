@@ -25,6 +25,8 @@ Require-Text $main "slotSceneEpochs[kSharedFrameSlots]" "shared frame slots must
 Require-Text $main "activeSceneEpoch" "shared viewport must expose active scene epoch"
 Require-Text $main "slotEpoch != g_sceneEpoch" "host copy path must reject stale scene slots"
 Require-Text $main "epochB == g_sceneEpoch" "host copy candidate must re-check scene epoch after acquiring the keyed mutex"
+Require-Text $main "sequence > g_lastCopiedWorkerSequence" "host copy path must identify stale ready slots behind the copy cursor"
+Require-Text $main "D3D stale shared frame drain" "host copy path must drain stale keyed-mutex slots back to the worker"
 Require-Text $main "g_sharedViewport->activeSceneEpoch = settings.sceneEpoch" "worker settings/publish path must write the canonical scene epoch"
 Require-Text $main "g_sharedViewport->slotSceneEpochs[publishSlot] = settings.sceneEpoch" "worker publish path must stamp every shared slot with the scene epoch"
 Require-Text $main "const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch" "worker must preserve host-authored scene epoch instead of overwriting it with worker-local epoch"
