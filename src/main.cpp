@@ -1154,6 +1154,48 @@ std::string jsonArrayForKey(const std::string& text, const char* key) {
     return {};
 }
 
+std::string jsonObjectForKey(const std::string& text, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const std::size_t keyPos = text.find(needle);
+    if (keyPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t start = text.find('{', keyPos);
+    if (start == std::string::npos) {
+        return {};
+    }
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (std::size_t i = start; i < text.size(); ++i) {
+        const char c = text[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = inString;
+            continue;
+        }
+        if (c == '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString) {
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) {
+                return text.substr(start, i - start + 1);
+            }
+        }
+    }
+    return {};
+}
+
 std::vector<float> parseJsonFloats(const std::string& text) {
     std::vector<float> values;
     const char* ptr = text.c_str();
@@ -1327,15 +1369,17 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     SceneEmitterParams params;
     const std::string sceneContract = readSceneContract(sceneId);
     if (!sceneContract.empty()) {
-        const std::array<float, 3> center = jsonTripletForKey(sceneContract, "centerMeters", {0.0f, 0.02f, 0.0f});
+        const std::string emitterContract = jsonObjectForKey(sceneContract, "emitter");
+        const std::string& emitterSource = emitterContract.empty() ? sceneContract : emitterContract;
+        const std::array<float, 3> center = jsonTripletForKey(emitterSource, "centerMeters", {0.0f, 0.02f, 0.0f});
         params.centerX = center[0];
         params.centerZ = center[2];
         params.heightNorm = (center[1] - 0.02f) / 2.03f;
         float value = 0.0f;
-        if (jsonNumberForKey(sceneContract, "radiusMeters", value)) {
+        if (jsonNumberForKey(emitterSource, "radiusMeters", value)) {
             params.radius = value;
         }
-        if (jsonNumberForKey(sceneContract, "heightBandMeters", value)) {
+        if (jsonNumberForKey(emitterSource, "heightBandMeters", value)) {
             params.heightBandNorm = value / 2.03f;
         }
     } else if (sceneId == 1) {
