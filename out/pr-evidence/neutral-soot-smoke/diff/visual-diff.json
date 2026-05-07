@@ -1,0 +1,10 @@
+{
+  "before": "out\\pr-evidence\\neutral-soot-smoke\\before\\validation-frame.bmp",
+  "after": "out\\pr-evidence\\neutral-soot-smoke\\after\\validation-frame.bmp",
+  "meanAbsDelta": 0.0006438311538659036,
+  "meanLumaDelta": 0.0006568192620761693,
+  "maxLumaDelta": 0.07378353923559189,
+  "changedPixelFraction": 0.001109182098765432,
+  "minChangedFraction": 0.0001,
+  "passed": true
+}
