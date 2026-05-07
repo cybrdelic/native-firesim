@@ -33,6 +33,8 @@ $campScene = Get-Content -LiteralPath $campScenePath -Raw
 Require-Text $burnerMask '"selectedBurnerIndex": 3' "gas burner mask no longer declares one selected burner"
 Require-Text $burnerMask '"burnerCentersMeters"' "gas burner mask no longer exposes selected burner center"
 Require-Text $campScene '"type": "solid-fuel-bed"' "campfire scene no longer declares solid fuel bed"
+Require-Text $main 'jsonObjectForKey(sceneContract, "emitter")' "scene emitter contract is no longer parsed as an explicit nested object"
+Require-Text $main "const std::string& emitterSource = emitterContract.empty() ? sceneContract : emitterContract" "scene emitter loader no longer isolates nested emitter fields before legacy fallback"
 Require-Text $cuda "const int centerCount = 1;" "gas burner material no longer forces a single selected burner source"
 Require-Text $cuda "cosf(angle * 32.0f)" "gas burner source no longer uses narrow port-driven jets"
 Require-Text $cuda "sceneBuoyancyScale = p.sceneId == 2 ? 0.42f" "stove/gas burner buoyancy is no longer constrained"
