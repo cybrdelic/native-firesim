@@ -3111,6 +3111,26 @@ bool startCudaWorker() {
         return false;
     }
 
+    clearHostSharedFrameHandles();
+    g_lastCopiedWorkerSequence = 0;
+    g_sharedRingLastCopiedSharedSlot = -1;
+    g_sharedRingLastCopiedDisplaySlot = -1;
+    g_sharedRingCopyStarvationFrames = 0;
+    g_d3d.hasSimFrame = false;
+    g_d3d.activeDisplaySimSlot = -1;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        g_sharedViewport->slotFrameSequences[slot] = 0;
+        g_sharedViewport->slotSceneEpochs[slot] = 0;
+        g_sharedViewport->sharedTextureHandleValues[slot] = 0;
+    }
+    g_sharedViewport->latestFrameSlot = -1;
+    g_sharedViewport->lastFrameTickMs = 0;
+    g_sharedViewport->workerHeartbeatTickMs = 0;
+    g_sharedViewport->workerPublishedFrames = 0;
+    g_sharedViewport->workerPhysicsFrames = 0;
+    g_sharedViewport->workerRenderOnlyFrames = 0;
+    g_sharedViewport->activeSceneEpoch = g_sceneEpoch;
+
     g_lastWorkerStartTickMs = now;
     ++g_workerRestartCount;
     g_sharedViewport->shutdownRequested = 0;
@@ -3181,12 +3201,15 @@ void serviceCudaWorkerWatchdog() {
 
     const bool alive = cudaWorkerProcessAlive();
     const unsigned long long now = tickMs();
+    const bool heartbeatBelongsToCurrentWorker =
+        g_sharedViewport->workerHeartbeatTickMs != 0 &&
+        g_sharedViewport->workerHeartbeatTickMs >= g_sharedViewport->workerStartTickMs;
     const unsigned long long heartbeatAge =
-        g_sharedViewport->workerHeartbeatTickMs == 0 ? 0 : now - g_sharedViewport->workerHeartbeatTickMs;
+        heartbeatBelongsToCurrentWorker ? now - g_sharedViewport->workerHeartbeatTickMs : 0;
     const unsigned long long frameAge =
         g_sharedViewport->lastFrameTickMs == 0 ? 0 : now - g_sharedViewport->lastFrameTickMs;
 
-    if (alive && g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge > kWorkerKillStaleMs) {
+    if (alive && heartbeatBelongsToCurrentWorker && heartbeatAge > kWorkerKillStaleMs) {
         appendRuntimeEvent("worker-stale-kill", "heartbeat exceeded kill threshold");
         appendWorkerLifecycleEvent(WorkerLifecycleReason::StaleHeartbeatKill, "heartbeat exceeded kill threshold");
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker heartbeat stale; restarting");
@@ -3227,7 +3250,7 @@ void serviceCudaWorkerWatchdog() {
                 g_sharedRingCopyStarvationFrames);
             g_lastWorkerStatusFormatTickMs = now;
         }
-    } else if (g_sharedViewport->workerHeartbeatTickMs != 0 && heartbeatAge <= kWorkerHeartbeatStaleMs) {
+    } else if (heartbeatBelongsToCurrentWorker && heartbeatAge <= kWorkerHeartbeatStaleMs) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker running; waiting for fresh frame");
     } else {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker starting");
