@@ -96,6 +96,7 @@ struct FireSettings {
     float emitterRadius = 0.48f;
     int burnerCenterCount = 0;
     float burnerCenterX[4] = {};
+    float burnerCenterY[4] = {};
     float burnerCenterZ[4] = {};
 };
 
