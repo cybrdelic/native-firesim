@@ -1662,12 +1662,15 @@ __device__ void sourceModelOverlay(float2 uv, const CameraState& cam, const SimP
     if (uv.x < 0.24f || uv.x > 0.76f || uv.y < 0.42f || uv.y > 0.88f) {
         return;
     }
-    if (p.sceneId == 1 || p.sceneId == 2) {
+    if (p.sceneId == 1) {
         return;
     }
     float alpha = 0.0f;
     float3 modelColor = make_float3(0.0f, 0.0f, 0.0f);
-    const float3 c = projectPoint(cam, make_float3(0.0f, 0.072f, 0.0f));
+    const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
+    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
+    const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
+    const float3 c = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
     const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
     const float inner = smoothstepf(0.112f, 0.086f, fabsf(uv.x - c.x)) * smoothstepf(0.039f, 0.027f, fabsf(uv.y - c.y));
     alpha = saturate((tray - inner * 0.55f) * 0.65f);
@@ -1929,7 +1932,10 @@ __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, con
     if (p.showGizmos == 0) {
         return;
     }
-    const float3 source = projectPoint(cam, make_float3(0.0f, 0.055f, 0.0f));
+    const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
+    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
+    const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
+    const float3 source = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
     if (source.z > 0.0f) {
         const float2 c = make_float2(source.x, source.y);
         const float a = ringAlpha(uv, c, 0.125f / source.z, 0.006f) + diskAlpha(uv, c, 0.012f);
@@ -2071,6 +2077,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.38f, 0.92f, shearNoise + (0.72f - fv) * 0.12f + reactionFront * 0.10f) *
                 smoothstepf(1.0f, 0.02f, fv) *
                 fieldEdge;
+            const float sourceLocalV = p.sceneId == 2 ? fmaxf(0.0f, fv - p.emitterHeightNorm) : fv;
             const float burnerLowJet = p.sceneId == 2 ? smoothstepf(fmaxf(0.012f, p.emitterHeightBandNorm * 0.68f), fmaxf(0.003f, p.emitterHeightBandNorm * 0.10f), fabsf(fv - p.emitterHeightNorm)) * smoothstepf(0.05f, 0.58f, fuel + heat * 0.025f) * smoothstepf(0.50f, 1.0f, oxygen) : 0.0f;
             const float burnerPortJet = p.sceneId == 2 ? burnerLowJet * smoothstepf(0.68f, 0.98f, fineNoise + shearNoise * 0.18f) : 0.0f;
             const float campTongueBias = p.sceneId == 1 ? smoothstepf(0.035f, 0.72f, fuel + pyrolysis * 0.50f + charMass * 0.12f) * smoothstepf(0.76f, 0.035f, fv) : 0.0f;
@@ -2079,7 +2086,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float breakup = smoothstepf(0.34f, 0.88f, fineNoise * 0.48f + shearNoise * 0.42f + holeNoise * 0.24f + heat * 0.026f);
             const float verticalFade = smoothstepf(0.96f, 0.025f, fv);
             const float flameHeightFade = p.sceneId == 2 ? smoothstepf(p.emitterHeightNorm + p.emitterHeightBandNorm * 0.72f, p.emitterHeightNorm - p.emitterHeightBandNorm * 0.05f, fv) : smoothstepf(p.sceneId == 1 ? 0.72f : 0.76f, 0.10f, fv);
-            const float lowerWhite = smoothstepf(0.060f, 0.00f, fv) * smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
+            const float lowerWhite = smoothstepf(0.060f, 0.00f, sourceLocalV) * smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
             const float tempK = 293.0f + heat * 360.0f + fuel * 44.0f + pyrolysis * 90.0f + fieldFilament * 560.0f + convectiveSheet * 420.0f + lowerWhite * 110.0f + progress * 64.0f;
             const float combustion =
                 smoothstepf(740.0f, 1630.0f, tempK) *
@@ -2094,7 +2101,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.55f, 0.94f, fineNoise * 0.46f + shearNoise * 0.44f + plumeNoise * 0.18f + reactionFront * 0.15f + heat * 0.014f - fv * 0.050f) *
                     (1.0f - sheetHole * (0.74f + lesBreakup * 0.12f)) *
                     (1.0f - flameSheetTear * 0.18f),
-                smoothstepf(0.18f, 0.030f, fv) * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
+                smoothstepf(0.18f, 0.030f, sourceLocalV) * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
             const float coherentSheet = saturate(fieldFilament * 0.86f + convectiveSheet * 0.55f + thinFront * 0.74f);
             const float sheetConfinement = saturate(coherentSheet + reactionFront * 0.08f);
             const float roomCoverageBoost = p.sceneId == 0 ? (0.72f + roomTraySheet * 1.24f) : 1.0f;
