@@ -467,9 +467,9 @@ SceneInstance makeSceneInstance(int sceneId, LONG sceneEpoch, const SceneEmitter
     return instance;
 }
 
-void refreshSceneInstance(int sceneId) {
+void refreshSceneInstance(int sceneId, LONG sceneEpoch) {
     const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
-    g_sceneInstances[scene] = makeSceneInstance(scene, g_sceneEpoch, g_sceneEmitters[scene], &g_sceneMeshes[scene]);
+    g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene], &g_sceneMeshes[scene]);
 }
 
 const SceneInstance& activeSceneInstanceFor(int sceneId) {
@@ -479,7 +479,8 @@ const SceneInstance& activeSceneInstanceFor(int sceneId) {
 
 void applySceneEmitterParams(FireSettings& settings) {
     const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
-    refreshSceneInstance(scene);
+    const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
+    refreshSceneInstance(scene, sceneEpoch);
     const SceneInstance& instance = activeSceneInstanceFor(scene);
     const SceneEmitterParams& emitter = instance.emitter;
     settings.sceneEpoch = instance.sceneEpoch;
@@ -535,7 +536,7 @@ void invalidateDisplayedCudaFrame() {
     g_d3d.nextDisplaySimSlot = 0;
     g_cudaWorkerFrameLive = false;
     g_useCudaBackend = false;
-    g_lastCopiedWorkerSequence = g_sharedViewport == nullptr ? 0 : g_sharedViewport->frameSequence;
+    g_lastCopiedWorkerSequence = 0;
     g_sharedRingLastCopiedSharedSlot = -1;
     g_sharedRingLastCopiedDisplaySlot = -1;
     g_sharedRingLastCopiedSequence = 0;

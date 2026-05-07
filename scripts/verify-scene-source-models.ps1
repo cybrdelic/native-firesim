@@ -39,6 +39,7 @@ Require-Text $main "sceneMeshTranslationMeters(sceneId, sceneContract)" "scene m
 Require-Text $main "applySceneMeshTranslation(" "scene-to-sim point transform is not centralized"
 Require-Text $main "struct SceneInstance" "canonical scene instance contract is missing"
 Require-Text $main "SceneInstance makeSceneInstance" "scene instance builder is missing"
+Require-Text $main "const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch" "scene instance refresh must preserve host-authored epochs across worker process boundaries"
 Require-Text $main "settings.sceneEpoch = instance.sceneEpoch" "scene emitter application must stamp settings with canonical scene epoch"
 Require-Text $main "sceneInstanceContract=SceneInstance owns scene id, epoch, emitter, source center/radius/height, imported mesh presence, and selected burner state" "diagnostics scene instance contract is missing from source"
 Require-Text $main "params.burnerCenterX[i] = burnerPoint[0]" "burner centers no longer share the scene-to-sim transform"
