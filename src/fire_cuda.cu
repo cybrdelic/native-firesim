@@ -2119,11 +2119,12 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float scatterSeparation = saturate(smokeOnlyMask * (1.0f - smoothstepf(0.02f, 0.16f, emissiveMask) * 0.58f));
             const float nearFlameSootCleanout = 1.0f - smoothstepf(0.025f, 0.34f, resolvedFlameSheet) * 0.82f;
             const float smokeOnlyHeight = smoothstepf(0.20f, 0.70f, fv) * (1.0f - smoothstepf(0.02f, 0.20f, emissiveMask));
-            const float absorptionDensity = rawSootDensity * nearFlameSootCleanout * (1.10f + smokeOnlyHeight * 2.20f);
+            const float upperSootNeutrality = smoothstepf(0.18f, 0.78f, fv) * scatterSeparation;
+            const float absorptionDensity = rawSootDensity * nearFlameSootCleanout * (1.10f + smokeOnlyHeight * 2.20f + upperSootNeutrality * 2.40f);
             const float scatterDensity = rawSootDensity * scatterSeparation * smoothstepf(0.10f, 0.55f, fv + sootOptics * 0.10f) * (0.24f + (1.0f - smokeOnlyHeight) * 0.34f);
 
             const float particleRadius = saturate(0.08f + sootOptics * 0.028f + ash * 0.085f + saturate(1.0f - oxygen) * 0.12f);
-            const float sootAbsorption = absorptionDensity * (3.10f + particleRadius * 4.60f + sootOptics * 0.70f) * p.smokeDarkness;
+            const float sootAbsorption = absorptionDensity * (3.10f + particleRadius * 4.60f + sootOptics * 0.70f + upperSootNeutrality * 2.85f) * p.smokeDarkness;
             const float sootScattering = scatterDensity * (0.018f + (1.0f - particleRadius) * 0.050f) * (0.20f + p.smokeGain * 0.10f);
             const float sootExtinction = sootAbsorption + sootScattering;
             const float flameExtinction = flameDensity * (0.12f + (1.0f - resolvedFlameSheet) * 0.12f);
@@ -2169,14 +2170,15 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             smokeColor = lerp3(smokeColor, smokeAsh, ashVeil);
             smokeColor = mul3(smokeColor, smokeOnlyMask);
             const float localIrradianceLuma = luminance3(localIrradiance);
-            const float warmScatterDamp = 1.0f - upperSmokeMask * 0.94f;
-            const float sceneWarmScatter = p.sceneId == 2 ? 0.025f : (p.sceneId == 1 ? 0.42f : 1.0f);
-            const float backScatter = scatterAlpha * lightVisibility * (0.0010f + localIrradianceLuma * 0.0020f * warmScatterDamp + baseGlow * 0.00025f * sceneWarmScatter) * (0.020f + (1.0f - particleRadius) * 0.022f) * scatterSeparation;
-            smokeColor = add3(smokeColor, mul3(make_float3(0.014f, 0.016f, 0.020f), backScatter));
-            const float scatterGain = scatterAlpha * (0.00055f + lightVisibility * 0.0012f * warmScatterDamp + flameDensity * 0.00018f * sceneWarmScatter + turbulenceEnergy * 0.00025f) * (0.045f + (1.0f - particleRadius) * 0.055f) * scatterSeparation;
-            const float sceneScatter = scatterAlpha * scatterSeparation * (0.008f + (1.0f - particleRadius) * 0.018f) * lightVisibility;
-            const float3 neutralScatterLight = make_float3(localIrradianceLuma * 0.070f, localIrradianceLuma * 0.082f, localIrradianceLuma * 0.105f);
-            const float3 smokeScatterLight = lerp3(neutralScatterLight, localIrradiance, (1.0f - upperSmokeMask) * 0.16f);
+            const float warmScatterDamp = 1.0f - upperSootNeutrality * 0.985f;
+            const float nearFlameWarmLeak = (1.0f - upperSootNeutrality) * (1.0f - smokeOnlyHeight) * 0.18f;
+            const float sceneWarmScatter = p.sceneId == 2 ? 0.010f : (p.sceneId == 1 ? 0.18f : 0.30f);
+            const float backScatter = scatterAlpha * lightVisibility * (0.00085f + localIrradianceLuma * 0.0011f * warmScatterDamp + baseGlow * 0.00010f * sceneWarmScatter) * (0.018f + (1.0f - particleRadius) * 0.018f) * scatterSeparation;
+            smokeColor = add3(smokeColor, mul3(make_float3(0.010f, 0.012f, 0.016f), backScatter));
+            const float scatterGain = scatterAlpha * (0.00046f + lightVisibility * 0.00072f * warmScatterDamp + flameDensity * 0.00008f * sceneWarmScatter + turbulenceEnergy * 0.00018f) * (0.038f + (1.0f - particleRadius) * 0.045f) * scatterSeparation;
+            const float sceneScatter = scatterAlpha * scatterSeparation * (0.0065f + (1.0f - particleRadius) * 0.014f) * lightVisibility;
+            const float3 neutralScatterLight = make_float3(localIrradianceLuma * 0.052f, localIrradianceLuma * 0.064f, localIrradianceLuma * 0.086f);
+            const float3 smokeScatterLight = lerp3(neutralScatterLight, localIrradiance, nearFlameWarmLeak);
             const float coalGlow = smoothstepf(0.004f, 0.18f, charMass) * smoothstepf(0.54f, 0.02f, fv) * (0.070f + pyrolysis * 0.12f + heat * 0.009f);
 
             debugFlame = fmaxf(debugFlame, saturate(flameDensity * radiantPower * 0.26f));
