@@ -10,9 +10,9 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "scene-visual-audit"
 SCENES = {
-    "room": OUT / "room" / "validation-frame.bmp",
-    "campfire": OUT / "campfire" / "validation-frame.bmp",
-    "burner": OUT / "burner" / "validation-frame.bmp",
+    "room": {"raw": OUT / "room" / "validation-frame.bmp", "app": OUT / "room" / "validation-app-frame.bmp"},
+    "campfire": {"raw": OUT / "campfire" / "validation-frame.bmp", "app": OUT / "campfire" / "validation-app-frame.bmp"},
+    "burner": {"raw": OUT / "burner" / "validation-frame.bmp", "app": OUT / "burner" / "validation-app-frame.bmp"},
 }
 
 
@@ -64,6 +64,35 @@ def metrics(path: Path) -> dict:
         "activeBBox": bbox,
     }
 
+def app_metrics(path: Path) -> dict:
+    image = Image.open(path).convert("RGB")
+    arr = np.asarray(image, dtype=np.float32) / 255.0
+    luma = arr[..., 0] * 0.2126 + arr[..., 1] * 0.7152 + arr[..., 2] * 0.0722
+    h, w = luma.shape
+    top_bar = luma[12:64, 24 : w - 24]
+    left_tools = luma[84 : h - 72, 20:120]
+    right_panel = luma[80 : h - 108, w - 230 : w - 24]
+    bottom_bar = luma[h - 62 : h - 8, 24 : w - 24]
+    center = luma[120 : h - 96, 180 : w - 260]
+    vertical_edges = np.abs(np.diff(center, axis=1)) if center.size else np.zeros((1, 1), dtype=np.float32)
+    horizontal_edges = np.abs(np.diff(center, axis=0)) if center.size else np.zeros((1, 1), dtype=np.float32)
+    warm_smoke = (
+        (arr[..., 0] > arr[..., 1] * 1.04)
+        & (arr[..., 1] > arr[..., 2] * 1.10)
+        & (luma > 0.08)
+        & (luma < 0.38)
+    )
+    return {
+        "appPath": str(path),
+        "uiTopMean": float(top_bar.mean()) if top_bar.size else 0.0,
+        "uiLeftMean": float(left_tools.mean()) if left_tools.size else 0.0,
+        "uiRightMean": float(right_panel.mean()) if right_panel.size else 0.0,
+        "uiBottomMean": float(bottom_bar.mean()) if bottom_bar.size else 0.0,
+        "centerMean": float(center.mean()) if center.size else 0.0,
+        "gridArtifactScore": float(max(vertical_edges.mean(), horizontal_edges.mean())),
+        "warmSmokeFraction": float(warm_smoke.mean()),
+    }
+
 
 def issues_for(name: str, m: dict) -> list[str]:
     issues: list[str] = []
@@ -91,22 +120,44 @@ def issues_for(name: str, m: dict) -> list[str]:
     return issues
 
 
+def app_issues_for(name: str, m: dict) -> list[str]:
+    issues: list[str] = []
+    if m["uiTopMean"] < 0.010 or m["uiLeftMean"] < 0.010 or m["uiRightMean"] < 0.010 or m["uiBottomMean"] < 0.010:
+        issues.append("app frame is missing expected UI chrome")
+    if name in {"campfire", "burner"} and m["centerMean"] < 0.010:
+        issues.append("app frame center is too dark; GLB or scene content may be missing")
+    if m["gridArtifactScore"] > 0.085:
+        issues.append("app frame has excessive grid/line artifact score")
+    if m["warmSmokeFraction"] > 0.26:
+        issues.append("app frame has excessive warm/sepia smoke pixels")
+    return issues
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     report = {}
     thumbs = []
     fail = False
-    for name, path in SCENES.items():
-        if not path.exists():
-            report[name] = {"missing": str(path), "issues": ["capture missing"]}
+    for name, paths in SCENES.items():
+        raw_path = paths["raw"]
+        app_path = paths["app"]
+        if not raw_path.exists():
+            report[name] = {"missing": str(raw_path), "issues": ["capture missing"]}
             fail = True
             continue
-        m = metrics(path)
+        m = metrics(raw_path)
         m["issues"] = issues_for(name, m)
+        if app_path.exists():
+            app = app_metrics(app_path)
+            m["app"] = app
+            m["issues"].extend(app_issues_for(name, app))
+        else:
+            m["issues"].append("app-frame capture missing")
+            fail = True
         if any("black" in issue or "near-zero" in issue for issue in m["issues"]):
             fail = True
         report[name] = m
-        img = Image.open(path).convert("RGB").resize((480, 270))
+        img = Image.open(app_path if app_path.exists() else raw_path).convert("RGB").resize((480, 270))
         draw = ImageDraw.Draw(img, "RGBA")
         draw.rectangle((0, 0, 480, 34), fill=(0, 0, 0, 190))
         draw.text((12, 10), f"{name}: {len(m['issues'])} issues", fill=(255, 220, 170))
