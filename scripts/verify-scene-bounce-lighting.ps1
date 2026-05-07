@@ -18,6 +18,11 @@ Require-Text $cuda "contactWarmth = surface == 1 ? 1.72f" "surface-specific boun
 Require-Text $cuda "emberBed * glow * 0.26f" "room tray ember-bed bounce is missing"
 Require-Text $cuda "reflectCore * p.reflectionGain * 0.48f" "floor reflected fire core response is missing"
 Require-Text $cuda "wallGlow * 0.090f" "wall fire spill response is missing"
+Require-Text $main "length(input.worldPos.xz - MeshLightPos.xz)" "mesh fire bounce is still centered at world origin instead of source position"
+Require-Text $main "normalize(MeshLightPos.xyz - input.worldPos)" "mesh fire-facing term is still centered at world origin instead of source position"
+Require-Text $main "sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.62" "gas burner mesh pass still occludes the selected source opening"
+Require-Text $main "emitter.burnerCenterX[0]" "gas burner mesh light no longer follows selected burner source"
+Require-Text $main "emitter.burnerCenterZ[0]" "gas burner mesh light no longer follows selected burner source"
 Require-Text $main "lowSource * 0.66" "mesh fire bounce low-source term is missing"
 Require-Text $main "material * (0.038 + ndl * 0.24" "mesh ambient lighting must not dominate fire bounce"
 

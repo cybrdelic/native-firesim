@@ -1668,7 +1668,7 @@ __device__ void sourceModelOverlay(float2 uv, const CameraState& cam, const SimP
     float alpha = 0.0f;
     float3 modelColor = make_float3(0.0f, 0.0f, 0.0f);
     const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
-    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
+    const float sourceY = p.emitterHeightNorm * 2.03f + 0.02f;
     const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
     const float3 c = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
     const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
@@ -1933,7 +1933,7 @@ __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, con
         return;
     }
     const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
-    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
+    const float sourceY = p.emitterHeightNorm * 2.03f + 0.02f;
     const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
     const float3 source = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
     if (source.z > 0.0f) {
@@ -2181,8 +2181,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             }
             float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.10f + whiteCore * 0.38f));
             if (p.sceneId == 2) {
-                flameEmission = mul3(flameEmission, 0.42f);
-                flameEmission = add3(flameEmission, mul3(make_float3(0.012f, 0.28f, 5.20f), burnerPortJet * combustion * stepT * 4.40f));
+                flameEmission = mul3(flameEmission, 1.35f);
+                flameEmission = add3(flameEmission, mul3(make_float3(0.018f, 0.42f, 7.60f), burnerPortJet * combustion * stepT * 12.50f));
             }
             flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 1.02f, 0.86f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.82f));
             flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : (p.sceneId == 1 ? 3.20f : 3.10f))));
@@ -3186,7 +3186,8 @@ bool stepAndRenderInternal(
         params.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i]));
     }
     if (params.sceneId == 2 && params.burnerCenterCount > 0) {
-        params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (params.burnerCenterY[0] - 0.02f) / 2.03f));
+        const float burnerExitY = params.burnerCenterY[0] + params.emitterHeightBandNorm * 2.03f * 0.42f;
+        params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (burnerExitY - 0.02f) / 2.03f));
     }
     updateCameraCache(params);
 

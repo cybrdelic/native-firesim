@@ -124,6 +124,8 @@ struct SharedViewportBuffer {
     unsigned long long sharedTextureHandleValues[kSharedFrameSlots];
     volatile LONG latestFrameSlot;
     volatile LONG slotFrameSequences[kSharedFrameSlots];
+    volatile LONG slotSceneEpochs[kSharedFrameSlots];
+    volatile LONG activeSceneEpoch;
     unsigned long long workerFrameMicros;
     unsigned long long workerCudaMicros;
     unsigned long long workerPublishMicros;
@@ -180,6 +182,19 @@ struct SceneEmitterParams {
     float burnerCenterX[4] = {};
     float burnerCenterY[4] = {};
     float burnerCenterZ[4] = {};
+};
+
+struct SceneInstance {
+    int sceneId = 0;
+    int sceneEpoch = 0;
+    SceneEmitterParams emitter;
+    float sourceX = 0.0f;
+    float sourceY = 0.02f;
+    float sourceZ = 0.0f;
+    float sourceRadius = 0.48f;
+    float sourceHeightBandMeters = 0.12f;
+    bool hasImportedMesh = false;
+    bool hasSelectedBurner = false;
 };
 
 struct D3DDisplayState {
@@ -268,6 +283,7 @@ RenderGraphStats g_renderGraphStats;
 CanonicalRuntimeState g_runtimeState;
 std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
 std::array<SceneEmitterParams, kSceneCount> g_sceneEmitters;
+std::array<SceneInstance, kSceneCount> g_sceneInstances;
 HANDLE g_sharedViewportMap = nullptr;
 SharedViewportBuffer* g_sharedViewport = nullptr;
 HANDLE g_cudaWorkerProcess = nullptr;
@@ -297,6 +313,7 @@ float g_cameraDistance = 2.62f;
 float g_displayExposure = kExposure;
 int g_activeGizmo = 1;
 int g_activeScene = 0;
+LONG g_sceneEpoch = 1;
 int g_renderDebugMode = 0;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
@@ -365,6 +382,7 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         a.showGizmos == b.showGizmos &&
         a.activeGizmo == b.activeGizmo &&
         a.sceneId == b.sceneId &&
+        a.sceneEpoch == b.sceneEpoch &&
         a.wind == b.wind &&
         a.turbulence == b.turbulence &&
         a.detail == b.detail &&
@@ -430,9 +448,41 @@ void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool c
     g_haveLastOverlaySettings = true;
 }
 
+SceneInstance makeSceneInstance(int sceneId, LONG sceneEpoch, const SceneEmitterParams& emitter, const RuntimeSceneMesh* mesh) {
+    SceneInstance instance;
+    instance.sceneId = std::max(0, std::min(kSceneCount - 1, sceneId));
+    instance.sceneEpoch = static_cast<int>(sceneEpoch);
+    instance.emitter = emitter;
+    instance.sourceX = emitter.centerX;
+    instance.sourceY = emitter.heightNorm * 2.03f + 0.02f;
+    instance.sourceZ = emitter.centerZ;
+    instance.sourceRadius = emitter.radius;
+    instance.sourceHeightBandMeters = emitter.heightBandNorm * 2.03f;
+    instance.hasImportedMesh = mesh != nullptr && mesh->loaded;
+    instance.hasSelectedBurner = instance.sceneId == 2 && emitter.burnerCenterCount > 0;
+    if (instance.hasSelectedBurner) {
+        instance.sourceX = emitter.burnerCenterX[0];
+        instance.sourceZ = emitter.burnerCenterZ[0];
+    }
+    return instance;
+}
+
+void refreshSceneInstance(int sceneId) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
+    g_sceneInstances[scene] = makeSceneInstance(scene, g_sceneEpoch, g_sceneEmitters[scene], &g_sceneMeshes[scene]);
+}
+
+const SceneInstance& activeSceneInstanceFor(int sceneId) {
+    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
+    return g_sceneInstances[scene];
+}
+
 void applySceneEmitterParams(FireSettings& settings) {
     const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
-    const SceneEmitterParams& emitter = g_sceneEmitters[scene];
+    refreshSceneInstance(scene);
+    const SceneInstance& instance = activeSceneInstanceFor(scene);
+    const SceneEmitterParams& emitter = instance.emitter;
+    settings.sceneEpoch = instance.sceneEpoch;
     settings.emitterCenterX = emitter.centerX;
     settings.emitterCenterZ = emitter.centerZ;
     settings.emitterHeightNorm = emitter.heightNorm;
@@ -490,6 +540,30 @@ void invalidateDisplayedCudaFrame() {
     g_sharedRingLastCopiedDisplaySlot = -1;
     g_sharedRingLastCopiedSequence = 0;
     clearSimulationFrame(g_simFrame);
+}
+
+void clearHostSharedFrameHandles() {
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        g_d3d.sharedSimTextures[slot].Reset();
+        g_d3d.sharedSimMutexes[slot].Reset();
+        g_d3d.sharedSimHandles[slot] = nullptr;
+    }
+}
+
+void invalidateSharedViewportPublishedFrames() {
+    if (g_sharedViewport == nullptr) {
+        return;
+    }
+    g_sharedViewport->latestFrameSlot = -1;
+    g_sharedViewport->lastFrameTickMs = 0;
+    g_sharedViewport->sharedTextureHandleValue = 0;
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        g_sharedViewport->sharedTextureHandleValues[slot] = 0;
+        g_sharedViewport->slotFrameSequences[slot] = 0;
+        g_sharedViewport->slotSceneEpochs[slot] = 0;
+    }
+    g_sharedViewport->activeSceneEpoch = g_sceneEpoch;
+    InterlockedIncrement(&g_sharedViewport->frameSequence);
 }
 
 void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
@@ -778,7 +852,10 @@ void switchScene(int scene) {
         return;
     }
     g_activeScene = nextScene;
+    InterlockedIncrement(&g_sceneEpoch);
     stopCudaWorker();
+    invalidateSharedViewportPublishedFrames();
+    clearHostSharedFrameHandles();
     g_lastWorkerStartTickMs = 0;
     requestSimulationReset();
     applyRuntimeTransition(RuntimeTransitionReason::SceneSwitch);
@@ -1470,7 +1547,7 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
         params.burnerCenterZ[i] = burnerPoint[2];
     }
     if (sceneId == 2 && params.burnerCenterCount > 0) {
-        params.heightNorm = (params.burnerCenterY[0] - 0.02f) / 2.03f;
+        params.heightNorm = ((params.burnerCenterY[0] + params.heightBandNorm * 2.03f * 0.42f) - 0.02f) / 2.03f;
     }
     return params;
 }
@@ -1586,11 +1663,11 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float3 v = normalize(float3(0.0, 0.85, 2.4) - input.worldPos);
     float ndl = saturate(dot(n, l));
     float rim = pow(saturate(1.0 - dot(n, v)), 2.2);
-    float radial = length(input.worldPos.xz);
+    float radial = length(input.worldPos.xz - MeshLightPos.xz);
     float sourceRadius = max(MeshFireParams.x, 0.01);
     float sourceFalloff = exp(-(radial * radial) / (sourceRadius * sourceRadius));
     float lowSource = saturate(1.0 - input.worldPos.y * MeshFireParams.z);
-    float3 toFire = normalize(float3(-input.worldPos.x, MeshLightPos.y - input.worldPos.y, -input.worldPos.z));
+    float3 toFire = normalize(MeshLightPos.xyz - input.worldPos);
     float fireFacing = saturate(dot(n, toFire));
     float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.30 + lowSource * 0.66 + fireFacing * 0.54);
     float3 coolFill = float3(0.015, 0.018, 0.024) * (0.22 + rim * 0.54);
@@ -1599,7 +1676,8 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float2 screenUv = saturate(input.pos.xy / float2(960.0, 540.0));
     float sceneLuma = Luma(FrameTex.Sample(LinearSampler, screenUv).rgb);
     float hotVolume = smoothstep(0.12, 0.55, sceneLuma);
-    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.82);
+    float sourceOcclusionRelief = sourceFalloff * MeshFireParams.w * 0.62;
+    float alpha = MeshBaseColor.a * (1.0 - hotVolume * 0.82) * (1.0 - sourceOcclusionRelief);
     return float4(color, alpha);
 }
 )HLSL";
@@ -1862,7 +1940,9 @@ bool copyD3DWorkerFrame() {
         LONG newestSequence = g_lastCopiedWorkerSequence;
         for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
             const LONG sequence = g_sharedViewport->slotFrameSequences[slot];
+            const LONG slotEpoch = g_sharedViewport->slotSceneEpochs[slot];
             if (skipped[slot] ||
+                slotEpoch != g_sceneEpoch ||
                 sequence <= 0 ||
                 (sequence & 1) != 0 ||
                 g_d3d.sharedSimMutexes[slot] == nullptr ||
@@ -1891,7 +1971,8 @@ bool copyD3DWorkerFrame() {
         }
 
         const LONG sequenceB = g_sharedViewport->slotFrameSequences[newestSlot];
-        const bool copyCandidate = sequenceB == newestSequence && (sequenceB & 1) == 0 && sequenceB > g_lastCopiedWorkerSequence;
+        const LONG epochB = g_sharedViewport->slotSceneEpochs[newestSlot];
+        const bool copyCandidate = epochB == g_sceneEpoch && sequenceB == newestSequence && (sequenceB & 1) == 0 && sequenceB > g_lastCopiedWorkerSequence;
         if (copyCandidate) {
             int targetSlot = g_d3d.nextDisplaySimSlot;
             if (targetSlot == g_d3d.activeDisplaySimSlot) {
@@ -2082,7 +2163,7 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
             char label[24] = {};
             std::snprintf(label, sizeof(label), i == 0 ? "SRC ACTIVE" : "PORT %d", i);
             const float alphaBias = i == 0 ? 1.0f : 0.72f;
-            const float burnerY = settings.burnerCenterY[i] > 0.0f ? settings.burnerCenterY[i] : emitterY;
+            const float burnerY = i == 0 ? emitterY : (settings.burnerCenterY[i] > 0.0f ? settings.burnerCenterY[i] : emitterY);
             drawProjectedEmitterMarker(
                 pixels,
                 {settings.burnerCenterX[i], burnerY, settings.burnerCenterZ[i]},
@@ -2146,9 +2227,10 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         0.0f, 0.0f, zf / (zn - zf), -1.0f,
         0.0f, 0.0f, (zn * zf) / (zn - zf), 0.0f};
     mulMat4(view, proj, constants.viewProj);
-    constants.lightPos[0] = 0.0f;
-    constants.lightPos[1] = sceneId == 2 ? 0.20f : 0.50f;
-    constants.lightPos[2] = 0.0f;
+    const SceneEmitterParams& emitter = g_sceneEmitters[std::max(0, std::min(kSceneCount - 1, sceneId))];
+    constants.lightPos[0] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterX[0] : emitter.centerX;
+    constants.lightPos[1] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterY[0] + 0.055f : (emitter.heightNorm * 2.03f + 0.02f + 0.16f);
+    constants.lightPos[2] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterZ[0] : emitter.centerZ;
     constants.lightPos[3] = 1.0f;
     if (sceneId == 1) {
         constants.baseColor[0] = 0.052f * exposure;
@@ -2859,6 +2941,7 @@ bool initializeSharedViewport(bool reset) {
         g_sharedViewport->workerPublishedFrames = 0;
         g_sharedViewport->workerPhysicsFrames = 0;
         g_sharedViewport->workerRenderOnlyFrames = 0;
+        g_sharedViewport->activeSceneEpoch = g_sceneEpoch;
         g_haveLastWorkerSettings = false;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "shared viewport initialized");
     }
@@ -2886,6 +2969,7 @@ void writeWorkerSettings(const FireSettings& settings) {
     }
     g_lastWorkerSettings = settings;
     g_haveLastWorkerSettings = true;
+    g_sharedViewport->activeSceneEpoch = settings.sceneEpoch;
     InterlockedIncrement(&g_sharedViewport->settingsSequence);
     g_sharedViewport->settings = settings;
     InterlockedIncrement(&g_sharedViewport->settingsSequence);
@@ -2921,14 +3005,18 @@ bool workerFrameMetadataFresh() {
     if (tickMs() - g_sharedViewport->lastFrameTickMs > kWorkerFrameStaleMs) {
         return false;
     }
+    if (g_sharedViewport->activeSceneEpoch != g_sceneEpoch) {
+        return false;
+    }
     const LONG latestSlot = g_sharedViewport->latestFrameSlot;
     if (latestSlot >= 0 && latestSlot < kSharedFrameSlots) {
         const LONG latestSequence = g_sharedViewport->slotFrameSequences[latestSlot];
-        if (latestSequence > 0 && (latestSequence & 1) == 0) {
+        const LONG latestEpoch = g_sharedViewport->slotSceneEpochs[latestSlot];
+        if (latestEpoch == g_sceneEpoch && latestSequence > 0 && (latestSequence & 1) == 0) {
             return true;
         }
     }
-    return g_lastCopiedWorkerSequence > 0;
+    return g_lastCopiedWorkerSequence > 0 && g_sharedViewport->activeSceneEpoch == g_sceneEpoch;
 }
 
 bool cudaWorkerProcessAlive() {
@@ -3517,7 +3605,9 @@ int runCudaWorker(const std::string& args) {
     for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
         g_sharedViewport->sharedTextureHandleValues[slot] = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(d3dTarget.sharedHandles[slot]));
         g_sharedViewport->slotFrameSequences[slot] = 0;
+        g_sharedViewport->slotSceneEpochs[slot] = 0;
     }
+    g_sharedViewport->activeSceneEpoch = g_sharedViewport->settings.sceneEpoch;
     g_sharedViewport->latestFrameSlot = -1;
     appendRuntimeEvent("worker-cuda-d3d-registered", "");
 
@@ -3547,6 +3637,7 @@ int runCudaWorker(const std::string& args) {
         settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
         applyCanonicalFireSettings(settings);
         applySceneEmitterParams(settings);
+        g_sharedViewport->activeSceneEpoch = settings.sceneEpoch;
         int publishSlot = -1;
         const auto frameStart = Clock::now();
         HRESULT acquire = static_cast<HRESULT>(WAIT_TIMEOUT);
@@ -3578,6 +3669,7 @@ int runCudaWorker(const std::string& args) {
         }
 
         const LONG writingSequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
+        g_sharedViewport->slotSceneEpochs[publishSlot] = settings.sceneEpoch;
         g_sharedViewport->slotFrameSequences[publishSlot] = writingSequence;
         if (!fireCudaSetD3D11TextureSlot(publishSlot)) {
             d3dTarget.sharedMutexes[publishSlot]->ReleaseSync(0);
@@ -3625,6 +3717,7 @@ int runCudaWorker(const std::string& args) {
         }
         const auto submitted = Clock::now();
         const LONG readySequence = InterlockedIncrement(&g_sharedViewport->frameSequence);
+        g_sharedViewport->slotSceneEpochs[publishSlot] = settings.sceneEpoch;
         g_sharedViewport->slotFrameSequences[publishSlot] = readySequence;
         g_sharedViewport->latestFrameSlot = publishSlot;
         nextPublishSlot = (publishSlot + 1) % kSharedFrameSlots;
@@ -3662,7 +3755,9 @@ int runCudaWorker(const std::string& args) {
     for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
         g_sharedViewport->sharedTextureHandleValues[slot] = 0;
         g_sharedViewport->slotFrameSequences[slot] = 0;
+        g_sharedViewport->slotSceneEpochs[slot] = 0;
     }
+    g_sharedViewport->activeSceneEpoch = 0;
     g_sharedViewport->latestFrameSlot = -1;
     g_sharedViewport->workerStatus = 0;
     g_sharedViewport->workerStopTickMs = tickMs();
@@ -4620,6 +4715,7 @@ int runDiagnostics() {
     out << "workerProcessIsolation=true\n";
     out << "sharedFrameTransport=" << kSharedViewportName << "\n";
     out << "sharedTextureRingAudit=nonblocking keyed mutex acquire, newest-even sequence selection, display-slot rotation, timeout/no-candidate/starvation telemetry\n";
+    out << "sceneFrameEpochContract=each shared CUDA texture slot carries the canonical scene epoch and stale scene frames are rejected before copy/present\n";
     out << "sharedTextureRingSlots=" << kSharedFrameSlots << "\n";
     out << "displayTextureRingSlots=" << kDisplayFrameSlots << "\n";
     out << "workerFrameStaleMs=" << kWorkerFrameStaleMs << "\n";
@@ -4637,6 +4733,7 @@ int runDiagnostics() {
     out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "renderGraphPasses=" << kRenderGraphPasses << "\n";
     out << "debugOverlaySystem=source markers, selected burner ports, GLB bounds, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness\n";
+    out << "sceneInstanceContract=SceneInstance owns scene id, epoch, emitter, source center/radius/height, imported mesh presence, and selected burner state\n";
     out << "renderGraphOwnsCameraResponse=true\n";
     out << "hdrCameraPipeline=" << kHdrCameraPipeline << "\n";
     out << "uiOverlayAfterCameraResponse=true\n";
