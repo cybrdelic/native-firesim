@@ -1281,6 +1281,18 @@ std::array<float, 3> jsonTripletForKey(const std::string& text, const char* key,
     return fallback;
 }
 
+std::array<float, 3> sceneMeshTranslationMeters(int sceneId, const std::string& sceneContract) {
+    return jsonTripletForKey(sceneContract, "translationMeters", {0.0f, sceneId == 2 ? -0.24f : 0.0f, 0.0f});
+}
+
+std::array<float, 3> applySceneMeshTranslation(const std::array<float, 3>& point, const std::array<float, 3>& translation) {
+    return {
+        point[0] + translation[0],
+        point[1] + translation[1],
+        point[2] + translation[2],
+    };
+}
+
 bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     mesh = {};
     const char* assetId = runtimeMeshAssetId(sceneId);
@@ -1294,8 +1306,7 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
         return false;
     }
     const std::string sceneContract = readSceneContract(sceneId);
-    const std::array<float, 3> meshTranslation =
-        jsonTripletForKey(sceneContract, "translationMeters", {0.0f, sceneId == 2 ? -0.24f : 0.0f, 0.0f});
+    const std::array<float, 3> meshTranslation = sceneMeshTranslationMeters(sceneId, sceneContract);
     const std::vector<float> positions = parseJsonFloats(jsonArrayForKey(text, "vertices"));
     const std::vector<float> normals = parseJsonFloats(jsonArrayForKey(text, "normals"));
     const std::vector<float> colors = parseJsonFloats(jsonArrayForKey(text, "colors"));
@@ -1307,9 +1318,12 @@ bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
     const std::size_t vertexCount = positions.size() / 3;
     mesh.vertices.resize(vertexCount);
     for (std::size_t i = 0; i < vertexCount; ++i) {
-        mesh.vertices[i].px = positions[i * 3 + 0] + meshTranslation[0];
-        mesh.vertices[i].py = positions[i * 3 + 1] + meshTranslation[1];
-        mesh.vertices[i].pz = positions[i * 3 + 2] + meshTranslation[2];
+        const std::array<float, 3> simPoint = applySceneMeshTranslation(
+            {positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2]},
+            meshTranslation);
+        mesh.vertices[i].px = simPoint[0];
+        mesh.vertices[i].py = simPoint[1];
+        mesh.vertices[i].pz = simPoint[2];
         mesh.vertices[i].nx = normals.size() >= positions.size() ? normals[i * 3 + 0] : 0.0f;
         mesh.vertices[i].ny = normals.size() >= positions.size() ? normals[i * 3 + 1] : 1.0f;
         mesh.vertices[i].nz = normals.size() >= positions.size() ? normals[i * 3 + 2] : 0.0f;
@@ -1401,6 +1415,7 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     if (text.empty()) {
         return params;
     }
+    const std::array<float, 3> meshTranslation = sceneMeshTranslationMeters(sceneId, sceneContract);
     float value = 0.0f;
     if (jsonNumberForKey(text, "centerXMeters", value)) {
         params.centerX = value;
@@ -1428,8 +1443,15 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     const std::vector<float> burnerCenters = parseJsonFloats(jsonArrayForKey(text, "burnerCentersMeters"));
     params.burnerCenterCount = static_cast<int>(std::min<std::size_t>(4, burnerCenters.size() / 3));
     for (int i = 0; i < params.burnerCenterCount; ++i) {
-        params.burnerCenterX[i] = burnerCenters[static_cast<std::size_t>(i) * 3 + 0];
-        params.burnerCenterZ[i] = burnerCenters[static_cast<std::size_t>(i) * 3 + 2];
+        const std::array<float, 3> burnerPoint = applySceneMeshTranslation(
+            {
+                burnerCenters[static_cast<std::size_t>(i) * 3 + 0],
+                burnerCenters[static_cast<std::size_t>(i) * 3 + 1],
+                burnerCenters[static_cast<std::size_t>(i) * 3 + 2],
+            },
+            meshTranslation);
+        params.burnerCenterX[i] = burnerPoint[0];
+        params.burnerCenterZ[i] = burnerPoint[2];
     }
     return params;
 }
