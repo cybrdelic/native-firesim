@@ -1556,8 +1556,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) propagateSceneLightKerne
     const float3 direct = make_float3(center.x, center.y, center.z);
     const float3 bounced = lerp3(direct, neighbor, diffusion);
     const float floorLift = smoothstepf(0.10f, 0.00f, (static_cast<float>(ly) + 0.5f) / static_cast<float>(p.lightNy));
-    const float3 contactBounce = mul3(make_float3(1.0f, 0.34f, 0.09f), floorLift * luminance3(direct) * 0.040f);
-    const float3 next = add3(mul3(bounced, decay * (0.62f + shadow * 0.38f)), contactBounce);
+    const float3 contactBounce = mul3(make_float3(1.0f, 0.40f, 0.12f), floorLift * luminance3(direct) * 0.18f);
+    const float3 next = add3(mul3(bounced, decay * (0.66f + shadow * 0.34f)), contactBounce);
     outLight[idx] = make_float4(next.x, next.y, next.z, center.w);
 }
 
@@ -1618,7 +1618,8 @@ __device__ float3 gatherSceneIrradiance(
         irradiance = add3(irradiance, mul3(radiance, visibility * geometric));
     }
 
-    return mul3(irradiance, 1.82f);
+    const float grazingBounce = 1.0f + smoothstepf(0.0f, 0.45f, 1.0f - fmaxf(0.0f, normal.y)) * 0.36f;
+    return mul3(irradiance, 4.20f * grazingBounce);
 }
 
 __device__ float volumeShadowRay(
@@ -1776,7 +1777,7 @@ __device__ float3 roomBackgroundRay(
             color = lerp3(color, make_float3(0.017f, 0.014f, 0.012f), trayBody * 0.82f);
             color = lerp3(color, make_float3(0.020f, 0.019f, 0.018f), scorch * (1.0f - trayBody) * 0.16f);
             color = lerp3(color, make_float3(0.010f, 0.009f, 0.008f), trayContact * 0.22f);
-            color = add3(color, mul3(make_float3(0.056f, 0.014f, 0.003f), emberBed * glow * 0.030f));
+            color = add3(color, mul3(make_float3(0.056f, 0.014f, 0.003f), emberBed * glow * 0.26f));
             color = add3(color, mul3(make_float3(0.30f, 0.28f, 0.24f), trayRim * 0.10f));
             materialAlbedo = lerp3(materialAlbedo, make_float3(0.030f, 0.024f, 0.020f), trayBody * 0.75f);
             materialGiScale = lerpf(materialGiScale, 0.48f, trayBody * 0.85f);
@@ -1785,8 +1786,8 @@ __device__ float3 roomBackgroundRay(
         const float reflectCore = expf(-(hit.x * hit.x * 2.45f + (hit.z + 0.18f) * (hit.z + 0.18f) * 1.95f)) * glow;
         const float reflectedTongues = smoothstepf(0.82f, 0.00f, fabsf(hit.x)) * smoothstepf(1.18f, 0.00f, fabsf(hit.z + 0.72f));
         const float streaks = floorGrid(hit.x + hit.z * 0.035f, hit.z, 13.0f, 0.010f);
-        color = add3(color, mul3(make_float3(0.55f, 0.11f, 0.023f), reflectCore * p.reflectionGain * 0.008f));
-        color = add3(color, mul3(make_float3(0.46f, 0.070f, 0.014f), reflectedTongues * streaks * glow * p.reflectionGain * 0.004f));
+        color = add3(color, mul3(make_float3(0.55f, 0.11f, 0.023f), reflectCore * p.reflectionGain * 0.48f));
+        color = add3(color, mul3(make_float3(0.46f, 0.070f, 0.014f), reflectedTongues * streaks * glow * p.reflectionGain * 0.14f));
     } else if (surface == 2) {
         color = cinematic ? make_float3(0.012f, 0.012f, 0.012f) : make_float3(0.011f, 0.011f, 0.010f);
         materialAlbedo = make_float3(0.24f, 0.24f, 0.23f);
@@ -1821,7 +1822,7 @@ __device__ float3 roomBackgroundRay(
         color = lerp3(color, make_float3(0.010f, 0.011f, 0.012f), soot * 0.82f * p.smokeDarkness);
         materialAlbedo = lerp3(materialAlbedo, make_float3(0.030f, 0.032f, 0.034f), soot * 0.75f);
         const float wallGlow = expf(-(hit.x * hit.x * 1.1f + hit.z * hit.z * 1.3f + (hit.y - 0.70f) * (hit.y - 0.70f) * 1.0f)) * glow;
-        color = add3(color, mul3(make_float3(0.15f, 0.050f, 0.018f), wallGlow * 0.0012f));
+        color = add3(color, mul3(make_float3(0.15f, 0.050f, 0.018f), wallGlow * 0.090f));
         if (surface == 3 && hit.x < 0.0f) {
             const float window = rectMask(make_float2(hit.z, hit.y), make_float2(-1.28f, 0.92f), make_float2(0.06f, 0.62f), 0.030f);
             const float glassNoise = 0.55f + 0.25f * sinf(hit.y * 23.0f + hit.z * 15.0f);
@@ -1835,11 +1836,11 @@ __device__ float3 roomBackgroundRay(
     const float sceneShadow = sampleSceneShadow(sceneShadowField, p, volumeUv.x, volumeUv.y, volumeUv.z);
     const float volumeVisibility = volumeShadowRay(hit, sceneLightField, sceneShadowField, p);
     const float3 gatheredIrradiance = gatherSceneIrradiance(hit, surfaceNormal, sceneLightField, sceneShadowField, p);
-    const float3 indirect = mul3(add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.10f), gatheredIrradiance), volumeVisibility);
+    const float3 indirect = mul3(add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.42f), gatheredIrradiance), volumeVisibility);
     const float grazingFalloff = surface == 2 ? 0.62f : 1.0f;
     const float contactOcclusion = smoothstepf(0.005f, 0.42f, sceneShadow) * expf(-giSample.w * 0.72f) * (0.30f + volumeVisibility * 0.70f);
-    const float irradianceLift = 0.46f + smoothstepf(0.018f, 0.22f, luminance3(indirect)) * 0.30f;
-    const float contactWarmth = surface == 1 ? 1.16f : (surface == 2 ? 0.50f : 0.82f);
+    const float irradianceLift = 0.66f + smoothstepf(0.006f, 0.13f, luminance3(indirect)) * 0.72f;
+    const float contactWarmth = surface == 1 ? 1.72f : (surface == 2 ? 0.88f : 1.16f);
     color = add3(color, mul3(mul3(indirect, materialAlbedo), materialGiScale * grazingFalloff * contactOcclusion * irradianceLift * contactWarmth));
     const float shadowedSoot = (1.0f - volumeVisibility) * smoothstepf(0.18f, 0.82f, 1.0f - sceneShadow);
     color = lerp3(color, make_float3(0.006f, 0.007f, 0.008f), shadowedSoot * (surface == 2 ? 0.38f : 0.26f));

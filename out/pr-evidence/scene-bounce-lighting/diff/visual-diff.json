@@ -1,0 +1,10 @@
+{
+  "before": "out\\pr-evidence\\scene-bounce-lighting\\before\\validation-app-frame.bmp",
+  "after": "out\\pr-evidence\\scene-bounce-lighting\\after\\validation-app-frame.bmp",
+  "meanAbsDelta": 0.0011346926912665367,
+  "meanLumaDelta": 0.001090526464395225,
+  "maxLumaDelta": 0.03632313758134842,
+  "changedPixelFraction": 0.006489197530864198,
+  "minChangedFraction": 1e-06,
+  "passed": true
+}

@@ -1478,10 +1478,10 @@ float4 MeshPS(MeshVSOut input) : SV_TARGET {
     float lowSource = saturate(1.0 - input.worldPos.y * MeshFireParams.z);
     float3 toFire = normalize(float3(-input.worldPos.x, MeshLightPos.y - input.worldPos.y, -input.worldPos.z));
     float fireFacing = saturate(dot(n, toFire));
-    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.20 + lowSource * 0.48 + fireFacing * 0.42);
+    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.30 + lowSource * 0.66 + fireFacing * 0.54);
     float3 coolFill = float3(0.015, 0.018, 0.024) * (0.22 + rim * 0.54);
     float3 material = max(input.color, MeshBaseColor.rgb);
-    float3 color = material * (0.050 + ndl * 0.30 + rim * 0.05) + fireBounce + coolFill;
+    float3 color = material * (0.038 + ndl * 0.24 + rim * 0.04) + fireBounce + coolFill;
     float2 screenUv = saturate(input.pos.xy / float2(960.0, 540.0));
     float sceneLuma = Luma(FrameTex.Sample(LinearSampler, screenUv).rgb);
     float hotVolume = smoothstep(0.12, 0.55, sceneLuma);

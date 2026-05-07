@@ -61,6 +61,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-scene-bounce-lighting.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Write-Host "roadmap gate: scene source models"
     & (Join-Path $PSScriptRoot "verify-scene-source-models.ps1")
