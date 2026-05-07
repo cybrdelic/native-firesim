@@ -1,0 +1,10 @@
+{
+  "before": "out\\pr-evidence\\flame-sheet-breakup\\before\\validation-frame.bmp",
+  "after": "out\\pr-evidence\\flame-sheet-breakup\\after\\validation-frame.bmp",
+  "meanAbsDelta": 0.006615710444748402,
+  "meanLumaDelta": 0.006952276453375816,
+  "maxLumaDelta": 0.47452083230018616,
+  "changedPixelFraction": 0.05785108024691358,
+  "minChangedFraction": 0.0001,
+  "passed": true
+}

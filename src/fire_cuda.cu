@@ -2084,18 +2084,20 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 verticalFade *
                 flameHeightFade;
             const float thinFront = smoothstepf(0.04f, 0.56f, frontGradient + progress * 0.10f) * smoothstepf(0.02f, 0.92f, reactionFront);
-            const float sheetHole = smoothstepf(0.60f, 0.93f, holeNoise + lesBreakup * 0.18f + saturate(1.0f - oxygen) * 0.10f);
+            const float flameSheetTear = smoothstepf(0.52f, 0.88f, holeNoise + shearNoise * 0.18f + lesBreakup * 0.30f + saturate(1.0f - oxygen) * 0.12f);
+            const float sheetHole = smoothstepf(0.54f, 0.90f, holeNoise + lesBreakup * 0.26f + saturate(1.0f - oxygen) * 0.12f);
             const float flameSheet = fmaxf(
                 smoothstepf(0.55f, 0.94f, fineNoise * 0.46f + shearNoise * 0.44f + plumeNoise * 0.18f + reactionFront * 0.15f + heat * 0.014f - fv * 0.050f) *
-                    (1.0f - sheetHole * (0.72f + lesBreakup * 0.22f)),
+                    (1.0f - sheetHole * (0.74f + lesBreakup * 0.12f)) *
+                    (1.0f - flameSheetTear * 0.18f),
                 smoothstepf(0.18f, 0.030f, fv) * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
             const float coherentSheet = saturate(fieldFilament * 0.86f + convectiveSheet * 0.55f + thinFront * 0.74f);
             const float sheetConfinement = saturate(coherentSheet + reactionFront * 0.08f);
             const float roomCoverageBoost = p.sceneId == 0 ? (0.72f + roomTraySheet * 1.24f) : 1.0f;
             const float flameDensity = domainFade *
-                combustion * reactionFront * flameSheet * (0.012f + fieldFilament * 0.78f + convectiveSheet * 0.28f + thinFront * 1.08f) *
-                (0.060f + breakup * 0.84f + raggedEdge * 0.46f + lesBreakup * 0.38f) *
-                (0.20f + thinFront * 2.40f) *
+                combustion * reactionFront * flameSheet * (0.010f + fieldFilament * 0.92f + convectiveSheet * 0.24f + thinFront * 1.22f) *
+                (0.052f + breakup * 0.78f + raggedEdge * 0.56f + lesBreakup * 0.34f) *
+                (0.18f + thinFront * 2.55f) *
                 (0.060f + sheetConfinement * 0.94f + burnerPortJet * 0.72f + campTongueBias * 0.34f) *
                 flameHeightFade * roomCoverageBoost;
             const float plumeVoid = smoothstepf(0.54f, 0.90f, holeNoise + fineNoise * 0.26f + shearNoise * 0.22f + fv * 0.20f);
@@ -2112,7 +2114,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                     smoothstepf(0.16f, 0.42f, fv) *
                     (0.028f + fineNoise * 0.040f + shearNoise * 0.052f + plumeNoise * 0.38f + raggedEdge * 0.16f + ash * 0.016f) +
                 upperPlume * (0.22f + plumeNoise * 0.30f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.020f + plumeNoise * 0.034f));
-            const float flameFrontMask = saturate(flameDensity * 4.0f + combustion * reactionFront * flameSheet * (0.12f + thinFront * 0.42f));
+            const float flameFrontMask = saturate(flameDensity * 4.8f + combustion * reactionFront * flameSheet * (0.08f + thinFront * 0.56f + fieldFilament * 0.18f));
             const float emissiveMask = saturate(flameFrontMask);
             const float resolvedFlameSheet = smoothstepf(0.030f, 0.32f, emissiveMask) * smoothstepf(0.035f, 0.72f, oxygen);
             const float smokeOnlyMask = 1.0f - smoothstepf(0.025f, 0.20f, resolvedFlameSheet);
@@ -2160,8 +2162,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 flameEmission = add3(flameEmission, mul3(make_float3(0.012f, 0.28f, 5.20f), burnerPortJet * combustion * stepT * 4.40f));
             }
             flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 1.02f, 0.86f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.82f));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : (p.sceneId == 1 ? 2.85f : 2.95f))));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.035f : (p.sceneId == 1 ? 1.20f : 0.92f)) * (1.0f - whiteCore * 0.62f)));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : (p.sceneId == 1 ? 3.20f : 3.10f))));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * (1.0f + flameSheetTear * 0.55f) * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.035f : (p.sceneId == 1 ? 1.55f : 1.10f)) * (1.0f - whiteCore * 0.62f)));
             const float upperSmokeMask = smoothstepf(0.18f, 0.72f, fv) * scatterSeparation;
             const float ashVeil = saturate(ash * 0.014f + smoothstepf(0.30f, 0.88f, fv) * (1.0f - sootLoad) * 0.003f);
             const float3 smokeBlack = make_float3(0.0018f, 0.0020f, 0.0024f);
