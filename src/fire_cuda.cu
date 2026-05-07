@@ -2144,9 +2144,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float radiantBase = saturate((tempK - 760.0f) / 2000.0f);
             const float radiantCurve = radiantBase * radiantBase * (0.82f + radiantBase * 0.18f);
             const float radiantPower = radiantCurve * (1.42f + fieldFilament * 3.15f + convectiveSheet * 1.60f + progress * 0.26f + whiteCore * 0.92f);
-            const float whiteFilament = saturate(whiteCore * (0.020f + fieldFilament * 0.10f + thinFront * 0.16f));
+            const float blackbodyCoreStructure = saturate(whiteCore * (0.080f + fieldFilament * 0.28f + thinFront * 0.32f));
+            const float whiteFilament = blackbodyCoreStructure * (0.55f + fineNoise * 0.30f + shearNoise * 0.18f);
             const float orangeEdge = (1.0f - whiteFilament * 0.72f) * thinFront * reactionFront * flameSheet * (0.52f + breakup * 0.95f) * smoothstepf(0.08f, 0.80f, oxygen);
-            float3 flameColor = lerp3(make_float3(1.32f, 0.27f, 0.038f), blackbodyColor(tempK), saturate(whiteCore * 0.92f + whiteFilament * 0.62f));
+            float3 flameColor = lerp3(make_float3(1.32f, 0.27f, 0.038f), blackbodyColor(tempK), saturate(whiteCore * 0.92f + whiteFilament * 0.82f));
             if (p.sceneId == 2) {
                 const float blueBase = burnerPortJet * smoothstepf(0.010f, 0.11f, flameDensity + combustion * 0.18f);
                 flameColor = lerp3(make_float3(0.020f, 0.18f, 2.40f), make_float3(0.36f, 0.58f, 1.95f), saturate(whiteCore * 0.34f + blueBase * 0.20f));
@@ -2158,7 +2159,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 flameEmission = mul3(flameEmission, 0.42f);
                 flameEmission = add3(flameEmission, mul3(make_float3(0.012f, 0.28f, 5.20f), burnerPortJet * combustion * stepT * 4.40f));
             }
-            flameEmission = add3(flameEmission, mul3(make_float3(1.05f, 0.94f, 0.76f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.24f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 1.02f, 0.86f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.82f));
             flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : (p.sceneId == 1 ? 2.85f : 2.95f))));
             flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.035f : (p.sceneId == 1 ? 1.20f : 0.92f)) * (1.0f - whiteCore * 0.62f)));
             const float upperSmokeMask = smoothstepf(0.18f, 0.72f, fv) * scatterSeparation;
@@ -2248,9 +2249,11 @@ __device__ float3 cameraResponse(float3 radiance, float exposure) {
     float3 color = acesToneMapPreserveHue(mul3(make_float3(fmaxf(0.0f, radiance.x), fmaxf(0.0f, radiance.y), fmaxf(0.0f, radiance.z)), exposure));
     const float luma = luminance3(color);
     const float toe = smoothstepf(0.000f, 0.055f, luma);
-    const float shoulder = smoothstepf(0.74f, 1.0f, luma);
+    const float hdrShoulderPreserve = smoothstepf(0.78f, 1.08f, luma);
     color = lerp3(mul3(color, 0.82f), color, toe);
-    color = lerp3(color, mul3(color, 1.0f / fmaxf(1.0f, luma / 0.88f)), shoulder * 0.18f);
+    color = lerp3(color, mul3(color, 1.0f / fmaxf(1.0f, luma / 0.94f)), hdrShoulderPreserve * 0.10f);
+    const float blackbodyHighlightLift = smoothstepf(0.56f, 0.90f, luma);
+    color = mul3(color, 1.0f + blackbodyHighlightLift * 0.28f);
     return make_float3(
         powf(saturate(color.x), 1.0f / 2.2f),
         powf(saturate(color.y), 1.0f / 2.2f),
