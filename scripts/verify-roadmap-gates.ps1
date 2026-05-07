@@ -93,6 +93,10 @@ try {
     }
 
     Write-Host "roadmap gate: visual regression audit"
+    & (Join-Path $PSScriptRoot "verify-visual-checklist.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
     & (Join-Path $PSScriptRoot "verify-visual-regression.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
