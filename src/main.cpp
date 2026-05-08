@@ -204,6 +204,24 @@ struct Vec3 {
     float z;
 };
 
+struct ScenePlacement {
+    Vec3 sourceOffset = {};
+    Vec3 meshOffset = {};
+};
+
+struct PlacementCoordinateState {
+    int target = 0;
+    std::array<ScenePlacement, kSceneCount> scenes = {};
+
+    ScenePlacement& scene(int sceneId) {
+        return scenes[std::max(0, std::min(kSceneCount - 1, sceneId))];
+    }
+
+    const ScenePlacement& scene(int sceneId) const {
+        return scenes[std::max(0, std::min(kSceneCount - 1, sceneId))];
+    }
+};
+
 struct D3DDisplayState {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -380,13 +398,7 @@ LONG g_sharedRingLastCopiedSharedSlot = -1;
 LONG g_sharedRingLastCopiedDisplaySlot = -1;
 LONG g_sharedRingLastCopiedSequence = 0;
 bool g_uiTextureUploaded = false;
-int g_placementTarget = 0;
-float g_sourceNudgeX[kSceneCount] = {};
-float g_sourceNudgeY[kSceneCount] = {};
-float g_sourceNudgeZ[kSceneCount] = {};
-float g_meshNudgeX[kSceneCount] = {};
-float g_meshNudgeY[kSceneCount] = {};
-float g_meshNudgeZ[kSceneCount] = {};
+PlacementCoordinateState g_placement;
 char g_placementStatus[192] = "DRAG CENTER XZ  DRAG TOP Y  P TARGET  K COPY";
 
 void stopCudaWorker();
@@ -510,17 +522,15 @@ const SceneInstance& activeSceneInstanceFor(int sceneId) {
 
 void applyPlacementOverrides(FireSettings& settings) {
     const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
-    const float sourceDx = g_sourceNudgeX[scene];
-    const float sourceDy = g_sourceNudgeY[scene];
-    const float sourceDz = g_sourceNudgeZ[scene];
-    settings.emitterCenterX = std::max(-1.05f, std::min(1.05f, settings.emitterCenterX + sourceDx));
-    settings.emitterCenterZ = std::max(-0.82f, std::min(0.82f, settings.emitterCenterZ + sourceDz));
-    const float emitterY = std::max(0.02f, std::min(1.97f, settings.emitterHeightNorm * 2.03f + 0.02f + sourceDy));
+    const Vec3 sourceOffset = g_placement.scene(scene).sourceOffset;
+    settings.emitterCenterX = std::max(-1.05f, std::min(1.05f, settings.emitterCenterX + sourceOffset.x));
+    settings.emitterCenterZ = std::max(-0.82f, std::min(0.82f, settings.emitterCenterZ + sourceOffset.z));
+    const float emitterY = std::max(0.02f, std::min(1.97f, settings.emitterHeightNorm * 2.03f + 0.02f + sourceOffset.y));
     settings.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (emitterY - 0.02f) / 2.03f));
     for (int i = 0; i < settings.burnerCenterCount && i < 4; ++i) {
-        settings.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i] + sourceDx));
-        settings.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i] + sourceDy));
-        settings.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i] + sourceDz));
+        settings.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i] + sourceOffset.x));
+        settings.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i] + sourceOffset.y));
+        settings.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i] + sourceOffset.z));
     }
 }
 
@@ -995,7 +1005,7 @@ void drawViewportOverlays(std::vector<std::uint32_t>& pixels, const FireSettings
     int hy = 0;
     float depth = 0.0f;
     if (projectWorldToViewport(activePlacementWorld(), hx, hy, depth)) {
-        const bool sourceTarget = g_placementTarget == 0;
+        const bool sourceTarget = g_placement.target == 0;
         const float r = sourceTarget ? 1.0f : 0.58f;
         const float g = sourceTarget ? 0.42f : 0.72f;
         const float b = sourceTarget ? 0.06f : 1.0f;
@@ -1139,21 +1149,22 @@ void applyPanelDrag() {
 }
 
 const char* placementTargetName() {
-    return g_placementTarget == 0 ? "SOURCE" : "MESH";
+    return g_placement.target == 0 ? "SOURCE" : "MESH";
 }
 
 void formatPlacementStatus(char* out, std::size_t outSize) {
     const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
     const SceneEmitterParams& emitter = g_sceneEmitters[scene];
-    float sourceX = emitter.centerX + g_sourceNudgeX[scene];
-    float sourceY = emitter.heightNorm * 2.03f + 0.02f + g_sourceNudgeY[scene];
-    float sourceZ = emitter.centerZ + g_sourceNudgeZ[scene];
+    const ScenePlacement& placement = g_placement.scene(scene);
+    float sourceX = emitter.centerX + placement.sourceOffset.x;
+    float sourceY = emitter.heightNorm * 2.03f + 0.02f + placement.sourceOffset.y;
+    float sourceZ = emitter.centerZ + placement.sourceOffset.z;
     if (scene == 2 && emitter.burnerCenterCount > 0) {
-        sourceX = emitter.burnerCenterX[0] + g_sourceNudgeX[scene];
-        sourceY = emitter.burnerCenterY[0] + g_sourceNudgeY[scene];
-        sourceZ = emitter.burnerCenterZ[0] + g_sourceNudgeZ[scene];
+        sourceX = emitter.burnerCenterX[0] + placement.sourceOffset.x;
+        sourceY = emitter.burnerCenterY[0] + placement.sourceOffset.y;
+        sourceZ = emitter.burnerCenterZ[0] + placement.sourceOffset.z;
     }
-    if (g_placementTarget == 0) {
+    if (g_placement.target == 0) {
         std::snprintf(
             out,
             outSize,
@@ -1162,18 +1173,18 @@ void formatPlacementStatus(char* out, std::size_t outSize) {
             sourceX,
             sourceY,
             sourceZ,
-            g_sourceNudgeX[scene],
-            g_sourceNudgeY[scene],
-            g_sourceNudgeZ[scene]);
+            placement.sourceOffset.x,
+            placement.sourceOffset.y,
+            placement.sourceOffset.z);
     } else {
         std::snprintf(
             out,
             outSize,
             "PLACE MESH scene=%s offset=(%.4f,%.4f,%.4f)",
             sceneName(scene),
-            g_meshNudgeX[scene],
-            g_meshNudgeY[scene],
-            g_meshNudgeZ[scene]);
+            placement.meshOffset.x,
+            placement.meshOffset.y,
+            placement.meshOffset.z);
     }
 }
 
@@ -1187,15 +1198,16 @@ void markPlacementChanged(bool resetFire) {
 
 void nudgePlacement(float dx, float dy, float dz) {
     const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
-    if (g_placementTarget == 0) {
-        g_sourceNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_sourceNudgeX[scene] + dx));
-        g_sourceNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_sourceNudgeY[scene] + dy));
-        g_sourceNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_sourceNudgeZ[scene] + dz));
+    ScenePlacement& placement = g_placement.scene(scene);
+    if (g_placement.target == 0) {
+        placement.sourceOffset.x = std::max(-1.50f, std::min(1.50f, placement.sourceOffset.x + dx));
+        placement.sourceOffset.y = std::max(-1.00f, std::min(1.00f, placement.sourceOffset.y + dy));
+        placement.sourceOffset.z = std::max(-1.50f, std::min(1.50f, placement.sourceOffset.z + dz));
         markPlacementChanged(true);
     } else {
-        g_meshNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeX[scene] + dx));
-        g_meshNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_meshNudgeY[scene] + dy));
-        g_meshNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_meshNudgeZ[scene] + dz));
+        placement.meshOffset.x = std::max(-1.50f, std::min(1.50f, placement.meshOffset.x + dx));
+        placement.meshOffset.y = std::max(-1.00f, std::min(1.00f, placement.meshOffset.y + dy));
+        placement.meshOffset.z = std::max(-1.50f, std::min(1.50f, placement.meshOffset.z + dz));
         markPlacementChanged(false);
     }
 }
@@ -1203,15 +1215,16 @@ void nudgePlacement(float dx, float dy, float dz) {
 Vec3 activeSourceWorldFromEmitters() {
     const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
     const SceneEmitterParams& emitter = g_sceneEmitters[scene];
+    const Vec3 sourceOffset = g_placement.scene(scene).sourceOffset;
     Vec3 source = {
-        emitter.centerX + g_sourceNudgeX[scene],
-        emitter.heightNorm * 2.03f + 0.02f + g_sourceNudgeY[scene],
-        emitter.centerZ + g_sourceNudgeZ[scene]};
+        emitter.centerX + sourceOffset.x,
+        emitter.heightNorm * 2.03f + 0.02f + sourceOffset.y,
+        emitter.centerZ + sourceOffset.z};
     if (scene == 2 && emitter.burnerCenterCount > 0) {
         source = {
-            emitter.burnerCenterX[0] + g_sourceNudgeX[scene],
-            emitter.burnerCenterY[0] + g_sourceNudgeY[scene],
-            emitter.burnerCenterZ[0] + g_sourceNudgeZ[scene]};
+            emitter.burnerCenterX[0] + sourceOffset.x,
+            emitter.burnerCenterY[0] + sourceOffset.y,
+            emitter.burnerCenterZ[0] + sourceOffset.z};
     }
     return source;
 }
@@ -1219,17 +1232,18 @@ Vec3 activeSourceWorldFromEmitters() {
 Vec3 activeMeshCenterWorld() {
     const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
     const RuntimeSceneMesh& mesh = g_sceneMeshes[scene];
+    const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
     if (!mesh.loaded) {
-        return {g_meshNudgeX[scene], g_meshNudgeY[scene], g_meshNudgeZ[scene]};
+        return meshOffset;
     }
     return {
-        (mesh.minX + mesh.maxX) * 0.5f + g_meshNudgeX[scene],
-        (mesh.minY + mesh.maxY) * 0.5f + g_meshNudgeY[scene],
-        (mesh.minZ + mesh.maxZ) * 0.5f + g_meshNudgeZ[scene]};
+        (mesh.minX + mesh.maxX) * 0.5f + meshOffset.x,
+        (mesh.minY + mesh.maxY) * 0.5f + meshOffset.y,
+        (mesh.minZ + mesh.maxZ) * 0.5f + meshOffset.z};
 }
 
 Vec3 activePlacementWorld() {
-    return g_placementTarget == 0 ? activeSourceWorldFromEmitters() : activeMeshCenterWorld();
+    return g_placement.target == 0 ? activeSourceWorldFromEmitters() : activeMeshCenterWorld();
 }
 
 int hitTestPlacementHandle(int frameX, int frameY) {
@@ -1263,12 +1277,13 @@ void beginPlacementDrag(int axis) {
     g_placementDragAxis = axis;
     g_placementDragStartX = g_pointerFrameX;
     g_placementDragStartY = g_pointerFrameY;
-    g_placementDragStartSourceX = g_sourceNudgeX[scene];
-    g_placementDragStartSourceY = g_sourceNudgeY[scene];
-    g_placementDragStartSourceZ = g_sourceNudgeZ[scene];
-    g_placementDragStartMeshX = g_meshNudgeX[scene];
-    g_placementDragStartMeshY = g_meshNudgeY[scene];
-    g_placementDragStartMeshZ = g_meshNudgeZ[scene];
+    const ScenePlacement& placement = g_placement.scene(scene);
+    g_placementDragStartSourceX = placement.sourceOffset.x;
+    g_placementDragStartSourceY = placement.sourceOffset.y;
+    g_placementDragStartSourceZ = placement.sourceOffset.z;
+    g_placementDragStartMeshX = placement.meshOffset.x;
+    g_placementDragStartMeshY = placement.meshOffset.y;
+    g_placementDragStartMeshZ = placement.meshOffset.z;
     markPlacementChanged(false);
 }
 
@@ -1277,23 +1292,24 @@ void updatePlacementDrag() {
         return;
     }
     const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    ScenePlacement& placement = g_placement.scene(scene);
     const float scale = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.0048f : 0.0024f;
     const float dx = static_cast<float>(g_pointerFrameX - g_placementDragStartX) * scale;
     const float dy = static_cast<float>(g_pointerFrameY - g_placementDragStartY) * scale;
-    if (g_placementTarget == 0) {
+    if (g_placement.target == 0) {
         if (g_placementDragAxis == 1) {
-            g_sourceNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceX + dx));
-            g_sourceNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceZ - dy));
+            placement.sourceOffset.x = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceX + dx));
+            placement.sourceOffset.z = std::max(-1.50f, std::min(1.50f, g_placementDragStartSourceZ - dy));
         } else {
-            g_sourceNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_placementDragStartSourceY - dy));
+            placement.sourceOffset.y = std::max(-1.00f, std::min(1.00f, g_placementDragStartSourceY - dy));
         }
         markPlacementChanged(true);
     } else {
         if (g_placementDragAxis == 1) {
-            g_meshNudgeX[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshX + dx));
-            g_meshNudgeZ[scene] = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshZ - dy));
+            placement.meshOffset.x = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshX + dx));
+            placement.meshOffset.z = std::max(-1.50f, std::min(1.50f, g_placementDragStartMeshZ - dy));
         } else {
-            g_meshNudgeY[scene] = std::max(-1.00f, std::min(1.00f, g_placementDragStartMeshY - dy));
+            placement.meshOffset.y = std::max(-1.00f, std::min(1.00f, g_placementDragStartMeshY - dy));
         }
         markPlacementChanged(false);
     }
@@ -2444,10 +2460,11 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
     const RuntimeSceneMesh& mesh = g_sceneMeshes[std::max(0, std::min(kSceneCount - 1, settings.sceneId))];
     if (mesh.loaded) {
         const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+        const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
         drawProjectedBoxOverlay(
             pixels,
-            {mesh.minX + g_meshNudgeX[scene], mesh.minY + g_meshNudgeY[scene], mesh.minZ + g_meshNudgeZ[scene]},
-            {mesh.maxX + g_meshNudgeX[scene], mesh.maxY + g_meshNudgeY[scene], mesh.maxZ + g_meshNudgeZ[scene]},
+            {mesh.minX + meshOffset.x, mesh.minY + meshOffset.y, mesh.minZ + meshOffset.z},
+            {mesh.maxX + meshOffset.x, mesh.maxY + meshOffset.y, mesh.maxZ + meshOffset.z},
             "GLB BOUNDS",
             0.82f,
             0.72f,
@@ -2596,9 +2613,10 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         constants.fireParams[3] = 0.0f;
     }
     const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
-    constants.meshOffset[0] = g_meshNudgeX[scene];
-    constants.meshOffset[1] = g_meshNudgeY[scene];
-    constants.meshOffset[2] = g_meshNudgeZ[scene];
+    const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
+    constants.meshOffset[0] = meshOffset.x;
+    constants.meshOffset[1] = meshOffset.y;
+    constants.meshOffset[2] = meshOffset.z;
     constants.meshOffset[3] = 0.0f;
     return constants;
 }
@@ -2867,7 +2885,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (wParam == 'P') {
-            g_placementTarget = (g_placementTarget + 1) % 2;
+            g_placement.target = (g_placement.target + 1) % 2;
             markPlacementChanged(false);
             return 0;
         }
