@@ -53,21 +53,10 @@ constexpr double kDisplayMaxPresentFps = 180.0;
 constexpr float kTargetFrameSeconds = static_cast<float>(1.0 / kAppPumpFps);
 static_assert(static_cast<int>(kAppPumpFps) == static_cast<int>(kDisplayMaxPresentFps) * 2, "display pacing expects a 2:1 app pump to present cadence");
 constexpr unsigned long long kWorkerStatusUiUpdateMs = 250ull;
-constexpr DWORD kSharedViewportMagic = 0x46535631u;
-constexpr DWORD kSharedViewportVersion = 9u;
-constexpr int kSharedFrameSlots = 3;
-constexpr int kDisplayFrameSlots = 3;
-constexpr const char* kSharedViewportName = "Local\\NativeFireSimViewportFrameV9";
-constexpr DWORD kSharedViewportDisplayFormat = static_cast<DWORD>(DXGI_FORMAT_R16G16B16A16_FLOAT);
 constexpr DXGI_FORMAT kSceneRadianceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr const char* kRenderGraphPasses = "clear,volume-hdr-camera,lit-scene-mesh,ui-overlay,present";
 constexpr const char* kHdrCameraPipeline =
     "CUDA float4 scene radiance -> FP16 D3D texture -> single ACES camera response -> FP16 swapchain -> UI overlay";
-constexpr DWORD fnv1a32(const char* text, DWORD hash = 2166136261u) {
-    return *text == '\0' ? hash : fnv1a32(text + 1, (hash ^ static_cast<unsigned char>(*text)) * 16777619u);
-}
-constexpr const char* kSharedViewportBuildStampText = __DATE__ " " __TIME__;
-constexpr DWORD kSharedViewportBuildStamp = fnv1a32(kSharedViewportBuildStampText);
 constexpr unsigned long long kWorkerFrameStaleMs = 2200ull;
 constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
@@ -355,6 +344,14 @@ void invalidateSharedViewportPublishedFrames() {
     InterlockedIncrement(&g_sharedViewport->frameSequence);
 }
 
+void resetSharedViewportBuffer() {
+    if (g_sharedViewport == nullptr) {
+        return;
+    }
+    initializeSharedViewportBuffer(*g_sharedViewport, g_sceneEpoch);
+    g_haveLastWorkerSettings = false;
+}
+
 void blendPixel(std::vector<std::uint32_t>& pixels, int x, int y, float r, float g, float b, float alpha) {
     if (x < 0 || y < 0 || x >= kFrameWidth || y >= kFrameHeight || alpha <= 0.0f) {
         return;
@@ -636,7 +633,7 @@ void requestSimulationReset() {
 }
 
 void switchScene(int scene) {
-    const int nextScene = std::max(0, std::min(kSceneCount - 1, scene));
+    const int nextScene = clampSceneId(scene);
     if (g_activeScene == nextScene) {
         return;
     }
@@ -1877,9 +1874,9 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
     drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 28, frameLabel, 1, 0.58f, 0.92f, 0.72f, 0.92f);
     drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 46, "OVERLAY: SOURCE / VOLUME / FUEL BED / AXES / FRESHNESS", 1, 0.76f, 0.80f, 0.72f, 0.86f);
 
-    const RuntimeSceneMesh& mesh = g_sceneMeshes[std::max(0, std::min(kSceneCount - 1, settings.sceneId))];
+    const RuntimeSceneMesh& mesh = g_sceneMeshes[clampSceneId(settings.sceneId)];
     if (mesh.loaded) {
-        const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+        const int scene = clampSceneId(settings.sceneId);
         const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
         drawProjectedBoxOverlay(
             pixels,
@@ -1987,7 +1984,7 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         0.0f, 0.0f, zf / (zn - zf), -1.0f,
         0.0f, 0.0f, (zn * zf) / (zn - zf), 0.0f};
     mulMat4(view, proj, constants.viewProj);
-    const SceneEmitterParams& emitter = g_sceneEmitters[std::max(0, std::min(kSceneCount - 1, sceneId))];
+    const SceneEmitterParams& emitter = g_sceneEmitters[clampSceneId(sceneId)];
     constants.lightPos[0] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterX[0] : emitter.centerX;
     constants.lightPos[1] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterY[0] + 0.055f : (emitter.heightNorm * 2.03f + 0.02f + 0.16f);
     constants.lightPos[2] = sceneId == 2 && emitter.burnerCenterCount > 0 ? emitter.burnerCenterZ[0] : emitter.centerZ;
@@ -2032,7 +2029,7 @@ MeshConstants meshConstantsForScene(int sceneId, float exposure) {
         constants.fireParams[2] = 5.0f;
         constants.fireParams[3] = 0.0f;
     }
-    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
+    const int scene = clampSceneId(sceneId);
     const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
     constants.meshOffset[0] = meshOffset.x;
     constants.meshOffset[1] = meshOffset.y;
@@ -2652,7 +2649,7 @@ int argumentIntValue(const std::string& args, const char* prefix, int fallback, 
 }
 
 void applyCanonicalFireSettings(FireSettings& settings) {
-    settings.sceneId = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+    settings.sceneId = clampSceneId(settings.sceneId);
     settings.cinematicMode = 1;
     settings.raymarchSteps = kRaymarchSteps;
     settings.emberCount = kEmberCount;
@@ -2679,6 +2676,9 @@ struct TimerResolutionScope {
 
 bool initializeSharedViewport(bool reset) {
     if (g_sharedViewport != nullptr) {
+        if (reset) {
+            resetSharedViewportBuffer();
+        }
         return true;
     }
     g_sharedViewportMap = CreateFileMappingA(
@@ -2700,29 +2700,8 @@ bool initializeSharedViewport(bool reset) {
         return false;
     }
 
-    if (reset ||
-        g_sharedViewport->magic != kSharedViewportMagic ||
-        g_sharedViewport->version != kSharedViewportVersion ||
-        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
-        g_sharedViewport->width != kFrameWidth ||
-        g_sharedViewport->height != kFrameHeight ||
-        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
-        std::memset(g_sharedViewport, 0, sizeof(SharedViewportBuffer));
-        g_sharedViewport->magic = kSharedViewportMagic;
-        g_sharedViewport->version = kSharedViewportVersion;
-        g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
-        g_sharedViewport->width = kFrameWidth;
-        g_sharedViewport->height = kFrameHeight;
-        g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
-        g_sharedViewport->workerStatus = 0;
-        g_sharedViewport->workerExitCode = 0;
-        g_sharedViewport->workerErrorCount = 0;
-        g_sharedViewport->workerPublishedFrames = 0;
-        g_sharedViewport->workerPhysicsFrames = 0;
-        g_sharedViewport->workerRenderOnlyFrames = 0;
-        g_sharedViewport->activeSceneEpoch = g_sceneEpoch;
-        g_haveLastWorkerSettings = false;
-        std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "shared viewport initialized");
+    if (reset || !sharedViewportContractMatches(*g_sharedViewport)) {
+        resetSharedViewportBuffer();
     }
     return true;
 }
@@ -2773,12 +2752,7 @@ FireSettings readStableWorkerSettings(const SharedViewportBuffer* shared) {
 
 bool workerFrameMetadataFresh() {
     if (g_sharedViewport == nullptr ||
-        g_sharedViewport->magic != kSharedViewportMagic ||
-        g_sharedViewport->version != kSharedViewportVersion ||
-        g_sharedViewport->buildStamp != kSharedViewportBuildStamp ||
-        g_sharedViewport->width != kFrameWidth ||
-        g_sharedViewport->height != kFrameHeight ||
-        g_sharedViewport->displayFormat != kSharedViewportDisplayFormat) {
+        !sharedViewportContractMatches(*g_sharedViewport)) {
         return false;
     }
     if (tickMs() - g_sharedViewport->lastFrameTickMs > kWorkerFrameStaleMs) {

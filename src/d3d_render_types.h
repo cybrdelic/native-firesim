@@ -12,6 +12,8 @@
 
 constexpr int kD3DSharedFrameSlots = 3;
 constexpr int kD3DDisplayFrameSlots = 3;
+constexpr int kSharedFrameSlots = kD3DSharedFrameSlots;
+constexpr int kDisplayFrameSlots = kD3DDisplayFrameSlots;
 
 struct DisplayConstants {
     float exposure;
