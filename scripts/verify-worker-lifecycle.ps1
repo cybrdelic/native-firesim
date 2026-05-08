@@ -1,9 +1,11 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$workerLifecycle = Get-Content (Join-Path $root "src/worker_lifecycle.h") -Raw
+$workerLifecycleImpl = Get-Content (Join-Path $root "src/worker_lifecycle.cpp") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
-Require-Text $main "enum class WorkerLifecycleReason" "worker lifecycle reason enum is missing"
+Require-Text $workerLifecycle "enum class WorkerLifecycleReason" "worker lifecycle reason enum is missing"
 Require-Text $main "appendWorkerLifecycleEvent" "worker lifecycle event helper is missing"
 Require-Text $main "WorkerLifecycleReason::StartRequested" "start reason is missing"
 Require-Text $main "WorkerLifecycleReason::RestartBlocked" "restart blocked reason is missing"
@@ -36,7 +38,7 @@ Require-Text $main "g_sharedViewport->slotSceneEpochs[publishSlot] = settings.sc
 Require-Text $main "const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch" "worker must preserve host-authored scene epoch instead of overwriting it with worker-local epoch"
 Require-Text $main "refreshSceneInstance(scene, sceneEpoch)" "scene instance refresh must use the settings epoch"
 Require-Text $main "sceneFrameEpochContract=each shared CUDA texture slot carries the canonical scene epoch and stale scene frames are rejected before copy/present" "diagnostics scene frame epoch contract is missing from source"
-Require-Text $main "worker-lifecycle:%s" "worker event prefix is missing"
+Require-Text $workerLifecycleImpl "worker-lifecycle:%s" "worker event prefix is missing"
 Require-Text $main "workerLifecycleReasons=start-requested,createprocess-failed,restart-blocked,stale-heartbeat-kill,stop-requested,forced-terminate,exited,gpu-init-failed,interop-failed,render-failed,clean-exit" "diagnostics worker lifecycle string is missing from source"
 if (Test-Path $diag) {
     $diagText = Get-Content $diag -Raw
