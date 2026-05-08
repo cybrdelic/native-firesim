@@ -4,6 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $cudaPath = Join-Path $root "src\fire_cuda.cu"
 $mainPath = Join-Path $root "src\main.cpp"
@@ -14,19 +15,6 @@ $diagPath = Join-Path $root "out\diagnostics.txt"
 $burnerMaskPath = Join-Path $root "assets\fire-scenes\gas-burner-aver1\emitter-mask.json"
 $campScenePath = Join-Path $root "assets\fire-scenes\campfire\scene.json"
 
-function Require-Text {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Text,
-        [Parameter(Mandatory = $true)]
-        [string]$Needle,
-        [Parameter(Mandatory = $true)]
-        [string]$Message
-    )
-    if (-not $Text.Contains($Needle)) {
-        throw $Message
-    }
-}
 
 $cuda = Get-Content -LiteralPath $cudaPath -Raw
 $main = Get-Content -LiteralPath $mainPath -Raw

@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$audit = Get-Content (Join-Path $root "scripts/scene_visual_audit.py") -Raw
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
+$audit = Read-RepoText "scripts/scene_visual_audit.py"
 Require-Text $audit "validation-app-frame.bmp" "visual audit must inspect app-frame captures"
 Require-Text $audit "app_metrics" "visual audit app metrics are missing"
 Require-Text $audit "uiTopMean" "UI top bar metric is missing"

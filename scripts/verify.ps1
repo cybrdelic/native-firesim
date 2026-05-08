@@ -10,6 +10,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $vcvars = "C:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 & (Join-Path $PSScriptRoot "lint.ps1")
+& (Join-Path $PSScriptRoot "verify-architecture-boundaries.ps1")
 & (Join-Path $PSScriptRoot "verify-lab-grade.ps1")
 
 if (-not (Test-Path -LiteralPath $vcvars)) {

@@ -1,14 +1,10 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$cuda = Get-Content (Join-Path $root "src/fire_cuda.cu") -Raw
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$cuda = Read-RepoText "src/fire_cuda.cu"
+$main = Read-RepoText "src/main.cpp"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $cuda "floorLift * luminance3(direct) * 0.18f" "floor contact bounce is missing"
 Require-Text $cuda "grazingBounce" "grazing bounce boost is missing"

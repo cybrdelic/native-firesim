@@ -4,25 +4,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $mainPath = Join-Path $root "src\main.cpp"
 $d3dTypesPath = Join-Path $root "src\d3d_render_types.h"
 $docPath = Join-Path $root "docs\render-graph.md"
 $diagPath = Join-Path $root "out\diagnostics.txt"
 
-function Require-Text {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Text,
-        [Parameter(Mandatory = $true)]
-        [string]$Needle,
-        [Parameter(Mandatory = $true)]
-        [string]$Message
-    )
-    if (-not $Text.Contains($Needle)) {
-        throw $Message
-    }
-}
 
 if (-not (Test-Path -LiteralPath $mainPath)) {
     throw "missing src\main.cpp"

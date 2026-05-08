@@ -1,15 +1,11 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $summary = Get-Content (Join-Path $root "scripts/summarize-gpu-timings.py") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $main "const double averageCudaMs = averageSubmitMs" "averageCudaMs must report CUDA submit time, not total frame time"
 Require-Text $main "std::array<std::pair<const char*, double>, 6> hotspots" "worker benchmark must rank measured CUDA pass hotspots"

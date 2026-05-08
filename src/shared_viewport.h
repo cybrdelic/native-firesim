@@ -81,3 +81,17 @@ inline void initializeSharedViewportBuffer(SharedViewportBuffer& shared, LONG sc
     shared.activeSceneEpoch = sceneEpoch;
     std::snprintf(shared.statusText, sizeof(shared.statusText), "shared viewport initialized");
 }
+
+inline void markSharedViewportWorkerStarting(SharedViewportBuffer& shared, DWORD workerPid, unsigned long long nowMs) {
+    shared.workerStatus = 1;
+    shared.magic = kSharedViewportMagic;
+    shared.version = kSharedViewportVersion;
+    shared.buildStamp = kSharedViewportBuildStamp;
+    shared.width = kFrameWidth;
+    shared.height = kFrameHeight;
+    shared.displayFormat = kSharedViewportDisplayFormat;
+    shared.workerPid = workerPid;
+    shared.workerStartTickMs = nowMs;
+    shared.workerHeartbeatTickMs = nowMs;
+    std::snprintf(shared.statusText, sizeof(shared.statusText), "initializing CUDA worker");
+}

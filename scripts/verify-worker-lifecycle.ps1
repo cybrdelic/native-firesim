@@ -1,11 +1,12 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $sharedViewport = Get-Content (Join-Path $root "src/shared_viewport.h") -Raw
 $workerLifecycle = Get-Content (Join-Path $root "src/worker_lifecycle.h") -Raw
 $workerLifecycleImpl = Get-Content (Join-Path $root "src/worker_lifecycle.cpp") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
 Require-Text $workerLifecycle "enum class WorkerLifecycleReason" "worker lifecycle reason enum is missing"
 Require-Text $main "appendWorkerLifecycleEvent" "worker lifecycle event helper is missing"
 Require-Text $main "WorkerLifecycleReason::StartRequested" "start reason is missing"

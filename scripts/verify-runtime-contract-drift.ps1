@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $runtimeFiles = @(
     "README.md",

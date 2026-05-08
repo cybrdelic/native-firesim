@@ -1,9 +1,10 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $runtimeState = Get-Content (Join-Path $root "src/runtime_state.h") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
 Require-Text $runtimeState "struct CanonicalRuntimeState" "canonical runtime state struct is missing"
 Require-Text $runtimeState "enum class RuntimeTransitionReason" "runtime transition reasons are missing"
 Require-Text $main "applyRuntimeTransition" "state transitions must use one helper"

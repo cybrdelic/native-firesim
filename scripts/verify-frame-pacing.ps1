@@ -1,14 +1,10 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $main "constexpr double kAppPumpFps = 360.0" "app pump cadence must be explicit"
 Require-Text $main "constexpr double kDisplayMaxPresentFps = 180.0" "display present cadence must be explicit"

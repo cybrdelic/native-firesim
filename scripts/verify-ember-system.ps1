@@ -1,15 +1,11 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$cuda = Get-Content (Join-Path $root "src/fire_cuda.cu") -Raw
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$cuda = Read-RepoText "src/fire_cuda.cu"
+$main = Read-RepoText "src/main.cpp"
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $cuda "const float* charField" "ember kernel must consume the char field"
 Require-Text $cuda "const float* pyrolysisField" "ember kernel must consume the pyrolysis field"

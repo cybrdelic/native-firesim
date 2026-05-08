@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $script = Get-Content (Join-Path $root "scripts/compare_visual_frames.py") -Raw
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
 Require-Text $script "meanAbsDelta" "visual diff must report mean absolute delta"
 Require-Text $script "meanLumaDelta" "visual diff must report mean luma delta"
 Require-Text $script "changedPixelFraction" "visual diff must report changed pixel fraction"

@@ -3,6 +3,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $assetRootFull = Join-Path $repoRoot $AssetRoot
 $expected = @(

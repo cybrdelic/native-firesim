@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$cuda = Get-Content (Join-Path $root "src/fire_cuda.cu") -Raw
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
+$cuda = Read-RepoText "src/fire_cuda.cu"
 Require-Text $cuda "roomTraySheet" "room source coverage must add a room-only lower tray sheet term"
 Require-Text $cuda "roomCoverageBoost" "room source coverage must boost scene 0 coverage explicitly"
 Require-Text $cuda "smoothstepf(1.08f, 0.030f, fabsf(x))" "room tray width must be widened"

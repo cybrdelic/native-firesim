@@ -1,15 +1,11 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $analyzerPath = Join-Path $root "scripts/analyze_live_frame_trace.py"
 $analyzer = Get-Content $analyzerPath -Raw
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $main "FIRESIM_TRACE_FRAMES" "live frame tracing must stay available for stutter capture"
 Require-Text $main "out\\live-frame-trace.csv" "live frame trace output path is missing"

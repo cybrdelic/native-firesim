@@ -1,17 +1,16 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
+$d3dTypes = Get-Content (Join-Path $root "src/d3d_render_types.h") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
-Require-Text $main "constexpr int kSharedFrameSlots = 3" "shared ring slot count must stay explicit"
-Require-Text $main "constexpr int kDisplayFrameSlots = 3" "display ring slot count must stay explicit"
+Require-Text $d3dTypes "constexpr int kD3DSharedFrameSlots = 3" "shared ring slot count must stay explicit"
+Require-Text $d3dTypes "constexpr int kD3DDisplayFrameSlots = 3" "display ring slot count must stay explicit"
+Require-Text $d3dTypes "constexpr int kSharedFrameSlots = kD3DSharedFrameSlots" "legacy shared ring alias must resolve to D3D contract"
+Require-Text $d3dTypes "constexpr int kDisplayFrameSlots = kD3DDisplayFrameSlots" "legacy display ring alias must resolve to D3D contract"
 if ($main.Contains("const int publishSlot = 0")) {
     Write-Error "worker publish path must not collapse the shared texture ring to slot 0"
 }

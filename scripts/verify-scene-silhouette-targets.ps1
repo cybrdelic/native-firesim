@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$audit = Get-Content (Join-Path $root "scripts/scene_visual_audit.py") -Raw
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
+$audit = Read-RepoText "scripts/scene_visual_audit.py"
 Require-Text $audit "def silhouette_issues" "scene silhouette target function is missing"
 Require-Text $audit "activeWidthFraction" "active width fraction metric is missing"
 Require-Text $audit "activeAspectRatio" "active aspect ratio metric is missing"

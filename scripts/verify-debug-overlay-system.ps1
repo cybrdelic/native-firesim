@@ -1,9 +1,10 @@
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $sceneRuntime = Get-Content (Join-Path $root "src/scene_runtime.h") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
-function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
 Require-Text $main "drawProjectedBoxOverlay" "projected box overlay helper is missing"
 Require-Text $main '"VOLUME"' "volume bounds overlay is missing"
 Require-Text $main '"FUEL BED"' "fuel-bed bounds overlay is missing"

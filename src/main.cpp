@@ -3266,17 +3266,7 @@ int runCudaWorker(const std::string& args) {
         parentProcess = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
     }
 
-    g_sharedViewport->workerStatus = 1;
-    g_sharedViewport->magic = kSharedViewportMagic;
-    g_sharedViewport->version = kSharedViewportVersion;
-    g_sharedViewport->buildStamp = kSharedViewportBuildStamp;
-    g_sharedViewport->width = kFrameWidth;
-    g_sharedViewport->height = kFrameHeight;
-    g_sharedViewport->displayFormat = kSharedViewportDisplayFormat;
-    g_sharedViewport->workerPid = GetCurrentProcessId();
-    g_sharedViewport->workerStartTickMs = tickMs();
-    g_sharedViewport->workerHeartbeatTickMs = tickMs();
-    std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "initializing CUDA worker");
+    markSharedViewportWorkerStarting(*g_sharedViewport, GetCurrentProcessId(), tickMs());
     appendRuntimeEvent("worker-process-entered", "");
 
     WorkerD3DTarget d3dTarget;
@@ -3285,8 +3275,8 @@ int runCudaWorker(const std::string& args) {
         InterlockedIncrement(&g_sharedViewport->workerErrorCount);
         g_sharedViewport->workerExitCode = 5;
         std::snprintf(g_sharedViewport->statusText, sizeof(g_sharedViewport->statusText), "D3D FP16 target init failed");
-            appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
-            appendWorkerLifecycleEvent(WorkerLifecycleReason::InteropFailed, g_sharedViewport->statusText);
+        appendRuntimeEvent("worker-d3d-target-init-failed", g_sharedViewport->statusText);
+        appendWorkerLifecycleEvent(WorkerLifecycleReason::InteropFailed, g_sharedViewport->statusText);
         if (parentProcess != nullptr) {
             CloseHandle(parentProcess);
         }

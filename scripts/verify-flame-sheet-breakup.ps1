@@ -1,14 +1,10 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$cuda = Get-Content (Join-Path $root "src/fire_cuda.cu") -Raw
-$audit = Get-Content (Join-Path $root "scripts/scene_visual_audit.py") -Raw
+$cuda = Read-RepoText "src/fire_cuda.cu"
+$audit = Read-RepoText "scripts/scene_visual_audit.py"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $cuda "flameSheetTear" "flame sheet tear term is missing"
 Require-Text $cuda "fieldFilament * (1.0f + flameSheetTear" "filament emission must respond to sheet tearing"
