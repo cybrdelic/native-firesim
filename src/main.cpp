@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "fire_cuda.h"
+#include "scene_runtime.h"
 
 namespace {
 
@@ -69,8 +70,6 @@ constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
 constexpr int kWorkerPhysicsFrameInterval = 1;
-constexpr int kSceneCount = 3;
-
 struct UiRect {
     int x;
     int y;
@@ -171,55 +170,6 @@ struct RuntimeSceneMesh {
     float maxY = 0.0f;
     float maxZ = 0.0f;
     bool loaded = false;
-};
-
-struct SceneEmitterParams {
-    float centerX = 0.0f;
-    float centerZ = 0.0f;
-    float heightNorm = 0.0f;
-    float heightBandNorm = 0.06f;
-    float radius = 0.48f;
-    int burnerCenterCount = 0;
-    float burnerCenterX[4] = {};
-    float burnerCenterY[4] = {};
-    float burnerCenterZ[4] = {};
-};
-
-struct SceneInstance {
-    int sceneId = 0;
-    int sceneEpoch = 0;
-    SceneEmitterParams emitter;
-    float sourceX = 0.0f;
-    float sourceY = 0.02f;
-    float sourceZ = 0.0f;
-    float sourceRadius = 0.48f;
-    float sourceHeightBandMeters = 0.12f;
-    bool hasImportedMesh = false;
-    bool hasSelectedBurner = false;
-};
-
-struct Vec3 {
-    float x;
-    float y;
-    float z;
-};
-
-struct ScenePlacement {
-    Vec3 sourceOffset = {};
-    Vec3 meshOffset = {};
-};
-
-struct PlacementCoordinateState {
-    int target = 0;
-    std::array<ScenePlacement, kSceneCount> scenes = {};
-
-    ScenePlacement& scene(int sceneId) {
-        return scenes[std::max(0, std::min(kSceneCount - 1, sceneId))];
-    }
-
-    const ScenePlacement& scene(int sceneId) const {
-        return scenes[std::max(0, std::min(kSceneCount - 1, sceneId))];
-    }
 };
 
 struct D3DDisplayState {
@@ -491,67 +441,26 @@ void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool c
     g_haveLastOverlaySettings = true;
 }
 
-SceneInstance makeSceneInstance(int sceneId, LONG sceneEpoch, const SceneEmitterParams& emitter, const RuntimeSceneMesh* mesh) {
-    SceneInstance instance;
-    instance.sceneId = std::max(0, std::min(kSceneCount - 1, sceneId));
-    instance.sceneEpoch = static_cast<int>(sceneEpoch);
-    instance.emitter = emitter;
-    instance.sourceX = emitter.centerX;
-    instance.sourceY = emitter.heightNorm * 2.03f + 0.02f;
-    instance.sourceZ = emitter.centerZ;
-    instance.sourceRadius = emitter.radius;
-    instance.sourceHeightBandMeters = emitter.heightBandNorm * 2.03f;
-    instance.hasImportedMesh = mesh != nullptr && mesh->loaded;
-    instance.hasSelectedBurner = instance.sceneId == 2 && emitter.burnerCenterCount > 0;
-    if (instance.hasSelectedBurner) {
-        instance.sourceX = emitter.burnerCenterX[0];
-        instance.sourceZ = emitter.burnerCenterZ[0];
-    }
-    return instance;
-}
-
 void refreshSceneInstance(int sceneId, LONG sceneEpoch) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
-    g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene], &g_sceneMeshes[scene]);
+    const int scene = clampSceneId(sceneId);
+    g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene], g_sceneMeshes[scene].loaded);
 }
 
 const SceneInstance& activeSceneInstanceFor(int sceneId) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, sceneId));
+    const int scene = clampSceneId(sceneId);
     return g_sceneInstances[scene];
 }
 
 void applyPlacementOverrides(FireSettings& settings) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
-    const Vec3 sourceOffset = g_placement.scene(scene).sourceOffset;
-    settings.emitterCenterX = std::max(-1.05f, std::min(1.05f, settings.emitterCenterX + sourceOffset.x));
-    settings.emitterCenterZ = std::max(-0.82f, std::min(0.82f, settings.emitterCenterZ + sourceOffset.z));
-    const float emitterY = std::max(0.02f, std::min(1.97f, settings.emitterHeightNorm * 2.03f + 0.02f + sourceOffset.y));
-    settings.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (emitterY - 0.02f) / 2.03f));
-    for (int i = 0; i < settings.burnerCenterCount && i < 4; ++i) {
-        settings.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i] + sourceOffset.x));
-        settings.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i] + sourceOffset.y));
-        settings.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i] + sourceOffset.z));
-    }
+    const int scene = clampSceneId(settings.sceneId);
+    const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
+    applySceneEmitterToSettings(settings, g_sceneEmitters[scene], sceneEpoch, g_placement.scene(scene));
 }
 
 void applySceneEmitterParams(FireSettings& settings) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
+    const int scene = clampSceneId(settings.sceneId);
     const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
     refreshSceneInstance(scene, sceneEpoch);
-    const SceneInstance& instance = activeSceneInstanceFor(scene);
-    const SceneEmitterParams& emitter = instance.emitter;
-    settings.sceneEpoch = instance.sceneEpoch;
-    settings.emitterCenterX = emitter.centerX;
-    settings.emitterCenterZ = emitter.centerZ;
-    settings.emitterHeightNorm = emitter.heightNorm;
-    settings.emitterHeightBandNorm = emitter.heightBandNorm;
-    settings.emitterRadius = emitter.radius;
-    settings.burnerCenterCount = emitter.burnerCenterCount;
-    for (int i = 0; i < 4; ++i) {
-        settings.burnerCenterX[i] = emitter.burnerCenterX[i];
-        settings.burnerCenterY[i] = emitter.burnerCenterY[i];
-        settings.burnerCenterZ[i] = emitter.burnerCenterZ[i];
-    }
     applyPlacementOverrides(settings);
 }
 
@@ -1153,26 +1062,19 @@ const char* placementTargetName() {
 }
 
 void formatPlacementStatus(char* out, std::size_t outSize) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const int scene = clampSceneId(g_activeScene);
     const SceneEmitterParams& emitter = g_sceneEmitters[scene];
     const ScenePlacement& placement = g_placement.scene(scene);
-    float sourceX = emitter.centerX + placement.sourceOffset.x;
-    float sourceY = emitter.heightNorm * 2.03f + 0.02f + placement.sourceOffset.y;
-    float sourceZ = emitter.centerZ + placement.sourceOffset.z;
-    if (scene == 2 && emitter.burnerCenterCount > 0) {
-        sourceX = emitter.burnerCenterX[0] + placement.sourceOffset.x;
-        sourceY = emitter.burnerCenterY[0] + placement.sourceOffset.y;
-        sourceZ = emitter.burnerCenterZ[0] + placement.sourceOffset.z;
-    }
+    const Vec3 source = sceneSourceWorld(emitter, placement, scene);
     if (g_placement.target == 0) {
         std::snprintf(
             out,
             outSize,
             "PLACE SOURCE scene=%s x=%.4f y=%.4f z=%.4f offset=(%.4f,%.4f,%.4f)",
             sceneName(scene),
-            sourceX,
-            sourceY,
-            sourceZ,
+            source.x,
+            source.y,
+            source.z,
             placement.sourceOffset.x,
             placement.sourceOffset.y,
             placement.sourceOffset.z);
@@ -1197,7 +1099,7 @@ void markPlacementChanged(bool resetFire) {
 }
 
 void nudgePlacement(float dx, float dy, float dz) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const int scene = clampSceneId(g_activeScene);
     ScenePlacement& placement = g_placement.scene(scene);
     if (g_placement.target == 0) {
         placement.sourceOffset.x = std::max(-1.50f, std::min(1.50f, placement.sourceOffset.x + dx));
@@ -1213,33 +1115,18 @@ void nudgePlacement(float dx, float dy, float dz) {
 }
 
 Vec3 activeSourceWorldFromEmitters() {
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
-    const SceneEmitterParams& emitter = g_sceneEmitters[scene];
-    const Vec3 sourceOffset = g_placement.scene(scene).sourceOffset;
-    Vec3 source = {
-        emitter.centerX + sourceOffset.x,
-        emitter.heightNorm * 2.03f + 0.02f + sourceOffset.y,
-        emitter.centerZ + sourceOffset.z};
-    if (scene == 2 && emitter.burnerCenterCount > 0) {
-        source = {
-            emitter.burnerCenterX[0] + sourceOffset.x,
-            emitter.burnerCenterY[0] + sourceOffset.y,
-            emitter.burnerCenterZ[0] + sourceOffset.z};
-    }
-    return source;
+    const int scene = clampSceneId(g_activeScene);
+    return sceneSourceWorld(g_sceneEmitters[scene], g_placement.scene(scene), scene);
 }
 
 Vec3 activeMeshCenterWorld() {
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const int scene = clampSceneId(g_activeScene);
     const RuntimeSceneMesh& mesh = g_sceneMeshes[scene];
     const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
     if (!mesh.loaded) {
         return meshOffset;
     }
-    return {
-        (mesh.minX + mesh.maxX) * 0.5f + meshOffset.x,
-        (mesh.minY + mesh.maxY) * 0.5f + meshOffset.y,
-        (mesh.minZ + mesh.maxZ) * 0.5f + meshOffset.z};
+    return meshCenterWorld(mesh.minX, mesh.minY, mesh.minZ, mesh.maxX, mesh.maxY, mesh.maxZ, meshOffset);
 }
 
 Vec3 activePlacementWorld() {
@@ -1272,7 +1159,7 @@ int hitTestPlacementHandle(int frameX, int frameY) {
 }
 
 void beginPlacementDrag(int axis) {
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const int scene = clampSceneId(g_activeScene);
     g_placementDragging = true;
     g_placementDragAxis = axis;
     g_placementDragStartX = g_pointerFrameX;
@@ -1291,7 +1178,7 @@ void updatePlacementDrag() {
     if (!g_placementDragging) {
         return;
     }
-    const int scene = std::max(0, std::min(kSceneCount - 1, g_activeScene));
+    const int scene = clampSceneId(g_activeScene);
     ScenePlacement& placement = g_placement.scene(scene);
     const float scale = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.0048f : 0.0024f;
     const float dx = static_cast<float>(g_pointerFrameX - g_placementDragStartX) * scale;

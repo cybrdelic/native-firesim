@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $cudaPath = Join-Path $root "src\fire_cuda.cu"
 $mainPath = Join-Path $root "src\main.cpp"
+$sceneRuntimeHeaderPath = Join-Path $root "src\scene_runtime.h"
+$sceneRuntimePath = Join-Path $root "src\scene_runtime.cpp"
 $diagPath = Join-Path $root "out\diagnostics.txt"
 $burnerMaskPath = Join-Path $root "assets\fire-scenes\gas-burner-aver1\emitter-mask.json"
 $campScenePath = Join-Path $root "assets\fire-scenes\campfire\scene.json"
@@ -27,6 +29,8 @@ function Require-Text {
 
 $cuda = Get-Content -LiteralPath $cudaPath -Raw
 $main = Get-Content -LiteralPath $mainPath -Raw
+$sceneRuntimeHeader = Get-Content -LiteralPath $sceneRuntimeHeaderPath -Raw
+$sceneRuntime = Get-Content -LiteralPath $sceneRuntimePath -Raw
 $burnerMask = Get-Content -LiteralPath $burnerMaskPath -Raw
 $campScene = Get-Content -LiteralPath $campScenePath -Raw
 
@@ -37,10 +41,10 @@ Require-Text $main 'jsonObjectForKey(sceneContract, "emitter")' "scene emitter c
 Require-Text $main "const std::string& emitterSource = emitterContract.empty() ? sceneContract : emitterContract" "scene emitter loader no longer isolates nested emitter fields before legacy fallback"
 Require-Text $main "sceneMeshTranslationMeters(sceneId, sceneContract)" "scene mesh translation contract is not centralized"
 Require-Text $main "applySceneMeshTranslation(" "scene-to-sim point transform is not centralized"
-Require-Text $main "struct SceneInstance" "canonical scene instance contract is missing"
-Require-Text $main "SceneInstance makeSceneInstance" "scene instance builder is missing"
+Require-Text $sceneRuntimeHeader "struct SceneInstance" "canonical scene instance contract is missing"
+Require-Text $sceneRuntime "SceneInstance makeSceneInstance" "scene instance builder is missing"
 Require-Text $main "const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch" "scene instance refresh must preserve host-authored epochs across worker process boundaries"
-Require-Text $main "settings.sceneEpoch = instance.sceneEpoch" "scene emitter application must stamp settings with canonical scene epoch"
+Require-Text $sceneRuntime "settings.sceneEpoch = static_cast<int>(sceneEpoch)" "scene emitter application must stamp settings with canonical scene epoch"
 Require-Text $main "sceneInstanceContract=SceneInstance owns scene id, epoch, emitter, source center/radius/height, imported mesh presence, and selected burner state" "diagnostics scene instance contract is missing from source"
 Require-Text $main "params.burnerCenterX[i] = burnerPoint[0]" "burner centers no longer share the scene-to-sim transform"
 Require-Text $main "params.burnerCenterY[i] = burnerPoint[1]" "burner center height no longer shares the scene-to-sim transform"

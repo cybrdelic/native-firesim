@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$sceneRuntime = Get-Content (Join-Path $root "src/scene_runtime.h") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
 function Require-Text($text, $needle, $message) { if (-not $text.Contains($needle)) { Write-Error $message } }
 Require-Text $main "drawProjectedBoxOverlay" "projected box overlay helper is missing"
@@ -9,9 +10,10 @@ Require-Text $main '"FUEL BED"' "fuel-bed bounds overlay is missing"
 Require-Text $main '"GLB BOUNDS"' "GLB bounds overlay is missing"
 Require-Text $main '"FRAME AGE %llums  RING %ld>%ld"' "frame age and ring freshness overlay is missing"
 Require-Text $main '"SRC ACTIVE"' "selected burner/source overlay is missing"
-Require-Text $main "struct PlacementCoordinateState" "central placement coordinate state is missing"
-Require-Text $main "g_placement.scene(scene).sourceOffset" "source placement is not read from the central placement state"
+Require-Text $sceneRuntime "struct PlacementCoordinateState" "central placement coordinate state is missing"
+Require-Text $main "g_placement.scene(scene)" "source placement is not read from the central placement state"
 Require-Text $main "g_placement.scene(scene).meshOffset" "mesh placement is not read from the central placement state"
+Require-Text $main "sceneSourceWorld" "source placement world coordinates are not centralized"
 Require-Text $main "applyPlacementOverrides(settings)" "placement debug offsets are not applied to CUDA source settings"
 Require-Text $main "MeshOffset.xyz" "placement debug offsets are not applied to GLTF mesh vertices"
 Require-Text $main "copyPlacementToClipboard" "placement debug coordinates cannot be copied"
