@@ -30,6 +30,7 @@
 #include "scene_assets.h"
 #include "scene_runtime.h"
 #include "shared_viewport.h"
+#include "ui_labels.h"
 #include "ui_layout.h"
 #include "worker_lifecycle.h"
 
@@ -567,47 +568,6 @@ void drawLine(std::vector<std::uint32_t>& pixels, float ax, float ay, float bx, 
             const float d = std::sqrt(dx * dx + dy * dy);
             blendPixel(pixels, x, y, r, g, b, alpha * (1.0f - clampf(d / 0.006f, 0.0f, 1.0f)));
         }
-    }
-}
-
-const char* toolName(int tool) {
-    switch (tool) {
-    case 1: return "FIRE";
-    case 2: return "SMOKE";
-    case 3: return "WIND";
-    case 4: return "TURB";
-    default: return "NONE";
-    }
-}
-
-const char* renderDebugName(int mode) {
-    switch (mode) {
-    case 1: return "FLAME";
-    case 2: return "SOOT";
-    case 3: return "TRANS";
-    case 4: return "TEMP";
-    case 5: return "FUEL";
-    case 6: return "VEL";
-    default: return "FINAL";
-    }
-}
-
-const char* sceneName(int scene) {
-    switch (scene) {
-    case 1: return "CAMPFIRE";
-    case 2: return "GAS BURNER";
-    default: return "ROOM";
-    }
-}
-
-const char* transitionReasonName(RuntimeTransitionReason reason) {
-    switch (reason) {
-    case RuntimeTransitionReason::SceneSwitch: return "scene-switch";
-    case RuntimeTransitionReason::UserReset: return "user-reset";
-    case RuntimeTransitionReason::WorkerStale: return "worker-stale";
-    case RuntimeTransitionReason::WorkerFrameCopied: return "worker-frame-copied";
-    case RuntimeTransitionReason::OverlayChanged: return "overlay-changed";
-    default: return "startup";
     }
 }
 

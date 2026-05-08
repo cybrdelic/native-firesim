@@ -21,6 +21,7 @@ add_executable(NativeFireSim WIN32
     src/scene_runtime.h
     src/shared_viewport.h
     src/ui_layout.h
+    src/ui_labels.h
     src/worker_lifecycle.cpp
     src/worker_lifecycle.h
     src/fire_cuda.cu
