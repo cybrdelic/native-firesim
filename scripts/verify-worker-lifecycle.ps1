@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$sharedViewport = Get-Content (Join-Path $root "src/shared_viewport.h") -Raw
 $workerLifecycle = Get-Content (Join-Path $root "src/worker_lifecycle.h") -Raw
 $workerLifecycleImpl = Get-Content (Join-Path $root "src/worker_lifecycle.cpp") -Raw
 $diag = Join-Path $root "out\diagnostics\startup.txt"
@@ -23,8 +24,8 @@ Require-Text $main "invalidateSharedViewportPublishedFrames()" "scene switch mus
 Require-Text $main "clearHostSharedFrameHandles()" "scene switch must close stale host-opened shared CUDA textures"
 Require-Text $main "g_sharedViewport->latestFrameSlot = -1" "scene switch invalidation must clear latest shared frame slot"
 Require-Text $main "g_sharedViewport->sharedTextureHandleValues[slot] = 0" "scene switch invalidation must clear shared texture handles"
-Require-Text $main "slotSceneEpochs[kSharedFrameSlots]" "shared frame slots must carry scene epochs"
-Require-Text $main "activeSceneEpoch" "shared viewport must expose active scene epoch"
+Require-Text $sharedViewport "slotSceneEpochs[kD3DSharedFrameSlots]" "shared frame slots must carry scene epochs"
+Require-Text $sharedViewport "activeSceneEpoch" "shared viewport must expose active scene epoch"
 Require-Text $main "slotEpoch != g_sceneEpoch" "host copy path must reject stale scene slots"
 Require-Text $main "epochB == g_sceneEpoch" "host copy candidate must re-check scene epoch after acquiring the keyed mutex"
 Require-Text $main "sequence > g_lastCopiedWorkerSequence" "host copy path must identify stale ready slots behind the copy cursor"

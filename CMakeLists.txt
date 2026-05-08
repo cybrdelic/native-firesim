@@ -13,10 +13,14 @@ set(CMAKE_CUDA_ARCHITECTURES 89)
 
 add_executable(NativeFireSim WIN32
     src/main.cpp
+    src/d3d_render_types.h
+    src/runtime_state.h
     src/scene_assets.cpp
     src/scene_assets.h
     src/scene_runtime.cpp
     src/scene_runtime.h
+    src/shared_viewport.h
+    src/ui_layout.h
     src/worker_lifecycle.cpp
     src/worker_lifecycle.h
     src/fire_cuda.cu

@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $mainPath = Join-Path $root "src\main.cpp"
+$d3dTypesPath = Join-Path $root "src\d3d_render_types.h"
 $docPath = Join-Path $root "docs\render-graph.md"
 $diagPath = Join-Path $root "out\diagnostics.txt"
 
@@ -31,6 +32,7 @@ if (-not (Test-Path -LiteralPath $docPath)) {
 }
 
 $source = Get-Content -LiteralPath $mainPath -Raw
+$d3dTypes = Get-Content -LiteralPath $d3dTypesPath -Raw
 $doc = Get-Content -LiteralPath $docPath -Raw
 
 Require-Text $source "constexpr DXGI_FORMAT kSceneRadianceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;" "source no longer declares the FP16 scene-radiance contract"
@@ -39,7 +41,7 @@ Require-Text $source "renderD3DVolumeCameraPass" "source no longer has a dedicat
 Require-Text $source "renderD3DSceneMeshPass" "source no longer has a dedicated scene mesh pass"
 Require-Text $source "renderD3DUiOverlayPass" "source no longer has a dedicated UI overlay pass"
 Require-Text $source "CameraResponse" "source no longer has a named HDR camera response"
-Require-Text $source "ComPtr<ID3D11DepthStencilView> meshDepthView" "GLTF mesh pass no longer owns a depth buffer"
+Require-Text $d3dTypes "ComPtr<ID3D11DepthStencilView> meshDepthView" "GLTF mesh pass no longer owns a depth buffer"
 Require-Text $source "return float4(color, 1.0)" "GLTF mesh shader must be opaque, not ghosted through alpha"
 Require-Text $source "OMSetBlendState(nullptr, blendFactor, 0xffffffffu)" "GLTF mesh pass must render opaque without alpha blending"
 Require-Text $source "OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu)" "UI pass must own alpha blending explicitly"

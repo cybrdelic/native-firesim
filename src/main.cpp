@@ -24,17 +24,19 @@
 #include <utility>
 #include <vector>
 
+#include "d3d_render_types.h"
 #include "fire_cuda.h"
+#include "runtime_state.h"
 #include "scene_assets.h"
 #include "scene_runtime.h"
+#include "shared_viewport.h"
+#include "ui_layout.h"
 #include "worker_lifecycle.h"
 
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr int kFrameWidth = 960;
-constexpr int kFrameHeight = 540;
 constexpr int kSimulationGridWidth = 384;
 constexpr int kSimulationGridHeight = 240;
 constexpr int kRaymarchSteps = 104;
@@ -72,162 +74,6 @@ constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
 constexpr int kWorkerPhysicsFrameInterval = 1;
-struct UiRect {
-    int x;
-    int y;
-    int w;
-    int h;
-};
-
-constexpr UiRect kRailRect = {14, 70, 76, 398};
-constexpr UiRect kTopBarRect = {14, 14, 932, 36};
-constexpr UiRect kViewportRect = {0, 0, kFrameWidth, kFrameHeight};
-constexpr UiRect kInspectorRect = {762, 70, 184, 340};
-constexpr UiRect kStatusRect = {14, 480, 932, 44};
-constexpr UiRect kToolButtonRects[4] = {
-    {22, 96, 60, 64},
-    {22, 176, 60, 64},
-    {22, 256, 60, 64},
-    {22, 336, 60, 64},
-};
-constexpr UiRect kOverlayButtonRect = {104, 486, 72, 28};
-constexpr UiRect kResetButtonRect = {184, 486, 72, 28};
-constexpr UiRect kSceneButtonRects[kSceneCount] = {
-    {336, 20, 74, 24},
-    {418, 20, 74, 24},
-    {500, 20, 90, 24},
-};
-constexpr UiRect kWindSliderRect = {790, 214, 130, 16};
-constexpr UiRect kTurbulenceSliderRect = {790, 304, 130, 16};
-
-struct SharedViewportBuffer {
-    DWORD magic;
-    DWORD version;
-    DWORD buildStamp;
-    DWORD width;
-    DWORD height;
-    DWORD displayFormat;
-    volatile LONG frameSequence;
-    volatile LONG settingsSequence;
-    volatile LONG shutdownRequested;
-    volatile LONG workerStatus;
-    volatile LONG workerExitCode;
-    volatile LONG workerErrorCount;
-    volatile LONG workerPublishedFrames;
-    volatile LONG workerPhysicsFrames;
-    volatile LONG workerRenderOnlyFrames;
-    DWORD workerPid;
-    unsigned long long lastFrameTickMs;
-    unsigned long long workerHeartbeatTickMs;
-    unsigned long long workerStartTickMs;
-    unsigned long long workerStopTickMs;
-    unsigned long long sharedTextureHandleValue;
-    unsigned long long sharedTextureHandleValues[kSharedFrameSlots];
-    volatile LONG latestFrameSlot;
-    volatile LONG slotFrameSequences[kSharedFrameSlots];
-    volatile LONG slotSceneEpochs[kSharedFrameSlots];
-    volatile LONG activeSceneEpoch;
-    unsigned long long workerFrameMicros;
-    unsigned long long workerCudaMicros;
-    unsigned long long workerPublishMicros;
-    FireSettings settings;
-    char statusText[192];
-};
-
-struct DisplayConstants {
-    float exposure;
-    float padding[3];
-};
-
-struct MeshConstants {
-    float viewProj[16];
-    float lightPos[4];
-    float baseColor[4];
-    float fireColor[4];
-    float fireParams[4];
-    float meshOffset[4];
-};
-
-struct RuntimeSceneMesh {
-    std::vector<MeshVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    ComPtr<ID3D11Buffer> vertexBuffer;
-    ComPtr<ID3D11Buffer> indexBuffer;
-    float minX = 0.0f;
-    float minY = 0.0f;
-    float minZ = 0.0f;
-    float maxX = 0.0f;
-    float maxY = 0.0f;
-    float maxZ = 0.0f;
-    bool loaded = false;
-};
-
-struct D3DDisplayState {
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    ComPtr<IDXGISwapChain> swapChain;
-    ComPtr<ID3D11RenderTargetView> renderTargetView;
-    std::array<ComPtr<ID3D11Texture2D>, kSharedFrameSlots> sharedSimTextures;
-    std::array<ComPtr<IDXGIKeyedMutex>, kSharedFrameSlots> sharedSimMutexes;
-    std::array<HANDLE, kSharedFrameSlots> sharedSimHandles = {};
-    std::array<ComPtr<ID3D11Texture2D>, kDisplayFrameSlots> displaySimTextures;
-    std::array<ComPtr<ID3D11ShaderResourceView>, kDisplayFrameSlots> displaySimSrvs;
-    ComPtr<ID3D11Texture2D> meshDepthTexture;
-    ComPtr<ID3D11DepthStencilView> meshDepthView;
-    ComPtr<ID3D11Texture2D> uiTexture;
-    ComPtr<ID3D11ShaderResourceView> uiSrv;
-    ComPtr<ID3D11SamplerState> sampler;
-    ComPtr<ID3D11VertexShader> vertexShader;
-    ComPtr<ID3D11VertexShader> meshVertexShader;
-    ComPtr<ID3D11PixelShader> simPixelShader;
-    ComPtr<ID3D11PixelShader> uiPixelShader;
-    ComPtr<ID3D11PixelShader> meshPixelShader;
-    ComPtr<ID3D11InputLayout> meshInputLayout;
-    ComPtr<ID3D11Buffer> displayConstants;
-    ComPtr<ID3D11Buffer> meshConstants;
-    ComPtr<ID3D11BlendState> alphaBlend;
-    ComPtr<ID3D11DepthStencilState> meshDepthState;
-    ComPtr<ID3D11RasterizerState> meshRasterizerState;
-    ComPtr<ID3D11Query> copyCompletionQuery;
-    int activeDisplaySimSlot = -1;
-    int nextDisplaySimSlot = 0;
-    bool initialized = false;
-    bool hasSimFrame = false;
-};
-
-struct RenderGraphStats {
-    unsigned long long frameIndex = 0;
-    unsigned long long clearPasses = 0;
-    unsigned long long volumeCameraPasses = 0;
-    unsigned long long sceneMeshPasses = 0;
-    unsigned long long uiOverlayPasses = 0;
-    unsigned long long presentPasses = 0;
-    unsigned long long skippedPresentPasses = 0;
-    bool lastFrameHadVolume = false;
-    bool lastFrameHadMesh = false;
-    bool lastFrameHadUi = false;
-};
-
-enum class RuntimeTransitionReason {
-    Startup,
-    SceneSwitch,
-    UserReset,
-    WorkerStale,
-    WorkerFrameCopied,
-    OverlayChanged
-};
-
-struct CanonicalRuntimeState {
-    int sceneId = 0;
-    int debugMode = 0;
-    int activeGizmo = 1;
-    bool needsReset = false;
-    bool cudaWorkerLive = false;
-    bool uiOverlayDirty = true;
-    unsigned long long transitionCount = 0;
-    RuntimeTransitionReason lastReason = RuntimeTransitionReason::Startup;
-};
-
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
