@@ -13,6 +13,8 @@ Require-Text $main "displayPresentStep" "display present step must be precompute
 Require-Text $main "presentBudgetDue && (presentDirty || g_cudaWorkerFrameLive)" "present path must run on cadence even when reusing a CUDA frame"
 Require-Text $main "reusedDisplayFrame = g_cudaWorkerFrameLive && !copiedWorkerFrame" "reused display frames must be explicit telemetry"
 Require-Text $main "g_liveReusedPresents" "reused presents must be counted"
+Require-Text $main "g_d3d.swapChain->Present(0, 0)" "swapchain present must not use DO_NOT_WAIT because skipped presents can flicker"
+Forbid-Text $main "DXGI_PRESENT_DO_NOT_WAIT" "nonblocking present reintroduced visible skipped-frame flicker"
 Require-Text $main "fireStreamHealthLabel()" "operator status must expose fire-stream health"
 Require-Text $main "fire-stream copy lag" "operator status must warn when copied CUDA frames lag physics"
 Require-Text $main "ringTimeouts=%llu ringNoCandidate=%llu ringStarved=%llu" "live profile must include ring pressure counters"

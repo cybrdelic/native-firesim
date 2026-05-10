@@ -15,8 +15,8 @@
     "width": 0.8748586475849152,
     "depth": 0.7978596165776253,
     "height": 0.2716983179561794,
-    "geometryMesh": "scene.glb",
-    "runtimeMesh": "runtime-mesh.json",
+    "geometryMesh": "",
+    "runtimeMesh": "",
     "emitterMask": "emitter-mask.json",
     "sdfGrid": "sdf-grid.npz",
     "sourceType": "solid-fuel-bed"

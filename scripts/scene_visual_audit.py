@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,7 @@ from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "out" / "scene-visual-audit"
+OUT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "out" / "scene-visual-audit"
 SCENES = {
     "room": {"raw": OUT / "room" / "validation-frame.bmp", "app": OUT / "room" / "validation-app-frame.bmp"},
     "campfire": {"raw": OUT / "campfire" / "validation-frame.bmp", "app": OUT / "campfire" / "validation-app-frame.bmp"},
@@ -134,11 +135,6 @@ def app_metrics(path: Path) -> dict:
         & (viewport[..., 1] < 0.55)
         & (viewport[..., 2] < 0.16)
     )
-    glb_overlay = (
-        (viewport[..., 0] > 0.48)
-        & (viewport[..., 1] > 0.36)
-        & (viewport[..., 2] > 0.62)
-    )
     active_fire = (
         ((viewport[..., 0] > viewport[..., 1] * 1.08) & (viewport[..., 0] > viewport[..., 2] * 1.45) & (viewport_luma > 0.18))
         | ((viewport[..., 2] > viewport[..., 0] * 1.08) & (viewport[..., 2] > viewport[..., 1] * 1.02) & (viewport_luma > 0.10))
@@ -173,7 +169,6 @@ def app_metrics(path: Path) -> dict:
         "gridArtifactScore": float(max(vertical_edges.mean(), horizontal_edges.mean())),
         "warmSmokeFraction": float(warm_smoke.mean()),
         "sourceOverlayFraction": float(source_overlay.mean()) if source_overlay.size else 0.0,
-        "glbBoundsOverlayFraction": float(glb_overlay.mean()) if glb_overlay.size else 0.0,
         "sourceOverlayCenter": source_center,
         "activeFireCenter": active_center,
         "sourceFireAlignmentDelta": alignment_delta,
@@ -242,14 +237,12 @@ def app_issues_for(name: str, m: dict) -> list[str]:
     if m["uiTopMean"] < 0.010 or m["uiLeftMean"] < 0.010 or m["uiRightMean"] < 0.010 or m["uiBottomMean"] < 0.010:
         issues.append("app frame is missing expected UI chrome")
     if name in {"campfire", "burner"} and m["centerMean"] < 0.010:
-        issues.append("app frame center is too dark; GLB or scene content may be missing")
-    if name in {"campfire", "burner"} and m["glbBoundsOverlayFraction"] < 0.00002:
-        issues.append("app frame is missing GLB bounds overlay signal")
+        issues.append("app frame center is too dark; fire source or scene content may be missing")
     if name == "burner" and m["sourceOverlayFraction"] < 0.00004:
         issues.append("burner app frame is missing selected-source overlay signal")
-    if name == "burner" and m["sourceFireAlignmentDelta"] > 0.24:
+    if name == "burner" and m["sourceFireAlignmentDelta"] > 0.04:
         issues.append("burner fire body is visibly offset from selected source overlay")
-    if m["gridArtifactScore"] > 0.085:
+    if m["gridArtifactScore"] > 0.035:
         issues.append("app frame has excessive grid/line artifact score")
     if m["warmSmokeFraction"] > 0.26:
         issues.append("app frame has excessive warm/sepia smoke pixels")

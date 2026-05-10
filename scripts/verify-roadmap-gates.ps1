@@ -76,6 +76,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-scene-profile-contract.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    Write-Host "roadmap gate: all scenes work"
+    & (Join-Path $PSScriptRoot "verify-all-scenes-work.ps1") -SkipCapture
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Write-Host "roadmap gate: room source coverage"
     & (Join-Path $PSScriptRoot "verify-room-source-coverage.ps1")
@@ -119,6 +129,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: cuda prevention contract"
+    & (Join-Path $PSScriptRoot "verify-cuda-prevention-contract.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: imported scene assets"
     & (Join-Path $PSScriptRoot "verify-scene-assets.ps1")
     if ($LASTEXITCODE -ne 0) {
@@ -131,10 +147,6 @@ try {
         exit $LASTEXITCODE
     }
     & (Join-Path $PSScriptRoot "verify-before-after-pixel-proof.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-    & (Join-Path $PSScriptRoot "verify-scene-silhouette-targets.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

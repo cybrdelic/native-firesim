@@ -2,28 +2,30 @@
   "schemaVersion": 1,
   "id": "gas-burner-aver1",
   "displayName": "Gas Burner",
-  "mesh": {
-    "assetId": "gas-burner-aver1",
-    "runtimeMesh": "runtime-mesh.json",
-    "sceneGlb": "scene.glb"
-  },
-  "meshTransform": {
-    "translationMeters": [0.0, -0.24, 0.0],
-    "rotationDegrees": [0.0, 0.0, 0.0],
-    "scale": [1.0, 1.0, 1.0]
-  },
   "emitter": {
     "type": "selected-gas-burner",
     "sourceFile": "emitter-mask.json",
-    "centerMeters": [0.198, 0.138, 0.238],
+    "centerMeters": [
+      0.198,
+      0.138,
+      0.238
+    ],
     "radiusMeters": 0.138,
     "heightMeters": 0.138,
     "heightBandMeters": 0.105,
     "selectedBurnerIndex": 3
   },
   "volumeBounds": {
-    "minMeters": [-1.0, 0.0, -1.0],
-    "maxMeters": [1.0, 2.03, 1.0]
+    "minMeters": [
+      -1.0,
+      0.0,
+      -1.0
+    ],
+    "maxMeters": [
+      1.0,
+      2.03,
+      1.0
+    ]
   },
   "lighting": {
     "mode": "oxygen-rich-gas-radiance",

@@ -28,6 +28,7 @@ inline const char* sceneName(int scene) {
     switch (scene) {
     case 1: return "CAMPFIRE";
     case 2: return "GAS BURNER";
+    case 3: return "NIST METHANOL";
     default: return "ROOM";
     }
 }

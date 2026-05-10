@@ -102,24 +102,25 @@ if (-not (Test-Path -LiteralPath $nativeExe)) {
 
 $nativeArgs = @(
     "--validation",
-    "--manifest=`"$ManifestPath`"",
+    "--manifest=$ManifestPath",
     "--dataset-id=$experimentId",
-    "--calibration=`"$calibrationPath`"",
-    "--geometry=`"$geometryPath`"",
-    "--output-dir=`"$OutputDir`"",
+    "--calibration=$calibrationPath",
+    "--geometry=$geometryPath",
+    "--output-dir=$OutputDir",
     "--validation-frames=$Frames",
+    "--scene=3",
     "--pool-fire-calibration",
     "--allow-gpu-kernels",
     "--accept-bugcheck-risk"
 )
 if (-not [string]::IsNullOrWhiteSpace($targetPath)) {
-    $nativeArgs += "--targets=`"$targetPath`""
+    $nativeArgs += "--targets=$targetPath"
 }
 
 Push-Location $root
 try {
-    & $nativeExe @nativeArgs
-    $nativeExit = $LASTEXITCODE
+    $nativeProcess = Start-Process -FilePath $nativeExe -ArgumentList $nativeArgs -PassThru -Wait -WindowStyle Hidden
+    $nativeExit = $nativeProcess.ExitCode
 } finally {
     Pop-Location
 }

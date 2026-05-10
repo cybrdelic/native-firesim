@@ -24,18 +24,16 @@ $d3dTypes = Get-Content -LiteralPath $d3dTypesPath -Raw
 $doc = Get-Content -LiteralPath $docPath -Raw
 
 Require-Text $source "constexpr DXGI_FORMAT kSceneRadianceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;" "source no longer declares the FP16 scene-radiance contract"
-Require-Text $source "constexpr const char* kRenderGraphPasses = `"clear,volume-hdr-camera,lit-scene-mesh,ui-overlay,present`";" "source no longer declares the named render graph"
+Require-Text $source "constexpr const char* kRenderGraphPasses = `"clear,volume-hdr-camera,ui-overlay,present`";" "source no longer declares the named render graph"
 Require-Text $source "renderD3DVolumeCameraPass" "source no longer has a dedicated volume camera pass"
-Require-Text $source "renderD3DSceneMeshPass" "source no longer has a dedicated scene mesh pass"
 Require-Text $source "renderD3DUiOverlayPass" "source no longer has a dedicated UI overlay pass"
 Require-Text $source "CameraResponse" "source no longer has a named HDR camera response"
-Require-Text $d3dTypes "ComPtr<ID3D11DepthStencilView> meshDepthView" "GLTF mesh pass no longer owns a depth buffer"
-Require-Text $source "return float4(color, 1.0)" "GLTF mesh shader must be opaque, not ghosted through alpha"
-Require-Text $source "OMSetBlendState(nullptr, blendFactor, 0xffffffffu)" "GLTF mesh pass must render opaque without alpha blending"
+Require-Text $source "meshLightingPass=removed; fire scenes are CUDA volumes without imported GLB geometry" "diagnostics must report that imported mesh lighting was removed"
+Forbid-Text $source "renderD3DSceneMeshPass(exposure)" "runtime render graph must not draw imported scene meshes"
 Require-Text $source "OMSetBlendState(g_d3d.alphaBlend.Get(), blendFactor, 0xffffffffu)" "UI pass must own alpha blending explicitly"
 Require-Text $doc "The live viewport has one render graph." "render graph documentation lost its one-graph contract"
 Require-Text $doc 'DXGI_FORMAT_R16G16B16A16_FLOAT' "render graph documentation lost the FP16 contract"
-Require-Text $doc 'UI and mesh drawing stay outside that display transform' "render graph documentation lost the camera/UI separation rule"
+Require-Text $doc 'UI' "render graph documentation lost the UI pass rule"
 
 if (-not $SkipDiagnostics) {
     if (-not (Test-Path -LiteralPath $diagPath)) {
@@ -43,7 +41,7 @@ if (-not $SkipDiagnostics) {
     }
     $diag = Get-Content -LiteralPath $diagPath -Raw
     Require-Text $diag "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT" "diagnostics do not report FP16 scene radiance"
-    Require-Text $diag "renderGraphPasses=clear,volume-hdr-camera,lit-scene-mesh,ui-overlay,present" "diagnostics do not report the named render graph"
+    Require-Text $diag "renderGraphPasses=clear,volume-hdr-camera,ui-overlay,present" "diagnostics do not report the named render graph"
     Require-Text $diag "renderGraphOwnsCameraResponse=true" "diagnostics do not report render-graph camera ownership"
     Require-Text $diag "uiOverlayAfterCameraResponse=true" "diagnostics do not report UI-after-camera ordering"
 }

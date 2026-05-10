@@ -25,10 +25,12 @@ constexpr UiRect kToolButtonRects[4] = {
 };
 constexpr UiRect kOverlayButtonRect = {104, 486, 72, 28};
 constexpr UiRect kResetButtonRect = {184, 486, 72, 28};
+constexpr UiRect kCudaWorkerButtonRect = {264, 486, 132, 28};
 constexpr UiRect kSceneButtonRects[kSceneCount] = {
-    {336, 20, 74, 24},
-    {418, 20, 74, 24},
-    {500, 20, 90, 24},
+    {336, 20, 70, 24},
+    {414, 20, 70, 24},
+    {492, 20, 86, 24},
+    {586, 20, 70, 24},
 };
 constexpr UiRect kWindSliderRect = {790, 214, 130, 16};
 constexpr UiRect kTurbulenceSliderRect = {790, 304, 130, 16};

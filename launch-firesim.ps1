@@ -5,7 +5,9 @@ param(
     [switch]$AllowGpuKernels,
     [switch]$AcceptBugcheckRisk,
     [switch]$DisableCudaWorker,
-    [switch]$NoDialog
+    [switch]$NoDialog,
+    [ValidateRange(0, 3)]
+    [int]$Scene = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,6 +55,47 @@ trap {
 
 function Get-LiveCudaArguments {
     return @("--allow-gpu-kernels", "--accept-bugcheck-risk")
+}
+
+function Test-CudaPreflightFresh {
+    param([int]$SceneId)
+    $preflightPath = Join-Path $outDir "cuda-preflight.json"
+    if (-not (Test-Path -LiteralPath $preflightPath)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $preflightPath
+    if (((Get-Date) - $item.LastWriteTime).TotalMinutes -gt 55) {
+        return $false
+    }
+    try {
+        $json = Get-Content -LiteralPath $preflightPath -Raw | ConvertFrom-Json
+        return $json.preflightOk -eq $true -and $json.interactiveLaunchAllowed -eq $true -and [int]$json.scene -eq $SceneId
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-CudaPreflight {
+    param([int]$SceneId)
+    if (Test-CudaPreflightFresh -SceneId $SceneId) {
+        return
+    }
+    $commonArgs = Get-LiveCudaArguments
+    $preflightArgs = @(
+        "--cuda-preflight",
+        "--frames=5",
+        "--scene=$SceneId",
+        "--volume-slice-depth=128",
+        "--render-slice-rows=512",
+        "--output-dir=out"
+    ) + $commonArgs
+    Write-LauncherStatus "Refreshing CUDA preflight before live worker launch."
+    $code = Invoke-NativeFireSim -Arguments $preflightArgs
+    if ($code -ne 0 -or -not (Test-CudaPreflightFresh -SceneId $SceneId)) {
+        Show-LauncherMessage "CUDA preflight failed with exit code $code. The live CUDA worker was not started. See $nativeRoot\out\cuda-preflight.json."
+        exit 6
+    }
+    Remove-Item -LiteralPath (Join-Path $outDir "gpu-safety-stop.txt") -Force -ErrorAction SilentlyContinue
 }
 
 function Ensure-NativeFireSimBuilt {
@@ -109,21 +152,25 @@ if ($Validation) {
         exit 6
     }
     $commonArgs = Get-LiveCudaArguments
-    exit (Invoke-NativeFireSim -Arguments (@("--validation") + $commonArgs))
+    exit (Invoke-NativeFireSim -Arguments (@("--validation", "--scene=$Scene") + $commonArgs))
 }
 
-if ($AllowGpuKernels -or $AcceptBugcheckRisk) {
-    Show-LauncherMessage "The main viewport never launches custom CUDA kernels. GPU flags are accepted only with -SmokeTest or -Validation."
-}
-
-$appArgs = @()
+$appArgs = @("--scene=$Scene")
 if ($DisableCudaWorker) {
     $appArgs += "--disable-cuda-worker"
+} else {
+    Ensure-CudaPreflight -SceneId $Scene
+    Remove-Item -LiteralPath (Join-Path $outDir "gpu-safety-stop.txt") -Force -ErrorAction SilentlyContinue
+    $appArgs += Get-LiveCudaArguments
 }
 if ($appArgs.Count -gt 0) {
     Start-Process -FilePath $exe -ArgumentList $appArgs -WorkingDirectory $nativeRoot -WindowStyle Normal
-    Write-LauncherStatus "Started NativeFireSim.exe safe animated preview with CUDA worker disabled."
+    if ($DisableCudaWorker) {
+        Write-LauncherStatus "Started NativeFireSim.exe safe animated preview with CUDA worker disabled."
+    } else {
+        Write-LauncherStatus "Started NativeFireSim.exe with live CUDA worker enabled after successful preflight."
+    }
 } else {
     Start-Process -FilePath $exe -WorkingDirectory $nativeRoot -WindowStyle Normal
-    Write-LauncherStatus "Started NativeFireSim.exe with isolated CUDA worker enabled. Main viewport does not submit CUDA kernels directly."
+    Write-LauncherStatus "Started NativeFireSim.exe safe animated preview."
 }

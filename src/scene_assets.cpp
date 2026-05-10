@@ -135,17 +135,18 @@ bool jsonNumberForKey(const std::string& text, const char* key, float& out) {
     return true;
 }
 
-const char* runtimeMeshAssetId(int sceneId) {
+const char* sceneAssetId(int sceneId) {
     switch (sceneId) {
     case 1: return "campfire";
     case 2: return "gas-burner-aver1";
+    case 3: return "methanol-pool";
     case 0: return "room";
     default: return "";
     }
 }
 
 std::filesystem::path runtimeSceneDirectory(int sceneId) {
-    const char* assetId = runtimeMeshAssetId(sceneId);
+    const char* assetId = sceneAssetId(sceneId);
     if (assetId[0] == '\0') {
         return {};
     }
@@ -207,8 +208,8 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
         params.heightBandNorm = 0.105f / 2.03f;
     }
 
-    const char* assetId = runtimeMeshAssetId(sceneId);
-    if (assetId[0] == '\0' || sceneId == 0) {
+    const char* assetId = sceneAssetId(sceneId);
+    if (assetId[0] == '\0' || sceneId == 0 || sceneId == 3) {
         return params;
     }
     const std::filesystem::path path = runtimeSceneDirectory(sceneId) / "emitter-mask.json";
@@ -261,64 +262,76 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     return params;
 }
 
-bool loadRuntimeSceneMeshCpuData(int sceneId, SceneMeshCpuData& mesh, std::string* error) {
+namespace {
+
+void addRoomQuad(
+    SceneMeshCpuData& mesh,
+    std::array<float, 3> a,
+    std::array<float, 3> b,
+    std::array<float, 3> c,
+    std::array<float, 3> d,
+    std::array<float, 3> normal,
+    std::array<float, 3> color) {
+    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+    const std::array<std::array<float, 3>, 4> points = {a, b, c, d};
+    for (const auto& point : points) {
+        MeshVertex vertex{};
+        vertex.px = point[0];
+        vertex.py = point[1];
+        vertex.pz = point[2];
+        vertex.nx = normal[0];
+        vertex.ny = normal[1];
+        vertex.nz = normal[2];
+        vertex.cr = color[0];
+        vertex.cg = color[1];
+        vertex.cb = color[2];
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+}
+
+bool loadCanonicalRoomMesh(SceneMeshCpuData& mesh) {
     mesh = {};
-    const char* assetId = runtimeMeshAssetId(sceneId);
-    if (assetId[0] == '\0' || sceneId == 0) {
-        return false;
-    }
-    const std::filesystem::path sceneDir = runtimeSceneDirectory(sceneId);
-    const std::filesystem::path path = sceneDir / "runtime-mesh.json";
-    const std::string text = readTextFile(path);
-    if (text.empty()) {
-        return false;
-    }
-    const std::string sceneContract = readSceneContract(sceneId);
-    const std::array<float, 3> meshTranslation = sceneMeshTranslationMeters(sceneId, sceneContract);
-    const std::vector<float> positions = parseJsonFloats(jsonArrayForKey(text, "vertices"));
-    const std::vector<float> normals = parseJsonFloats(jsonArrayForKey(text, "normals"));
-    const std::vector<float> colors = parseJsonFloats(jsonArrayForKey(text, "colors"));
-    const std::vector<std::uint32_t> indices = parseJsonUInts(jsonArrayForKey(text, "triangles"));
-    if (positions.size() < 9 || positions.size() % 3 != 0 || indices.size() < 3 || indices.size() % 3 != 0) {
-        if (error != nullptr) {
-            *error = "runtime mesh parse failed";
-        }
-        return false;
-    }
-    const std::size_t vertexCount = positions.size() / 3;
-    mesh.vertices.resize(vertexCount);
-    for (std::size_t i = 0; i < vertexCount; ++i) {
-        const std::array<float, 3> simPoint = applySceneMeshTranslation(
-            {positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2]},
-            meshTranslation);
-        mesh.vertices[i].px = simPoint[0];
-        mesh.vertices[i].py = simPoint[1];
-        mesh.vertices[i].pz = simPoint[2];
-        mesh.vertices[i].nx = normals.size() >= positions.size() ? normals[i * 3 + 0] : 0.0f;
-        mesh.vertices[i].ny = normals.size() >= positions.size() ? normals[i * 3 + 1] : 1.0f;
-        mesh.vertices[i].nz = normals.size() >= positions.size() ? normals[i * 3 + 2] : 0.0f;
-        mesh.vertices[i].cr = colors.size() >= positions.size() ? colors[i * 3 + 0] : 0.55f;
-        mesh.vertices[i].cg = colors.size() >= positions.size() ? colors[i * 3 + 1] : 0.55f;
-        mesh.vertices[i].cb = colors.size() >= positions.size() ? colors[i * 3 + 2] : 0.55f;
-        if (sceneId == 2) {
-            mesh.vertices[i].cr = 0.090f;
-            mesh.vertices[i].cg = 0.094f;
-            mesh.vertices[i].cb = 0.102f;
-        }
+    constexpr float roomHalf = 2.55f;
+    constexpr float ceilingY = 2.18f;
+    constexpr float floorY = 0.0f;
+    const std::array<float, 3> floorColor = {0.030f, 0.030f, 0.028f};
+    const std::array<float, 3> wallColor = {0.040f, 0.041f, 0.040f};
+    const std::array<float, 3> ceilingColor = {0.026f, 0.026f, 0.025f};
+
+    addRoomQuad(mesh, {-roomHalf, floorY, -roomHalf}, {roomHalf, floorY, -roomHalf}, {roomHalf, floorY, roomHalf}, {-roomHalf, floorY, roomHalf}, {0.0f, 1.0f, 0.0f}, floorColor);
+    addRoomQuad(mesh, {-roomHalf, ceilingY, roomHalf}, {roomHalf, ceilingY, roomHalf}, {roomHalf, ceilingY, -roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {0.0f, -1.0f, 0.0f}, ceilingColor);
+    addRoomQuad(mesh, {-roomHalf, floorY, -roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {roomHalf, ceilingY, -roomHalf}, {roomHalf, floorY, -roomHalf}, {0.0f, 0.0f, 1.0f}, wallColor);
+    addRoomQuad(mesh, {roomHalf, floorY, roomHalf}, {roomHalf, ceilingY, roomHalf}, {-roomHalf, ceilingY, roomHalf}, {-roomHalf, floorY, roomHalf}, {0.0f, 0.0f, -1.0f}, wallColor);
+    addRoomQuad(mesh, {-roomHalf, floorY, roomHalf}, {-roomHalf, ceilingY, roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {-roomHalf, floorY, -roomHalf}, {1.0f, 0.0f, 0.0f}, wallColor);
+    addRoomQuad(mesh, {roomHalf, floorY, -roomHalf}, {roomHalf, ceilingY, -roomHalf}, {roomHalf, ceilingY, roomHalf}, {roomHalf, floorY, roomHalf}, {-1.0f, 0.0f, 0.0f}, wallColor);
+
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const MeshVertex& vertex = mesh.vertices[i];
         if (i == 0) {
-            mesh.minX = mesh.maxX = mesh.vertices[i].px;
-            mesh.minY = mesh.maxY = mesh.vertices[i].py;
-            mesh.minZ = mesh.maxZ = mesh.vertices[i].pz;
+            mesh.minX = mesh.maxX = vertex.px;
+            mesh.minY = mesh.maxY = vertex.py;
+            mesh.minZ = mesh.maxZ = vertex.pz;
         } else {
-            mesh.minX = std::min(mesh.minX, mesh.vertices[i].px);
-            mesh.minY = std::min(mesh.minY, mesh.vertices[i].py);
-            mesh.minZ = std::min(mesh.minZ, mesh.vertices[i].pz);
-            mesh.maxX = std::max(mesh.maxX, mesh.vertices[i].px);
-            mesh.maxY = std::max(mesh.maxY, mesh.vertices[i].py);
-            mesh.maxZ = std::max(mesh.maxZ, mesh.vertices[i].pz);
+            mesh.minX = std::min(mesh.minX, vertex.px);
+            mesh.minY = std::min(mesh.minY, vertex.py);
+            mesh.minZ = std::min(mesh.minZ, vertex.pz);
+            mesh.maxX = std::max(mesh.maxX, vertex.px);
+            mesh.maxY = std::max(mesh.maxY, vertex.py);
+            mesh.maxZ = std::max(mesh.maxZ, vertex.pz);
         }
     }
-    mesh.indices = indices;
     mesh.loaded = true;
     return true;
+}
+
+} // namespace
+
+bool loadRuntimeSceneMeshCpuData(int sceneId, SceneMeshCpuData& mesh, std::string* error) {
+    mesh = {};
+    if (error != nullptr) {
+        *error = "imported scene meshes are disabled";
+    }
+    (void)sceneId;
+    return false;
 }

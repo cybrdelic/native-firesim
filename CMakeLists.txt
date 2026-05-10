@@ -8,8 +8,8 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# RTX 4060 Laptop GPU is compute capability 8.9 on this machine.
-set(CMAKE_CUDA_ARCHITECTURES 89)
+# Build native SASS for the common Ada/Ampere targets plus a forward-compatible PTX image.
+set(CMAKE_CUDA_ARCHITECTURES 86-real 89-real 90-real 90-virtual)
 
 add_executable(NativeFireSim WIN32
     src/main.cpp

@@ -15,8 +15,8 @@
     "width": 0.8198535442352295,
     "depth": 0.7492542825639248,
     "height": 0.37620597518980503,
-    "geometryMesh": "scene.glb",
-    "runtimeMesh": "runtime-mesh.json",
+    "geometryMesh": "",
+    "runtimeMesh": "",
     "emitterMask": "emitter-mask.json",
     "sdfGrid": "sdf-grid.npz",
     "sourceType": "gas-burner"

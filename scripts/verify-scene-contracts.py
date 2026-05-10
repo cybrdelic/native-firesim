@@ -35,16 +35,8 @@ def main() -> None:
             require(key in scene, f"{scene_dir} missing required key {key}")
         require(scene["schemaVersion"] == schema["schemaVersion"], f"{scene_dir} schemaVersion mismatch")
 
-        mesh = scene["mesh"]
-        if mesh["runtimeMesh"]:
-            require((path.parent / mesh["runtimeMesh"]).exists(), f"{scene_dir} missing runtime mesh payload")
-        if mesh["sceneGlb"]:
-            require((path.parent / mesh["sceneGlb"]).exists(), f"{scene_dir} missing scene GLB")
-
-        transform = scene["meshTransform"]
-        number_triplet(transform["translationMeters"], f"{scene_dir}.meshTransform.translationMeters")
-        number_triplet(transform["rotationDegrees"], f"{scene_dir}.meshTransform.rotationDegrees")
-        number_triplet(transform["scale"], f"{scene_dir}.meshTransform.scale")
+        require("mesh" not in scene, f"{scene_dir} must not declare imported mesh payloads")
+        require("meshTransform" not in scene, f"{scene_dir} must not declare imported mesh transforms")
 
         emitter = scene["emitter"]
         number_triplet(emitter["centerMeters"], f"{scene_dir}.emitter.centerMeters")

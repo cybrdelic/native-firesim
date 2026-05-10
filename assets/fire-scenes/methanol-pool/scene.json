@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "methanol-pool",
+  "displayName": "NIST FCD Methanol 1 m Pool",
+  "sourceDataset": "benchmarks/nist-fcd/methanol-1m-pool-r1/manifest.json",
+  "emitter": {
+    "type": "liquid-pool-source",
+    "centerMeters": [
+      0.0,
+      0.025,
+      0.0
+    ],
+    "radiusMeters": 0.5,
+    "heightBandMeters": 0.09
+  },
+  "calibration": {
+    "fuel": "methanol",
+    "poolDiameterMeters": 1.0,
+    "intent": "low-soot liquid pool validation scene for HRR, mass-loss, optical-depth, and radiant-flux comparisons"
+  }
+}

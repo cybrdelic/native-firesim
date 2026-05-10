@@ -32,7 +32,7 @@ Use the native app directly for manual visual review:
 .\build\NativeFireSim.exe --scene=2 --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
-The live viewport is not a substitute for the local gates. If the UI, GLB, source overlay, or worker status looks wrong, capture the window and attach it to the PR body.
+The live viewport is not a substitute for the local gates. If the UI, source overlay, CUDA volume, or worker status looks wrong, capture the window and attach it to the PR body.
 
 ## PR Evidence
 

@@ -2,27 +2,29 @@
   "schemaVersion": 1,
   "id": "campfire",
   "displayName": "Campfire",
-  "mesh": {
-    "assetId": "campfire",
-    "runtimeMesh": "runtime-mesh.json",
-    "sceneGlb": "scene.glb"
-  },
-  "meshTransform": {
-    "translationMeters": [0.0, 0.0, 0.0],
-    "rotationDegrees": [0.0, 0.0, 0.0],
-    "scale": [1.0, 1.0, 1.0]
-  },
   "emitter": {
     "type": "solid-fuel-bed",
     "sourceFile": "emitter-mask.json",
-    "centerMeters": [0.0, 0.045, 0.0],
+    "centerMeters": [
+      0.0,
+      0.045,
+      0.0
+    ],
     "radiusMeters": 0.42,
     "heightMeters": 0.045,
     "heightBandMeters": 0.2
   },
   "volumeBounds": {
-    "minMeters": [-1.0, 0.0, -1.0],
-    "maxMeters": [1.0, 2.03, 1.0]
+    "minMeters": [
+      -1.0,
+      0.0,
+      -1.0
+    ],
+    "maxMeters": [
+      1.0,
+      2.03,
+      1.0
+    ]
   },
   "lighting": {
     "mode": "solid-fuel-fire-radiance",
