@@ -169,11 +169,11 @@ std::array<float, 3> jsonTripletForKey(const std::string& text, const char* key,
     return fallback;
 }
 
-std::array<float, 3> sceneMeshTranslationMeters(int sceneId, const std::string& sceneContract) {
+std::array<float, 3> sceneCoordinateTranslationMeters(int sceneId, const std::string& sceneContract) {
     return jsonTripletForKey(sceneContract, "translationMeters", {0.0f, sceneId == 2 ? -0.24f : 0.0f, 0.0f});
 }
 
-std::array<float, 3> applySceneMeshTranslation(const std::array<float, 3>& point, const std::array<float, 3>& translation) {
+std::array<float, 3> applySceneCoordinateTranslation(const std::array<float, 3>& point, const std::array<float, 3>& translation) {
     return {
         point[0] + translation[0],
         point[1] + translation[1],
@@ -217,7 +217,7 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     if (text.empty()) {
         return params;
     }
-    const std::array<float, 3> meshTranslation = sceneMeshTranslationMeters(sceneId, sceneContract);
+    const std::array<float, 3> sceneTranslation = sceneCoordinateTranslationMeters(sceneId, sceneContract);
     float value = 0.0f;
     if (jsonNumberForKey(text, "centerXMeters", value)) {
         params.centerX = value;
@@ -245,13 +245,13 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
     const std::vector<float> burnerCenters = parseJsonFloats(jsonArrayForKey(text, "burnerCentersMeters"));
     params.burnerCenterCount = static_cast<int>(std::min<std::size_t>(4, burnerCenters.size() / 3));
     for (int i = 0; i < params.burnerCenterCount; ++i) {
-        const std::array<float, 3> burnerPoint = applySceneMeshTranslation(
+        const std::array<float, 3> burnerPoint = applySceneCoordinateTranslation(
             {
                 burnerCenters[static_cast<std::size_t>(i) * 3 + 0],
                 burnerCenters[static_cast<std::size_t>(i) * 3 + 1],
                 burnerCenters[static_cast<std::size_t>(i) * 3 + 2],
             },
-            meshTranslation);
+            sceneTranslation);
         params.burnerCenterX[i] = burnerPoint[0];
         params.burnerCenterY[i] = burnerPoint[1];
         params.burnerCenterZ[i] = burnerPoint[2];
@@ -260,78 +260,4 @@ SceneEmitterParams loadSceneEmitterParams(int sceneId) {
         params.heightNorm = ((params.burnerCenterY[0] + params.heightBandNorm * 2.03f * 0.42f) - 0.02f) / 2.03f;
     }
     return params;
-}
-
-namespace {
-
-void addRoomQuad(
-    SceneMeshCpuData& mesh,
-    std::array<float, 3> a,
-    std::array<float, 3> b,
-    std::array<float, 3> c,
-    std::array<float, 3> d,
-    std::array<float, 3> normal,
-    std::array<float, 3> color) {
-    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
-    const std::array<std::array<float, 3>, 4> points = {a, b, c, d};
-    for (const auto& point : points) {
-        MeshVertex vertex{};
-        vertex.px = point[0];
-        vertex.py = point[1];
-        vertex.pz = point[2];
-        vertex.nx = normal[0];
-        vertex.ny = normal[1];
-        vertex.nz = normal[2];
-        vertex.cr = color[0];
-        vertex.cg = color[1];
-        vertex.cb = color[2];
-        mesh.vertices.push_back(vertex);
-    }
-    mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
-}
-
-bool loadCanonicalRoomMesh(SceneMeshCpuData& mesh) {
-    mesh = {};
-    constexpr float roomHalf = 2.55f;
-    constexpr float ceilingY = 2.18f;
-    constexpr float floorY = 0.0f;
-    const std::array<float, 3> floorColor = {0.030f, 0.030f, 0.028f};
-    const std::array<float, 3> wallColor = {0.040f, 0.041f, 0.040f};
-    const std::array<float, 3> ceilingColor = {0.026f, 0.026f, 0.025f};
-
-    addRoomQuad(mesh, {-roomHalf, floorY, -roomHalf}, {roomHalf, floorY, -roomHalf}, {roomHalf, floorY, roomHalf}, {-roomHalf, floorY, roomHalf}, {0.0f, 1.0f, 0.0f}, floorColor);
-    addRoomQuad(mesh, {-roomHalf, ceilingY, roomHalf}, {roomHalf, ceilingY, roomHalf}, {roomHalf, ceilingY, -roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {0.0f, -1.0f, 0.0f}, ceilingColor);
-    addRoomQuad(mesh, {-roomHalf, floorY, -roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {roomHalf, ceilingY, -roomHalf}, {roomHalf, floorY, -roomHalf}, {0.0f, 0.0f, 1.0f}, wallColor);
-    addRoomQuad(mesh, {roomHalf, floorY, roomHalf}, {roomHalf, ceilingY, roomHalf}, {-roomHalf, ceilingY, roomHalf}, {-roomHalf, floorY, roomHalf}, {0.0f, 0.0f, -1.0f}, wallColor);
-    addRoomQuad(mesh, {-roomHalf, floorY, roomHalf}, {-roomHalf, ceilingY, roomHalf}, {-roomHalf, ceilingY, -roomHalf}, {-roomHalf, floorY, -roomHalf}, {1.0f, 0.0f, 0.0f}, wallColor);
-    addRoomQuad(mesh, {roomHalf, floorY, -roomHalf}, {roomHalf, ceilingY, -roomHalf}, {roomHalf, ceilingY, roomHalf}, {roomHalf, floorY, roomHalf}, {-1.0f, 0.0f, 0.0f}, wallColor);
-
-    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
-        const MeshVertex& vertex = mesh.vertices[i];
-        if (i == 0) {
-            mesh.minX = mesh.maxX = vertex.px;
-            mesh.minY = mesh.maxY = vertex.py;
-            mesh.minZ = mesh.maxZ = vertex.pz;
-        } else {
-            mesh.minX = std::min(mesh.minX, vertex.px);
-            mesh.minY = std::min(mesh.minY, vertex.py);
-            mesh.minZ = std::min(mesh.minZ, vertex.pz);
-            mesh.maxX = std::max(mesh.maxX, vertex.px);
-            mesh.maxY = std::max(mesh.maxY, vertex.py);
-            mesh.maxZ = std::max(mesh.maxZ, vertex.pz);
-        }
-    }
-    mesh.loaded = true;
-    return true;
-}
-
-} // namespace
-
-bool loadRuntimeSceneMeshCpuData(int sceneId, SceneMeshCpuData& mesh, std::string* error) {
-    mesh = {};
-    if (error != nullptr) {
-        *error = "imported scene meshes are disabled";
-    }
-    (void)sceneId;
-    return false;
 }

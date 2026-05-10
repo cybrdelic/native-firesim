@@ -112,17 +112,8 @@ struct FireSettings {
     float sceneSourceHeightCeiling = 0.145f;
     float sceneCharScale = 1.0f;
     float sceneSootScale = 1.0f;
-    float sceneInitialHeatBase = 0.86f;
-    float sceneInitialHeatNoise = 0.24f;
     float sceneInitialFuelBase = 1.08f;
     float sceneInitialFuelNoise = 0.26f;
-    float sceneInitialSoot = 0.018f;
-    float sceneInitialAshScale = 1.0f;
-    float sceneInitialPyrolysisBase = 0.058f;
-    float sceneInitialPyrolysisNoise = 0.028f;
-    float sceneInitialProgress = 0.21f;
-    float sceneInitialTurbulence = 0.065f;
-    float sceneInitialSootOptics = 0.018f;
     float sceneGasFeed = 0.0f;
     float scenePyrolysisGain = 1.0f;
     float sceneFuelGain = 1.0f;

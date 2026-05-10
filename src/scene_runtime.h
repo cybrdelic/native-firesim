@@ -33,7 +33,6 @@ struct SceneInstance {
     float sourceZ = 0.0f;
     float sourceRadius = 0.48f;
     float sourceHeightBandMeters = 0.12f;
-    bool hasImportedMesh = false;
     bool hasSelectedBurner = false;
 };
 
@@ -53,17 +52,8 @@ struct SceneSourceCoefficients {
     float sourceHeightCeiling = 0.145f;
     float charScale = 1.0f;
     float sootScale = 1.0f;
-    float initialHeatBase = 0.86f;
-    float initialHeatNoise = 0.24f;
     float initialFuelBase = 1.08f;
     float initialFuelNoise = 0.26f;
-    float initialSoot = 0.018f;
-    float initialAshScale = 1.0f;
-    float initialPyrolysisBase = 0.058f;
-    float initialPyrolysisNoise = 0.028f;
-    float initialProgress = 0.21f;
-    float initialTurbulence = 0.065f;
-    float initialSootOptics = 0.018f;
 };
 
 struct SceneCombustionCoefficients {
@@ -163,7 +153,6 @@ struct SceneProfile {
     const char* sourceModel = "tray-fuel-bed";
     const char* fuelPhase = "solid";
     const char* flameEnvelope = "broad turbulent plume";
-    bool expectsImportedMesh = false;
     bool expectsSelectedBurner = false;
     SceneCudaCoefficients cuda;
     SceneValidationEnvelope validation;
@@ -171,7 +160,6 @@ struct SceneProfile {
 
 struct ScenePlacement {
     Vec3 sourceOffset = {};
-    Vec3 meshOffset = {};
 };
 
 struct PlacementCoordinateState {
@@ -185,6 +173,5 @@ struct PlacementCoordinateState {
 int clampSceneId(int sceneId);
 const SceneProfile& sceneProfile(int sceneId);
 Vec3 sceneSourceWorld(const SceneEmitterParams& emitter, const ScenePlacement& placement, int sceneId);
-Vec3 meshCenterWorld(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, Vec3 meshOffset);
-SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitterParams& emitter, bool hasImportedMesh);
+SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitterParams& emitter);
 void applySceneEmitterToSettings(FireSettings& settings, const SceneEmitterParams& emitter, long sceneEpoch, const ScenePlacement& placement);

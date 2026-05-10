@@ -72,7 +72,6 @@ std::vector<std::uint32_t> g_simFrame;
 D3DDisplayState g_d3d;
 RenderGraphStats g_renderGraphStats;
 CanonicalRuntimeState g_runtimeState;
-std::array<RuntimeSceneMesh, kSceneCount> g_sceneMeshes;
 std::array<SceneEmitterParams, kSceneCount> g_sceneEmitters;
 std::array<SceneInstance, kSceneCount> g_sceneInstances;
 HANDLE g_sharedViewportMap = nullptr;
@@ -103,9 +102,6 @@ int g_placementDragStartY = 0;
 float g_placementDragStartSourceX = 0.0f;
 float g_placementDragStartSourceY = 0.0f;
 float g_placementDragStartSourceZ = 0.0f;
-float g_placementDragStartMeshX = 0.0f;
-float g_placementDragStartMeshY = 0.0f;
-float g_placementDragStartMeshZ = 0.0f;
 float g_wind = 0.0f;
 float g_turbulence = 1.00f;
 float g_cameraYaw = 0.0f;
@@ -264,7 +260,7 @@ void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool c
 
 void refreshSceneInstance(int sceneId, LONG sceneEpoch) {
     const int scene = clampSceneId(sceneId);
-    g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene], g_sceneMeshes[scene].loaded);
+    g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene]);
 }
 
 const SceneInstance& activeSceneInstanceFor(int sceneId) {
@@ -935,16 +931,6 @@ Vec3 activeSourceWorldFromEmitters() {
     return sceneSourceWorld(g_sceneEmitters[scene], g_placement.scene(scene), scene);
 }
 
-Vec3 activeMeshCenterWorld() {
-    const int scene = clampSceneId(g_activeScene);
-    const RuntimeSceneMesh& mesh = g_sceneMeshes[scene];
-    const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
-    if (!mesh.loaded) {
-        return meshOffset;
-    }
-    return meshCenterWorld(mesh.minX, mesh.minY, mesh.minZ, mesh.maxX, mesh.maxY, mesh.maxZ, meshOffset);
-}
-
 Vec3 activePlacementWorld() {
     return activeSourceWorldFromEmitters();
 }
@@ -984,9 +970,6 @@ void beginPlacementDrag(int axis) {
     g_placementDragStartSourceX = placement.sourceOffset.x;
     g_placementDragStartSourceY = placement.sourceOffset.y;
     g_placementDragStartSourceZ = placement.sourceOffset.z;
-    g_placementDragStartMeshX = placement.meshOffset.x;
-    g_placementDragStartMeshY = placement.meshOffset.y;
-    g_placementDragStartMeshZ = placement.meshOffset.z;
     markPlacementChanged(false);
 }
 
@@ -1175,62 +1158,9 @@ bool compileShader(const char* source, const char* entry, const char* target, Co
     return true;
 }
 
-bool loadRuntimeSceneMesh(int sceneId, RuntimeSceneMesh& mesh) {
-    mesh = {};
-    SceneMeshCpuData loadedMesh;
-    std::string error;
-    if (!loadRuntimeSceneMeshCpuData(sceneId, loadedMesh, &error)) {
-        if (!error.empty()) {
-            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "%s for scene %d", error.c_str(), sceneId);
-        }
-        return false;
-    }
-    mesh.vertices = std::move(loadedMesh.vertices);
-    mesh.indices = std::move(loadedMesh.indices);
-    mesh.minX = loadedMesh.minX;
-    mesh.minY = loadedMesh.minY;
-    mesh.minZ = loadedMesh.minZ;
-    mesh.maxX = loadedMesh.maxX;
-    mesh.maxY = loadedMesh.maxY;
-    mesh.maxZ = loadedMesh.maxZ;
-    mesh.loaded = loadedMesh.loaded;
-    if (!mesh.loaded || mesh.vertices.empty() || mesh.indices.empty()) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "runtime mesh parse failed for scene %d", sceneId);
-        return false;
-    }
-    return true;
-}
-
-bool createMeshBuffers(RuntimeSceneMesh& mesh) {
-    if (!mesh.loaded || mesh.vertices.empty() || mesh.indices.empty()) {
-        return false;
-    }
-    D3D11_BUFFER_DESC vbDesc = {};
-    vbDesc.ByteWidth = static_cast<UINT>(mesh.vertices.size() * sizeof(MeshVertex));
-    vbDesc.Usage = D3D11_USAGE_DEFAULT;
-    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA vbData = {};
-    vbData.pSysMem = mesh.vertices.data();
-    if (FAILED(g_d3d.device->CreateBuffer(&vbDesc, &vbData, mesh.vertexBuffer.GetAddressOf()))) {
-        return false;
-    }
-    D3D11_BUFFER_DESC ibDesc = {};
-    ibDesc.ByteWidth = static_cast<UINT>(mesh.indices.size() * sizeof(std::uint32_t));
-    ibDesc.Usage = D3D11_USAGE_DEFAULT;
-    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA ibData = {};
-    ibData.pSysMem = mesh.indices.data();
-    if (FAILED(g_d3d.device->CreateBuffer(&ibDesc, &ibData, mesh.indexBuffer.GetAddressOf()))) {
-        mesh.vertexBuffer.Reset();
-        return false;
-    }
-    return true;
-}
-
-void loadRuntimeSceneMeshes() {
+void loadSceneEmitters() {
     for (int scene = 0; scene < kSceneCount; ++scene) {
         g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
-        g_sceneMeshes[scene] = {};
     }
 }
 
@@ -1241,19 +1171,6 @@ const char* d3dShaderSource() {
 struct VSOut {
     float4 pos : SV_POSITION;
     float2 uv : TEXCOORD0;
-};
-
-struct MeshVSIn {
-    float3 pos : POSITION;
-    float3 normal : NORMAL;
-    float3 color : COLOR0;
-};
-
-struct MeshVSOut {
-    float4 pos : SV_POSITION;
-    float3 worldPos : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float3 color : TEXCOORD2;
 };
 
 VSOut FullscreenVS(uint id : SV_VertexID) {
@@ -1274,15 +1191,6 @@ SamplerState LinearSampler : register(s0);
 cbuffer DisplayConstants : register(b0) {
     float Exposure;
     float3 _Padding;
-}
-
-cbuffer MeshConstants : register(b1) {
-    float4x4 MeshViewProj;
-    float4 MeshLightPos;
-    float4 MeshBaseColor;
-    float4 MeshFireColor;
-    float4 MeshFireParams;
-    float4 MeshOffset;
 }
 
 float Luma(float3 c) {
@@ -1318,36 +1226,6 @@ float4 SimPS(VSOut input) : SV_TARGET {
 
 float4 UiPS(VSOut input) : SV_TARGET {
     return FrameTex.Sample(LinearSampler, input.uv);
-}
-
-MeshVSOut MeshVS(MeshVSIn input) {
-    MeshVSOut outp;
-    float3 world = input.pos + MeshOffset.xyz;
-    float4 wp = float4(world, 1.0);
-    outp.pos = mul(wp, MeshViewProj);
-    outp.worldPos = world;
-    outp.normal = normalize(input.normal);
-    outp.color = saturate(input.color);
-    return outp;
-}
-
-float4 MeshPS(MeshVSOut input) : SV_TARGET {
-    float3 n = normalize(input.normal);
-    float3 l = normalize(MeshLightPos.xyz - input.worldPos);
-    float3 v = normalize(float3(0.0, 0.85, 2.4) - input.worldPos);
-    float ndl = saturate(dot(n, l));
-    float rim = pow(saturate(1.0 - dot(n, v)), 2.2);
-    float radial = length(input.worldPos.xz - MeshLightPos.xz);
-    float sourceRadius = max(MeshFireParams.x, 0.01);
-    float sourceFalloff = exp(-(radial * radial) / (sourceRadius * sourceRadius));
-    float lowSource = saturate(1.0 - input.worldPos.y * MeshFireParams.z);
-    float3 toFire = normalize(MeshLightPos.xyz - input.worldPos);
-    float fireFacing = saturate(dot(n, toFire));
-    float3 fireBounce = MeshFireColor.rgb * sourceFalloff * MeshFireParams.y * (0.46 + lowSource * 0.88 + fireFacing * 0.72);
-    float3 coolFill = float3(0.022, 0.026, 0.034) * (0.30 + rim * 0.62);
-    float3 material = max(input.color, MeshBaseColor.rgb);
-    float3 color = material * (0.075 + ndl * 0.34 + rim * 0.08) + fireBounce + coolFill;
-    return float4(color, 1.0);
 }
 )HLSL";
 }
@@ -1423,21 +1301,6 @@ bool initializeD3D(HWND hwnd) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D11 render target setup failed");
         return false;
     }
-    D3D11_TEXTURE2D_DESC meshDepthDesc = {};
-    meshDepthDesc.Width = kFrameWidth;
-    meshDepthDesc.Height = kFrameHeight;
-    meshDepthDesc.MipLevels = 1;
-    meshDepthDesc.ArraySize = 1;
-    meshDepthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    meshDepthDesc.SampleDesc.Count = 1;
-    meshDepthDesc.Usage = D3D11_USAGE_DEFAULT;
-    meshDepthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    hr = g_d3d.device->CreateTexture2D(&meshDepthDesc, nullptr, g_d3d.meshDepthTexture.GetAddressOf());
-    if (FAILED(hr) || FAILED(g_d3d.device->CreateDepthStencilView(g_d3d.meshDepthTexture.Get(), nullptr, g_d3d.meshDepthView.GetAddressOf()))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh depth buffer setup failed");
-        return false;
-    }
-
     D3D11_TEXTURE2D_DESC simDesc = {};
     simDesc.Width = kFrameWidth;
     simDesc.Height = kFrameHeight;
@@ -1482,37 +1345,17 @@ bool initializeD3D(HWND hwnd) {
     }
 
     ComPtr<ID3DBlob> vsBlob;
-    ComPtr<ID3DBlob> meshVsBlob;
     ComPtr<ID3DBlob> simPsBlob;
     ComPtr<ID3DBlob> uiPsBlob;
-    ComPtr<ID3DBlob> meshPsBlob;
     if (!compileShader(d3dShaderSource(), "FullscreenVS", "vs_5_0", vsBlob) ||
-        !compileShader(d3dShaderSource(), "MeshVS", "vs_5_0", meshVsBlob) ||
         !compileShader(d3dShaderSource(), "SimPS", "ps_5_0", simPsBlob) ||
-        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob) ||
-        !compileShader(d3dShaderSource(), "MeshPS", "ps_5_0", meshPsBlob)) {
+        !compileShader(d3dShaderSource(), "UiPS", "ps_5_0", uiPsBlob)) {
         return false;
     }
     if (FAILED(g_d3d.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, g_d3d.vertexShader.GetAddressOf())) ||
-        FAILED(g_d3d.device->CreateVertexShader(meshVsBlob->GetBufferPointer(), meshVsBlob->GetBufferSize(), nullptr, g_d3d.meshVertexShader.GetAddressOf())) ||
         FAILED(g_d3d.device->CreatePixelShader(simPsBlob->GetBufferPointer(), simPsBlob->GetBufferSize(), nullptr, g_d3d.simPixelShader.GetAddressOf())) ||
-        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf())) ||
-        FAILED(g_d3d.device->CreatePixelShader(meshPsBlob->GetBufferPointer(), meshPsBlob->GetBufferSize(), nullptr, g_d3d.meshPixelShader.GetAddressOf()))) {
+        FAILED(g_d3d.device->CreatePixelShader(uiPsBlob->GetBufferPointer(), uiPsBlob->GetBufferSize(), nullptr, g_d3d.uiPixelShader.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D shader creation failed");
-        return false;
-    }
-    const D3D11_INPUT_ELEMENT_DESC meshInput[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
-    };
-    if (FAILED(g_d3d.device->CreateInputLayout(
-            meshInput,
-            static_cast<UINT>(sizeof(meshInput) / sizeof(meshInput[0])),
-            meshVsBlob->GetBufferPointer(),
-            meshVsBlob->GetBufferSize(),
-            g_d3d.meshInputLayout.GetAddressOf()))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh input layout failed");
         return false;
     }
 
@@ -1522,14 +1365,6 @@ bool initializeD3D(HWND hwnd) {
     constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(g_d3d.device->CreateBuffer(&constantsDesc, nullptr, g_d3d.displayConstants.GetAddressOf()))) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D constants buffer failed");
-        return false;
-    }
-    D3D11_BUFFER_DESC meshConstantsDesc = {};
-    meshConstantsDesc.ByteWidth = sizeof(MeshConstants);
-    meshConstantsDesc.Usage = D3D11_USAGE_DEFAULT;
-    meshConstantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    if (FAILED(g_d3d.device->CreateBuffer(&meshConstantsDesc, nullptr, g_d3d.meshConstants.GetAddressOf()))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh constants buffer failed");
         return false;
     }
 
@@ -1546,23 +1381,6 @@ bool initializeD3D(HWND hwnd) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D alpha blend creation failed");
         return false;
     }
-    D3D11_DEPTH_STENCIL_DESC depthDesc = {};
-    depthDesc.DepthEnable = TRUE;
-    depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-    depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
-    if (FAILED(g_d3d.device->CreateDepthStencilState(&depthDesc, g_d3d.meshDepthState.GetAddressOf()))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh depth state failed");
-        return false;
-    }
-    D3D11_RASTERIZER_DESC rasterDesc = {};
-    rasterDesc.FillMode = D3D11_FILL_SOLID;
-    rasterDesc.CullMode = D3D11_CULL_BACK;
-    rasterDesc.DepthClipEnable = TRUE;
-    if (FAILED(g_d3d.device->CreateRasterizerState(&rasterDesc, g_d3d.meshRasterizerState.GetAddressOf()))) {
-        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D mesh rasterizer state failed");
-        return false;
-    }
-
     D3D11_QUERY_DESC queryDesc = {};
     queryDesc.Query = D3D11_QUERY_EVENT;
     if (FAILED(g_d3d.device->CreateQuery(&queryDesc, g_d3d.copyCompletionQuery.GetAddressOf()))) {
@@ -1571,7 +1389,7 @@ bool initializeD3D(HWND hwnd) {
     }
 
     g_d3d.initialized = true;
-    loadRuntimeSceneMeshes();
+    loadSceneEmitters();
     return true;
 }
 
@@ -1922,137 +1740,9 @@ void mulMat4(const float a[16], const float b[16], float out[16]) {
     std::memcpy(out, r, sizeof(r));
 }
 
-MeshConstants meshConstantsForScene(int sceneId, float exposure) {
-    MeshConstants constants = {};
-    const Vec3 target = {0.0f, 0.48f, 0.0f};
-    const float cp = std::cos(g_cameraPitch);
-    const Vec3 eye = {
-        std::sin(g_cameraYaw) * g_cameraDistance * cp,
-        target.y + std::sin(g_cameraPitch) * g_cameraDistance,
-        std::cos(g_cameraYaw) * g_cameraDistance * cp};
-    const Vec3 z = normalize3(sub3(eye, target));
-    const Vec3 x = normalize3(cross3({0.0f, 1.0f, 0.0f}, z));
-    const Vec3 y = cross3(z, x);
-    const float view[16] = {
-        x.x, y.x, z.x, 0.0f,
-        x.y, y.y, z.y, 0.0f,
-        x.z, y.z, z.z, 0.0f,
-        -dot3(x, eye), -dot3(y, eye), -dot3(z, eye), 1.0f};
-    const float fovY = 50.0f * 3.1415926535f / 180.0f;
-    const float aspect = static_cast<float>(kFrameWidth) / static_cast<float>(kFrameHeight);
-    const float f = 1.0f / std::tan(fovY * 0.5f);
-    const float zn = 0.03f;
-    const float zf = 18.0f;
-    const float proj[16] = {
-        f / aspect, 0.0f, 0.0f, 0.0f,
-        0.0f, f, 0.0f, 0.0f,
-        0.0f, 0.0f, zf / (zn - zf), -1.0f,
-        0.0f, 0.0f, (zn * zf) / (zn - zf), 0.0f};
-    mulMat4(view, proj, constants.viewProj);
-    const int scene = clampSceneId(sceneId);
-    const Vec3 sourceWorld = sceneSourceWorld(g_sceneEmitters[scene], g_placement.scene(scene), scene);
-    constants.lightPos[0] = sourceWorld.x;
-    constants.lightPos[1] = sourceWorld.y + 0.055f;
-    constants.lightPos[2] = sourceWorld.z;
-    constants.lightPos[3] = 1.0f;
-    if (scene == 1) {
-        constants.baseColor[0] = 0.052f * exposure;
-        constants.baseColor[1] = 0.030f * exposure;
-        constants.baseColor[2] = 0.017f * exposure;
-        constants.baseColor[3] = 0.70f;
-        constants.fireColor[0] = 1.18f * exposure;
-        constants.fireColor[1] = 0.42f * exposure;
-        constants.fireColor[2] = 0.070f * exposure;
-        constants.fireColor[3] = 1.0f;
-        constants.fireParams[0] = 0.62f;
-        constants.fireParams[1] = 0.18f;
-        constants.fireParams[2] = 4.0f;
-        constants.fireParams[3] = 1.0f;
-    } else if (scene == 2) {
-        constants.baseColor[0] = 0.055f * exposure;
-        constants.baseColor[1] = 0.058f * exposure;
-        constants.baseColor[2] = 0.066f * exposure;
-        constants.baseColor[3] = 0.96f;
-        constants.fireColor[0] = 0.085f * exposure;
-        constants.fireColor[1] = 0.34f * exposure;
-        constants.fireColor[2] = 1.36f * exposure;
-        constants.fireColor[3] = 1.0f;
-        constants.fireParams[0] = 0.34f;
-        constants.fireParams[1] = 0.42f;
-        constants.fireParams[2] = 7.2f;
-        constants.fireParams[3] = 0.72f;
-    } else if (scene == 3) {
-        constants.baseColor[0] = 0.018f * exposure;
-        constants.baseColor[1] = 0.019f * exposure;
-        constants.baseColor[2] = 0.020f * exposure;
-        constants.baseColor[3] = 0.82f;
-        constants.fireColor[0] = 1.20f * exposure;
-        constants.fireColor[1] = 0.45f * exposure;
-        constants.fireColor[2] = 0.085f * exposure;
-        constants.fireColor[3] = 1.0f;
-        constants.fireParams[0] = 0.44f;
-        constants.fireParams[1] = 0.20f;
-        constants.fireParams[2] = 5.4f;
-        constants.fireParams[3] = 0.0f;
-    } else {
-        constants.baseColor[0] = 0.020f * exposure;
-        constants.baseColor[1] = 0.022f * exposure;
-        constants.baseColor[2] = 0.024f * exposure;
-        constants.baseColor[3] = 0.88f;
-        constants.fireColor[0] = 1.05f * exposure;
-        constants.fireColor[1] = 0.36f * exposure;
-        constants.fireColor[2] = 0.060f * exposure;
-        constants.fireColor[3] = 1.0f;
-        constants.fireParams[0] = 0.54f;
-        constants.fireParams[1] = 0.24f;
-        constants.fireParams[2] = 5.0f;
-        constants.fireParams[3] = 0.0f;
-    }
-    const Vec3 meshOffset = g_placement.scene(scene).meshOffset;
-    constants.meshOffset[0] = meshOffset.x;
-    constants.meshOffset[1] = meshOffset.y;
-    constants.meshOffset[2] = meshOffset.z;
-    constants.meshOffset[3] = 0.0f;
-    return constants;
-}
-
-void renderRuntimeSceneMesh(float exposure) {
-    if (g_activeScene < 0 || g_activeScene >= kSceneCount) {
-        return;
-    }
-    RuntimeSceneMesh& mesh = g_sceneMeshes[g_activeScene];
-    if (!mesh.loaded || mesh.vertexBuffer == nullptr || mesh.indexBuffer == nullptr || mesh.indices.empty()) {
-        return;
-    }
-    MeshConstants constants = meshConstantsForScene(g_activeScene, exposure);
-    g_d3d.context->UpdateSubresource(g_d3d.meshConstants.Get(), 0, nullptr, &constants, 0, 0);
-    const UINT stride = sizeof(MeshVertex);
-    const UINT offset = 0;
-    ID3D11Buffer* vertexBuffers[] = {mesh.vertexBuffer.Get()};
-    ID3D11Buffer* constantBuffers[] = {g_d3d.meshConstants.Get()};
-    ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
-    g_d3d.context->OMSetRenderTargets(1, renderTargets, g_d3d.meshDepthView.Get());
-    g_d3d.context->ClearDepthStencilView(g_d3d.meshDepthView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
-    g_d3d.context->IASetInputLayout(g_d3d.meshInputLayout.Get());
-    g_d3d.context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
-    g_d3d.context->IASetIndexBuffer(mesh.indexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);
-    g_d3d.context->VSSetShader(g_d3d.meshVertexShader.Get(), nullptr, 0);
-    g_d3d.context->VSSetConstantBuffers(1, 1, constantBuffers);
-    g_d3d.context->PSSetShader(g_d3d.meshPixelShader.Get(), nullptr, 0);
-    g_d3d.context->PSSetConstantBuffers(1, 1, constantBuffers);
-    g_d3d.context->RSSetState(g_d3d.meshRasterizerState.Get());
-    g_d3d.context->OMSetDepthStencilState(g_d3d.meshDepthState.Get(), 0);
-    g_d3d.context->DrawIndexed(static_cast<UINT>(mesh.indices.size()), 0, 0);
-    g_d3d.context->OMSetRenderTargets(1, renderTargets, nullptr);
-    g_d3d.context->RSSetState(nullptr);
-    g_d3d.context->OMSetDepthStencilState(nullptr, 0);
-    g_d3d.context->IASetInputLayout(nullptr);
-}
-
 void beginD3DRenderGraphFrame() {
     ++g_renderGraphStats.frameIndex;
     g_renderGraphStats.lastFrameHadVolume = false;
-    g_renderGraphStats.lastFrameHadMesh = false;
     g_renderGraphStats.lastFrameHadUi = false;
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ID3D11RenderTargetView* renderTargets[] = {g_d3d.renderTargetView.Get()};
@@ -2100,12 +1790,6 @@ void bindD3DFullscreenPass() {
     g_d3d.context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
     g_d3d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_d3d.context->VSSetShader(g_d3d.vertexShader.Get(), nullptr, 0);
-}
-
-void renderD3DSceneMeshPass(float exposure) {
-    (void)exposure;
-    g_renderGraphStats.lastFrameHadMesh = false;
-    bindD3DFullscreenPass();
 }
 
 void renderD3DUiOverlayPass() {
@@ -4486,7 +4170,6 @@ int runValidation(const std::string& args) {
     json << "    \"sourceModel\": \"" << profile.sourceModel << "\",\n";
     json << "    \"fuelPhase\": \"" << profile.fuelPhase << "\",\n";
     json << "    \"flameEnvelope\": \"" << profile.flameEnvelope << "\",\n";
-    json << "    \"expectsImportedMesh\": " << (profile.expectsImportedMesh ? "true" : "false") << ",\n";
     json << "    \"expectsSelectedBurner\": " << (profile.expectsSelectedBurner ? "true" : "false") << "\n";
     json << "  },\n";
     json << "  \"datasetId\": \"" << jsonEscape(datasetId) << "\",\n";

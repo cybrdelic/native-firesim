@@ -31,14 +31,8 @@ constexpr SceneCudaCoefficients campfireCuda() {
     c.source.sourceHeightCeiling = 0.210f;
     c.source.charScale = 1.18f;
     c.source.sootScale = 0.54f;
-    c.source.initialHeatBase = 1.08f;
-    c.source.initialHeatNoise = 0.36f;
     c.source.initialFuelBase = 1.18f;
     c.source.initialFuelNoise = 0.34f;
-    c.source.initialPyrolysisBase = 0.064f;
-    c.source.initialPyrolysisNoise = 0.038f;
-    c.source.initialProgress = 0.27f;
-    c.source.initialTurbulence = 0.094f;
     c.combustion.pyrolysisGain = 1.42f;
     c.combustion.fuelGain = 1.22f;
     c.combustion.heatGain = 1.34f;
@@ -81,14 +75,7 @@ constexpr SceneCudaCoefficients burnerCuda() {
     c.source.sourceHeightCeiling = 0.0f;
     c.source.charScale = 0.0f;
     c.source.sootScale = 0.004f;
-    c.source.initialHeatBase = 3.20f;
     c.source.initialFuelBase = 2.40f;
-    c.source.initialSoot = 0.00065f;
-    c.source.initialAshScale = 0.0f;
-    c.source.initialPyrolysisBase = 0.12f;
-    c.source.initialProgress = 0.35f;
-    c.source.initialTurbulence = 0.050f;
-    c.source.initialSootOptics = 0.00050f;
     c.combustion.gasFeed = 1.80f;
     c.combustion.pyrolysisGain = 0.90f;
     c.combustion.fuelGain = 1.05f;
@@ -163,17 +150,8 @@ constexpr SceneCudaCoefficients methanolPoolCuda() {
     c.source.sourceHeightCeiling = 0.105f;
     c.source.charScale = 0.0f;
     c.source.sootScale = 0.16f;
-    c.source.initialHeatBase = 1.34f;
-    c.source.initialHeatNoise = 0.11f;
     c.source.initialFuelBase = 1.22f;
     c.source.initialFuelNoise = 0.08f;
-    c.source.initialSoot = 0.0022f;
-    c.source.initialAshScale = 0.0f;
-    c.source.initialPyrolysisBase = 0.050f;
-    c.source.initialPyrolysisNoise = 0.012f;
-    c.source.initialProgress = 0.20f;
-    c.source.initialTurbulence = 0.045f;
-    c.source.initialSootOptics = 0.0020f;
     c.combustion.gasFeed = 1.0f;
     c.combustion.pyrolysisGain = 0.82f;
     c.combustion.fuelGain = 1.12f;
@@ -232,7 +210,6 @@ constexpr SceneProfile sceneProfileValue(
     const char* sourceModel,
     const char* fuelPhase,
     const char* flameEnvelope,
-    bool expectsImportedMesh,
     bool expectsSelectedBurner,
     SceneCudaCoefficients cuda,
     SceneValidationEnvelope validation) {
@@ -242,7 +219,6 @@ constexpr SceneProfile sceneProfileValue(
     profile.sourceModel = sourceModel;
     profile.fuelPhase = fuelPhase;
     profile.flameEnvelope = flameEnvelope;
-    profile.expectsImportedMesh = expectsImportedMesh;
     profile.expectsSelectedBurner = expectsSelectedBurner;
     profile.cuda = cuda;
     profile.validation = validation;
@@ -250,10 +226,10 @@ constexpr SceneProfile sceneProfileValue(
 }
 
 constexpr SceneProfile kSceneProfiles[kSceneCount] = {
-    sceneProfileValue(0, "room", "tray-fuel-bed", "solid", "wide room tray flame with soot plume", false, false, {}, validationEnvelope(0.12f, 0.010f, 0.0f, 32, 1.25f, 8.0f, 10000000.0f, 10000000.0f)),
-    sceneProfileValue(1, "campfire", "log-contact-char-bed", "solid", "irregular separated warm tongues over fuel bed", false, false, campfireCuda(), validationEnvelope(0.12f, 0.010f, 0.0f, 16, 1.25f, 8.0f, 10000000.0f, 10000000.0f)),
-    sceneProfileValue(2, "burner", "selected-gas-burner-ring", "gas", "low tight blue-white port jets", false, true, burnerCuda(), validationEnvelope(0.12f, 0.006f, 1.0f, 0, 0.36f, 0.22f, 1.0f, 1.0f)),
-    sceneProfileValue(3, "methanol-pool", "nist-1m-liquid-pool", "liquid", "low-soot axisymmetric methanol pool flame", false, false, methanolPoolCuda(), validationEnvelope(0.10f, 0.006f, 1.0f, 0, 1.10f, 24.0f, 1.0f, 1.0f)),
+    sceneProfileValue(0, "room", "tray-fuel-bed", "solid", "wide room tray flame with soot plume", false, {}, validationEnvelope(0.12f, 0.010f, 0.0f, 32, 1.25f, 8.0f, 10000000.0f, 10000000.0f)),
+    sceneProfileValue(1, "campfire", "log-contact-char-bed", "solid", "irregular separated warm tongues over fuel bed", false, campfireCuda(), validationEnvelope(0.12f, 0.010f, 0.0f, 16, 1.25f, 8.0f, 10000000.0f, 10000000.0f)),
+    sceneProfileValue(2, "burner", "selected-gas-burner-ring", "gas", "low tight blue-white port jets", true, burnerCuda(), validationEnvelope(0.12f, 0.006f, 1.0f, 0, 0.36f, 0.22f, 1.0f, 1.0f)),
+    sceneProfileValue(3, "methanol-pool", "nist-1m-liquid-pool", "liquid", "low-soot axisymmetric methanol pool flame", false, methanolPoolCuda(), validationEnvelope(0.10f, 0.006f, 1.0f, 0, 1.10f, 24.0f, 1.0f, 1.0f)),
 };
 
 float selectedBurnerExitY(const SceneEmitterParams& emitter) {
@@ -292,14 +268,7 @@ Vec3 sceneSourceWorld(const SceneEmitterParams& emitter, const ScenePlacement& p
     return source;
 }
 
-Vec3 meshCenterWorld(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, Vec3 meshOffset) {
-    return {
-        (minX + maxX) * 0.5f + meshOffset.x,
-        (minY + maxY) * 0.5f + meshOffset.y,
-        (minZ + maxZ) * 0.5f + meshOffset.z};
-}
-
-SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitterParams& emitter, bool hasImportedMesh) {
+SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitterParams& emitter) {
     SceneInstance instance;
     instance.sceneId = clampSceneId(sceneId);
     instance.sceneEpoch = static_cast<int>(sceneEpoch);
@@ -309,7 +278,6 @@ SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitter
     instance.sourceZ = emitter.centerZ;
     instance.sourceRadius = emitter.radius;
     instance.sourceHeightBandMeters = emitter.heightBandNorm * 2.03f;
-    instance.hasImportedMesh = hasImportedMesh;
     instance.hasSelectedBurner = instance.sceneId == 2 && emitter.burnerCenterCount > 0;
     if (instance.hasSelectedBurner) {
         instance.sourceX = emitter.burnerCenterX[0];
@@ -336,17 +304,8 @@ void applySceneEmitterToSettings(FireSettings& settings, const SceneEmitterParam
     settings.sceneSourceHeightCeiling = source.sourceHeightCeiling;
     settings.sceneCharScale = source.charScale;
     settings.sceneSootScale = source.sootScale;
-    settings.sceneInitialHeatBase = source.initialHeatBase;
-    settings.sceneInitialHeatNoise = source.initialHeatNoise;
     settings.sceneInitialFuelBase = source.initialFuelBase;
     settings.sceneInitialFuelNoise = source.initialFuelNoise;
-    settings.sceneInitialSoot = source.initialSoot;
-    settings.sceneInitialAshScale = source.initialAshScale;
-    settings.sceneInitialPyrolysisBase = source.initialPyrolysisBase;
-    settings.sceneInitialPyrolysisNoise = source.initialPyrolysisNoise;
-    settings.sceneInitialProgress = source.initialProgress;
-    settings.sceneInitialTurbulence = source.initialTurbulence;
-    settings.sceneInitialSootOptics = source.initialSootOptics;
     settings.sceneGasFeed = combustion.gasFeed;
     settings.scenePyrolysisGain = combustion.pyrolysisGain;
     settings.sceneFuelGain = combustion.fuelGain;
