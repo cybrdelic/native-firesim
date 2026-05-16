@@ -2,7 +2,7 @@
 
 This folder separates target-image matching from real burn calibration.
 
-Use `reference-fire-room-envelope.csv` only as a visual proxy for the generated target image. It is not physical truth.
+Use `nist-fcd/methanol-1m-pool-r1/validation-targets.csv` for the active product scene. The old reference-fire-room envelope is legacy proxy material, not physical truth.
 
 Use `real-burn-calibration-template.csv` for measured burn data templates:
 

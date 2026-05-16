@@ -1,10 +1,12 @@
 param(
-    [ValidateSet("Benchmark", "NsightCompute", "ComputeSanitizer", "All")]
+    [ValidateSet("Benchmark", "SliceFinder", "NsightSystems", "NsightCompute", "ComputeSanitizer", "All")]
     [string]$Mode = "Benchmark",
     [string]$OutputDir = "out\cuda-profile",
     [int]$WarmupFrames = 8,
     [int]$BenchmarkFrames = 16,
-    [int]$SimEveryFrames = 30,
+    [int]$SimEveryFrames = 1,
+    [ValidateRange(0, 0)]
+    [int]$Scene = 0,
     [int]$LaunchSkip = 0,
     [int]$LaunchCount = 64,
     [ValidateSet("basic", "detailed", "full", "roofline")]
@@ -49,7 +51,8 @@ $simArgs = @(
     "--accept-bugcheck-risk",
     "--output-dir=$benchDir",
     "--warmup-frames=$WarmupFrames",
-    "--benchmark-frames=$BenchmarkFrames"
+    "--benchmark-frames=$BenchmarkFrames",
+    "--scene=$Scene"
 )
 if (-not $FullPhysics) {
     $simArgs += "--sim-every-frames=$SimEveryFrames"
@@ -61,6 +64,25 @@ $commands.Add("")
 $commands.Add("Generated: $(Get-Date -Format o)")
 $commands.Add("")
 
+if ($Mode -eq "SliceFinder" -or $Mode -eq "All") {
+    $sliceDir = Join-Path $profileRoot "slice-finder"
+    $sliceArgs = @(
+        "--cuda-slice-finder",
+        "--allow-gpu-kernels",
+        "--accept-bugcheck-risk",
+        "--output-dir=$sliceDir",
+        "--frames=3",
+        "--scene=$Scene"
+    )
+    Invoke-CheckedProcess -FilePath $exePath -Arguments $sliceArgs -Label "CUDA slice finder"
+    $commands.Add("## CUDA Slice Finder")
+    $commands.Add("")
+    $commands.Add('```powershell')
+    $commands.Add('& "' + $exePath + '" ' + ($sliceArgs -join ' '))
+    $commands.Add('```')
+    $commands.Add("")
+}
+
 if ($Mode -eq "Benchmark" -or $Mode -eq "All") {
     Invoke-CheckedProcess -FilePath $exePath -Arguments $simArgs -Label "worker benchmark"
     $benchmarkJson = Join-Path $benchDir "worker-benchmark.json"
@@ -68,6 +90,41 @@ if ($Mode -eq "Benchmark" -or $Mode -eq "All") {
     python (Join-Path $PSScriptRoot "summarize-gpu-timings.py") $benchmarkJson $summaryPath
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
+    }
+}
+
+if ($Mode -eq "NsightSystems" -or $Mode -eq "All") {
+    $nsys = Get-Command nsys.exe,nsys -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $nsys) {
+        throw "Nsight Systems CLI was not found on PATH. Install Nsight Systems or add nsys.exe to PATH."
+    }
+    $nsysOut = Join-Path $profileRoot "firesim-timeline"
+    $sliceDir = Join-Path $profileRoot "slice-finder-nsys"
+    $sliceArgs = @(
+        "--cuda-slice-finder",
+        "--allow-gpu-kernels",
+        "--accept-bugcheck-risk",
+        "--profiler-capture",
+        "--output-dir=$sliceDir",
+        "--frames=3",
+        "--scene=$Scene"
+    )
+    $nsysArgs = @(
+        "profile",
+        "--capture-range=cudaProfilerApi",
+        "--force-overwrite=true",
+        "--output=$nsysOut",
+        $exePath
+    ) + $sliceArgs
+    $commands.Add("## Nsight Systems")
+    $commands.Add("")
+    $commands.Add('```powershell')
+    $commands.Add('& "' + $nsys.Source + '" ' + ($nsysArgs -join ' '))
+    $commands.Add('```')
+    $commands.Add("")
+    & $nsys.Source @nsysArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "nsys failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -151,6 +208,8 @@ $commands.Add('& "' + $exePath + '" ' + ($simArgs -join ' '))
 $commands.Add('```')
 $commands.Add("")
 $commands.Add("- Benchmark JSON: $benchDir\worker-benchmark.json")
+$commands.Add("- Slice finder JSON: $profileRoot\slice-finder\slice-finder.json")
+$commands.Add("- Nsight Systems report: $profileRoot\firesim-timeline.nsys-rep")
 $commands.Add("- GPU timing summary: $profileRoot\gpu-timing-summary.md")
 $commands.Add("- Nsight Compute report: $profileRoot\firesim-speedoflight.ncu-rep")
 $commands.Add("- Compute Sanitizer log: $profileRoot\compute-sanitizer-memcheck.log")

@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 $realDatasetRoot = Join-Path $root "benchmarks\nist-fcd\methanol-1m-pool-r1"
 $allPathsDefaulted = [string]::IsNullOrWhiteSpace($GeometryPath) -and

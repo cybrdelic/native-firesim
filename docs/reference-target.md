@@ -17,12 +17,12 @@ The canonical runtime is built around that target:
 - ember samples: 176
 - darker soot extinction
 - stronger glossy floor reflection
-- target-room shading: tray, reflective dark floor, wall smoke, ceiling fixtures, left glass, vignette
+- NIST methanol product-scene shading: liquid pool, reflective floor response, smoke column, validation overlays
 
 Run only after the driver crash path is understood:
 
 ```powershell
-.\build\NativeFireSim.exe --validation --targets=benchmarks\reference-fire-room-envelope.csv --allow-gpu-kernels --accept-bugcheck-risk
+.\build\NativeFireSim.exe --validation --targets=benchmarks\nist-fcd\methanol-1m-pool-r1\validation-targets.csv --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
 The target envelope is an image/solver proxy. It is not a substitute for measured burn data such as HRR, mass loss, thermocouple probes, gas velocity, or IR.

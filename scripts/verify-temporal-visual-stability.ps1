@@ -1,20 +1,23 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$main = Read-RepoText "src/main.cpp"
 $analyzerPath = Join-Path $root "scripts/analyze_live_frame_trace.py"
 $analyzer = Get-Content $analyzerPath -Raw
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $main "FIRESIM_TRACE_FRAMES" "live frame tracing must stay available for stutter capture"
 Require-Text $main "out\\live-frame-trace.csv" "live frame trace output path is missing"
-Require-Text $main "constexpr int kWorkerPhysicsFrameInterval = 1" "CUDA worker must advance physics every published frame"
+Require-Text $main "constexpr unsigned long long kWorkerFrameStaleMs = 650ull" "displayed CUDA frame freshness budget must tolerate the measured fresh-frame cadence without false stale labels"
+Require-Text $main "input.workerFrameStaleMs = kWorkerFrameDisplayHoldMs" "health labels must use the retained-display budget to avoid false stale overlays"
+Require-Text $main "kWorkerFrameDisplayHoldMs" "display path must retain the last good CUDA texture through short copy gaps"
+Require-Text $main "g_lastCopiedWorkerFrameTickMs" "fire freshness must be based on the last copied display frame, not only worker publication"
+Require-Text $main "constexpr int kWorkerPhysicsFrameInterval = 1" "CUDA worker physics cadence must match the current measured-renderer tuning"
+Require-Text $main "framesSincePhysics >= kWorkerPhysicsFrameInterval" "worker physics cadence must be explicit and bounded"
 Require-Text $main "reusedDisplayFrame" "trace must include display-frame reuse"
+Require-Text $main "retainedCudaFrame" "main loop must not clear the CUDA display texture on a single copy miss"
+Require-Text $main "workerFrameDisplayHoldMs=" "diagnostics must report the CUDA display hold budget"
 Require-Text $main "workerFrameUs,workerCudaUs,workerPublishUs" "trace must include worker timing columns"
 Require-Text $analyzer "presentation misses have periodic every-N-frame pattern" "periodic skip detector is missing"
 Require-Text $analyzer "worker physics cadence is below published frame cadence" "physics cadence detector is missing"

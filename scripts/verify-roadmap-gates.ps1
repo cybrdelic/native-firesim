@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
@@ -31,6 +32,10 @@ try {
     }
 
     Write-Host "roadmap gate: render architecture"
+    & (Join-Path $PSScriptRoot "verify-render-contract-boundaries.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
     & (Join-Path $PSScriptRoot "verify-render-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
@@ -55,11 +60,6 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-    & (Join-Path $PSScriptRoot "verify-flame-sheet-breakup.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-
     Write-Host "roadmap gate: lighting architecture"
     & (Join-Path $PSScriptRoot "verify-lighting-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
@@ -69,15 +69,21 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    & (Join-Path $PSScriptRoot "verify-engine-contracts.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Write-Host "roadmap gate: scene source models"
     & (Join-Path $PSScriptRoot "verify-scene-source-models.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-
-    Write-Host "roadmap gate: room source coverage"
-    & (Join-Path $PSScriptRoot "verify-room-source-coverage.ps1")
+    & (Join-Path $PSScriptRoot "verify-scene-profile-contract.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    & (Join-Path $PSScriptRoot "verify-methanol-physical-contract.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -118,6 +124,12 @@ try {
         exit $LASTEXITCODE
     }
 
+    Write-Host "roadmap gate: cuda prevention contract"
+    & (Join-Path $PSScriptRoot "verify-cuda-prevention-contract.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Write-Host "roadmap gate: imported scene assets"
     & (Join-Path $PSScriptRoot "verify-scene-assets.ps1")
     if ($LASTEXITCODE -ne 0) {
@@ -130,10 +142,6 @@ try {
         exit $LASTEXITCODE
     }
     & (Join-Path $PSScriptRoot "verify-before-after-pixel-proof.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-    & (Join-Path $PSScriptRoot "verify-scene-silhouette-targets.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

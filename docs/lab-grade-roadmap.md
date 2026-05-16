@@ -10,7 +10,7 @@ The credible reference model is the NIST FDS project shape:
 - The FDS manual set is split into user guide, technical reference, verification guide, validation guide, and configuration-management plan: https://pages.nist.gov/fds/manuals.html
 - The public FDS repository keeps `Verification` and `Validation` trees next to source and manuals: https://github.com/firemodels/fds
 - NIST's fire-model V&V process emphasizes model uncertainty plus transparent QA for open-source fire code: https://www.nist.gov/publications/verification-and-validation-process-fire-model
-- NIST's Fire Calorimetry Database contains measured NFRL fire experiments with calorimetry over 50 kW to 20000 kW, including controlled burners, well-characterized fuels, rooms, and real composite fuels: https://www.nist.gov/el/fcd
+- NIST's Fire Calorimetry Database contains measured NFRL fire experiments with calorimetry over 50 kW to 20000 kW; the active target remains the methanol liquid-pool record until the main scene is solid: https://www.nist.gov/el/fcd
 - NRC NUREG-1824 is the regulatory-grade example for reporting ranges of accuracy for fire models, using test data and ASTM-style model evaluation: https://www.nrc.gov/reading-rm/doc-collections/nuregs/staff/sr1824/s1/index
 - ASTM E1355 says fire-model evaluation is for a specific use; validation in one scenario does not transfer automatically to another: https://store.astm.org/e1355-23.html
 - ASME V&V 20 frames CFD/heat-transfer validation as comparison of solution and data while accounting for uncertainty in both: https://www.asme.org/codes-standards/find-codes-standards/standard-for-verification-and-validation-in-computational-fluid-dynamics-and-heat-transfer
@@ -30,7 +30,7 @@ For this project, lab-grade means:
 
 ## First Validation Ladder
 
-1. Controlled burner with prescribed HRR.
+1. Methanol pool with prescribed HRR and mass-loss envelope.
    - Goal: decouple gas plume/render validation from solid-fuel pyrolysis.
    - Required channels: HRR curve, room geometry, camera calibration, thermocouple tree, plume height video.
    - Expected result: match plume height, temperature trend, smoke transport, and visual silhouette without tuning fuel chemistry.
@@ -103,4 +103,4 @@ For this project, lab-grade means:
 
 ## Next Dataset Move
 
-The first import target is complete: NIST FCD `Methanol_1m_Pool_R1`. The next dataset should add the missing image-space and sensor channels: controlled-burner or methanol-pool records with thermocouple trees, calibrated IR frames, or extractable plume-height video sidecars.
+The first import target is complete: NIST FCD `Methanol_1m_Pool_R1`. The next validation input should deepen that same methanol scene with thermocouple trees, calibrated IR frames, or extractable plume-height video sidecars before any new runtime scene is added.
