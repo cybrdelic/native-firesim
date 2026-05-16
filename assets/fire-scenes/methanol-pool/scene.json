@@ -5,6 +5,7 @@
   "sourceDataset": "benchmarks/nist-fcd/methanol-1m-pool-r1/manifest.json",
   "emitter": {
     "type": "liquid-pool-source",
+    "emitterSourcePolicy": "authored",
     "centerMeters": [
       0.0,
       0.025,
@@ -12,6 +13,33 @@
     ],
     "radiusMeters": 0.5,
     "heightBandMeters": 0.09
+  },
+  "volumeBounds": {
+    "minMeters": [
+      -1.0,
+      0.0,
+      -1.0
+    ],
+    "maxMeters": [
+      1.0,
+      2.9,
+      1.0
+    ]
+  },
+  "lighting": {
+    "mode": "low-soot-liquid-pool-radiance",
+    "temperatureKelvin": 1900,
+    "exposureBias": 0.9
+  },
+  "material": {
+    "fuelClass": "methanol-liquid-pool",
+    "sootBias": 0.16,
+    "emberBias": 0.05
+  },
+  "expectedBehavior": {
+    "description": "Low-soot axisymmetric methanol pool flame for NIST FCD validation.",
+    "mustShowFire": true,
+    "mustAvoidBlackFrame": true
   },
   "calibration": {
     "fuel": "methanol",

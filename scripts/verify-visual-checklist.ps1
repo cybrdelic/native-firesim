@@ -1,18 +1,13 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "verify-helpers.ps1")
-$root = Split-Path -Parent $PSScriptRoot
-$audit = Read-RepoText "scripts/scene_visual_audit.py"
-Require-Text $audit "validation-app-frame.bmp" "visual audit must inspect app-frame captures"
-Require-Text $audit "app_metrics" "visual audit app metrics are missing"
-Require-Text $audit "uiTopMean" "UI top bar metric is missing"
-Require-Text $audit "uiLeftMean" "UI left tools metric is missing"
-Require-Text $audit "uiRightMean" "UI right panel metric is missing"
-Require-Text $audit "uiBottomMean" "UI bottom bar metric is missing"
-Require-Text $audit "gridArtifactScore" "grid artifact score is missing"
-Require-Text $audit "warmSmokeFraction" "warm smoke score is missing"
-Require-Text $audit "app frame is missing expected UI chrome" "missing UI issue is missing"
-Require-Text $audit "fire source or scene content may be missing" "missing fire-source/scene issue is missing"
-Require-Text $audit "excessive grid/line artifact score" "grid artifact issue is missing"
-Require-Text $audit "excessive warm/sepia smoke pixels" "warm smoke issue is missing"
+$main = Read-RepoText "src/main.cpp"
+$cuda = Read-RepoText "src/fire_cuda.cu"
+
+Require-Text $main "validation-app-frame.bmp" "validation must still write app-frame captures"
+Require-Text $main "imageWarmFireFraction" "validation image statistics must include warm fire fraction"
+Require-Text $main "imageBlackSmokeFraction" "validation image statistics must include black smoke fraction"
+Require-Text $main "sceneTruthContract" "validation JSON must report the methanol truth contract"
+Require-Text $cuda "kNistMethanolMaxSmokeOpticalDepth" "methanol smoke cap must remain active"
+
 Write-Host "visual checklist gate ok"

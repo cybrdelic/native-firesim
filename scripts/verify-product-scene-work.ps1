@@ -16,17 +16,14 @@ if (-not $SkipCapture -and $effectiveFrames -lt 24) {
 }
 
 $scenes = @(
-    @{ Name = "room"; Id = 0; MinMaxLuma = 0.08; MinMeanLuma = 0.010 },
-    @{ Name = "campfire"; Id = 1; MinMaxLuma = 0.08; MinMeanLuma = 0.010 },
-    @{ Name = "burner"; Id = 2; MinMaxLuma = 0.035; MinMeanLuma = 0.006 },
-    @{ Name = "methanol-pool"; Id = 3; MinMaxLuma = 0.06; MinMeanLuma = 0.006 }
+    @{ Name = "methanol-pool"; Id = 0; MinMaxLuma = 0.06; MinMeanLuma = 0.006 }
 )
 
 if (-not (Test-Path -LiteralPath $exe)) {
     throw "NativeFireSim.exe was not found at $exe. Run .\scripts\verify.ps1 -DiagnosticsOnly first."
 }
 
-if ($SkipCapture -and -not (Test-Path -LiteralPath (Join-Path $outRoot "room\validation-report.json"))) {
+if ($SkipCapture -and -not (Test-Path -LiteralPath (Join-Path $outRoot "methanol-pool\validation-report.json"))) {
     $outRoot = Join-Path $root "out\scene-visual-audit"
 }
 
@@ -34,12 +31,12 @@ New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
 
 if (-not $SkipCapture) {
     if (-not $AcceptBugcheckRisk) {
-        throw "All-scene runtime validation launches CUDA kernels. Re-run with -AcceptBugcheckRisk when intentionally testing the live scene path."
+        throw "Product-scene runtime validation launches CUDA kernels. Re-run with -AcceptBugcheckRisk when intentionally testing the live scene path."
     }
     foreach ($scene in $scenes) {
         $outDir = Join-Path $outRoot $scene.Name
         New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-        Write-Host "validating scene $($scene.Name)"
+        Write-Host "validating product scene $($scene.Name)"
         $arguments = @(
             "--validation",
             "--scene=$($scene.Id)",
@@ -50,13 +47,13 @@ if (-not $SkipCapture) {
         )
         $process = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -Wait -PassThru
         if ($process.ExitCode -ne 0) {
-            throw "scene $($scene.Name) failed validation run with exit code $($process.ExitCode)"
+            throw "product scene $($scene.Name) failed validation run with exit code $($process.ExitCode)"
         }
     }
 }
 
 $summary = [ordered]@{
-    allScenesWork = $true
+    productSceneWork = $true
     requestedFrames = $Frames
     frames = $effectiveFrames
     outputDir = $outRoot
@@ -72,7 +69,7 @@ foreach ($scene in $scenes) {
 
     foreach ($required in @($reportPath, $rawPath, $appPath, $metricsPath)) {
         if (-not (Test-Path -LiteralPath $required)) {
-            throw "scene $($scene.Name) did not produce required artifact: $required"
+            throw "product scene $($scene.Name) did not produce required artifact: $required"
         }
     }
 
@@ -80,19 +77,19 @@ foreach ($scene in $scenes) {
     $rawSize = (Get-Item -LiteralPath $rawPath).Length
     $appSize = (Get-Item -LiteralPath $appPath).Length
     if ($report.validationOk -ne $true) {
-        throw "scene $($scene.Name) produced validationOk=false"
+        throw "product scene $($scene.Name) produced validationOk=false"
     }
     if (-not $SkipCapture -and [int]$report.frames -lt $effectiveFrames) {
-        throw "scene $($scene.Name) reported fewer frames than requested"
+        throw "product scene $($scene.Name) reported fewer frames than requested"
     }
     if ([double]$report.imageMaxLuma -lt [double]$scene.MinMaxLuma) {
-        throw "scene $($scene.Name) appears too dark or black: imageMaxLuma=$($report.imageMaxLuma)"
+        throw "product scene $($scene.Name) appears too dark or black: imageMaxLuma=$($report.imageMaxLuma)"
     }
     if ([double]$report.imageMeanLuma -lt [double]$scene.MinMeanLuma) {
-        throw "scene $($scene.Name) has near-zero visibility: imageMeanLuma=$($report.imageMeanLuma)"
+        throw "product scene $($scene.Name) has near-zero visibility: imageMeanLuma=$($report.imageMeanLuma)"
     }
     if ($rawSize -lt 1024 -or $appSize -lt 1024) {
-        throw "scene $($scene.Name) produced suspiciously small frame output"
+        throw "product scene $($scene.Name) produced suspiciously small frame output"
     }
 
     $summary.scenes += [ordered]@{
@@ -109,6 +106,6 @@ foreach ($scene in $scenes) {
     }
 }
 
-$summaryPath = Join-Path $outRoot "all-scenes-work.json"
+$summaryPath = Join-Path $outRoot "product-scene-work.json"
 $summary | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath $summaryPath
-Write-Host "all scenes work gate ok: $summaryPath"
+Write-Host "product scene work gate ok: $summaryPath"

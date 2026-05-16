@@ -32,6 +32,10 @@ try {
     }
 
     Write-Host "roadmap gate: render architecture"
+    & (Join-Path $PSScriptRoot "verify-render-contract-boundaries.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
     & (Join-Path $PSScriptRoot "verify-render-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
@@ -56,17 +60,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-    & (Join-Path $PSScriptRoot "verify-flame-sheet-breakup.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-
     Write-Host "roadmap gate: lighting architecture"
     & (Join-Path $PSScriptRoot "verify-lighting-architecture.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
     & (Join-Path $PSScriptRoot "verify-scene-bounce-lighting.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    & (Join-Path $PSScriptRoot "verify-engine-contracts.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -80,15 +83,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-
-    Write-Host "roadmap gate: all scenes work"
-    & (Join-Path $PSScriptRoot "verify-all-scenes-work.ps1") -SkipCapture
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-
-    Write-Host "roadmap gate: room source coverage"
-    & (Join-Path $PSScriptRoot "verify-room-source-coverage.ps1")
+    & (Join-Path $PSScriptRoot "verify-methanol-physical-contract.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

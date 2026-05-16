@@ -13,6 +13,18 @@ struct FireCudaDiagnostics {
     std::uint64_t freeGlobalMem = 0;
     std::uint64_t allocatedBytes = 0;
     std::uint64_t stagingBytes = 0;
+    int sparseBrickX = 0;
+    int sparseBrickY = 0;
+    int sparseBrickZ = 0;
+    int sparseBrickCount = 0;
+    int sparseActiveBrickCount = 0;
+    float sparseActiveBrickFraction = 0.0f;
+    float sparseMaxBrickEmission = 0.0f;
+    float sparseMaxBrickExtinction = 0.0f;
+    int sparseRaymarchMaxEmptyStride = 0;
+    int sparseRaymarchMediumEmptyStride = 0;
+    float sparseRaymarchActiveThreshold = 0.0f;
+    float sparseRaymarchFineThreshold = 0.0f;
     int volumeSliceDepth = 0;
     int renderSliceRows = 0;
     char deviceName[128] = {};
@@ -73,6 +85,15 @@ struct FireCudaFrameMetrics {
     float divergenceAfterL2 = 0.0f;
     float divergenceAfterMax = 0.0f;
     float divergenceReduction = 0.0f;
+    int sparseBrickCount = 0;
+    int sparseActiveBrickCount = 0;
+    float sparseActiveBrickFraction = 0.0f;
+    float sparseMaxBrickEmission = 0.0f;
+    float sparseMaxBrickExtinction = 0.0f;
+    int sparseRaymarchMaxEmptyStride = 0;
+    int sparseRaymarchMediumEmptyStride = 0;
+    float sparseRaymarchActiveThreshold = 0.0f;
+    float sparseRaymarchFineThreshold = 0.0f;
 };
 
 struct FireSettings {
@@ -96,10 +117,16 @@ struct FireSettings {
     float cameraYaw = 0.0f;
     float cameraPitch = 0.18f;
     float cameraDistance = 3.35f;
+    float cameraTargetX = 0.0f;
+    float cameraTargetY = 0.72f;
+    float cameraTargetZ = 0.0f;
+    float cameraFovYDegrees = 50.0f;
     int cinematicMode = 0;
     int raymarchSteps = 56;
     int emberCount = 96;
     int renderDebugMode = 0;
+    int plumeTestMode = 0;
+    int simPaused = 0;
     float exposure = 1.0f;
     float reflectionGain = 1.0f;
     float smokeDarkness = 1.0f;
@@ -125,6 +152,12 @@ struct FireSettings {
     float scenePyrolysisFuelScale = 3.70f;
     float scenePyrolysisSootScale = 1.0f;
     float sceneSootYieldScale = 1.0f;
+    float sceneStoichOxygenFuelMassRatio = 1.0f;
+    float sceneHeatOfCombustionProxy = 7.0f;
+    float sceneRadiativeFraction = 0.30f;
+    float sceneTargetMassBurnRateGps = 0.0f;
+    float sceneMeasuredSootYield = 0.020f;
+    float sceneAmbientTemperatureK = 293.0f;
     float sceneCurlScale = 1.0f;
     float sceneBuoyancyScale = 1.0f;
     float sceneBuoyancyCeiling = 0.96f;
@@ -146,9 +179,6 @@ struct FireSettings {
     float sceneWarmScatter = 0.30f;
     float sceneSmokeScale = 1.0f;
     float sceneSourcePlaneMode = 0.0f;
-    float sceneBurnerJetScale = 0.0f;
-    float sceneCampTongueScale = 0.0f;
-    float sceneRoomTrayScale = 1.0f;
     float sceneConvectiveHeightTop = 0.88f;
     float sceneConvectiveHeightBottom = 0.030f;
     float sceneFlameHeightTop = 0.76f;
@@ -158,8 +188,6 @@ struct FireSettings {
     float sceneRoomCoverageScale = 1.24f;
     float sceneTopDissolveTop = 0.88f;
     float sceneTopDissolveBottom = 0.42f;
-    float sceneCampHoleScale = 0.0f;
-    float sceneCampTongueDensityScale = 0.0f;
     float sceneBlueEmissionScale = 0.0f;
     float sceneBlueJetEmissionScale = 0.0f;
     float sceneFlameColorR = 1.32f;
@@ -189,10 +217,6 @@ struct FireSettings {
     float sceneEmberCoolG = 0.026f;
     float sceneEmberCoolB = 0.008f;
     float sceneEmberAlphaScale = 0.82f;
-    int burnerCenterCount = 0;
-    float burnerCenterX[4] = {};
-    float burnerCenterY[4] = {};
-    float burnerCenterZ[4] = {};
 };
 
 bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int gridHeight);

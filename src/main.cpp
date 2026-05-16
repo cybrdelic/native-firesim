@@ -26,7 +26,12 @@
 
 #include "d3d_render_types.h"
 #include "fire_cuda.h"
+#include "firesim_render_contract.h"
+#include "firesim_ui_adapter.h"
+#include "render_debug_modes.h"
+#include "runtime_health.h"
 #include "runtime_state.h"
+#include "runtime_quality.h"
 #include "scene_assets.h"
 #include "scene_runtime.h"
 #include "shared_viewport.h"
@@ -38,19 +43,6 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr int kSimulationGridWidth = 384;
-constexpr int kSimulationGridHeight = 240;
-constexpr int kRaymarchSteps = 104;
-constexpr int kEmberCount = 64;
-constexpr float kExposure = 0.84f;
-constexpr float kReflectionGain = 0.54f;
-constexpr float kSmokeDarkness = 1.26f;
-constexpr float kFireIntensity = 1.42f;
-constexpr float kSmokeGain = 0.96f;
-constexpr float kTurbulence = 1.34f;
-constexpr double kAppPumpFps = 360.0;
-constexpr float kWorkerMaxPublishFps = 180.0f;
-constexpr double kDisplayMaxPresentFps = 180.0;
 constexpr float kTargetFrameSeconds = static_cast<float>(1.0 / kAppPumpFps);
 static_assert(static_cast<int>(kAppPumpFps) == static_cast<int>(kDisplayMaxPresentFps) * 2, "display pacing expects a 2:1 app pump to present cadence");
 constexpr unsigned long long kWorkerStatusUiUpdateMs = 250ull;
@@ -58,14 +50,13 @@ constexpr DXGI_FORMAT kSceneRadianceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr const char* kRenderGraphPasses = "clear,volume-hdr-camera,ui-overlay,present";
 constexpr const char* kHdrCameraPipeline =
     "CUDA float4 scene radiance -> FP16 D3D texture -> single ACES camera response -> FP16 swapchain -> UI overlay";
-constexpr unsigned long long kWorkerFrameStaleMs = 40ull;
-constexpr unsigned long long kWorkerFrameDisplayHoldMs = 250ull;
+constexpr unsigned long long kWorkerFrameStaleMs = 650ull;
+constexpr unsigned long long kWorkerFrameDisplayHoldMs = 2200ull;
 constexpr unsigned long long kWorkerHeartbeatStaleMs = 3400ull;
 constexpr unsigned long long kWorkerKillStaleMs = 7200ull;
 constexpr unsigned long long kWorkerRestartWindowMs = 60000ull;
 constexpr int kWorkerRestartLimit = 3;
 constexpr int kWorkerPhysicsFrameInterval = 1;
-constexpr int kInteractiveSceneCount = 3;
 HWND g_window = nullptr;
 std::vector<std::uint32_t> g_frame;
 std::vector<std::uint32_t> g_simFrame;
@@ -103,15 +94,23 @@ float g_placementDragStartSourceX = 0.0f;
 float g_placementDragStartSourceY = 0.0f;
 float g_placementDragStartSourceZ = 0.0f;
 float g_wind = 0.0f;
-float g_turbulence = 1.00f;
+float g_turbulence = 0.72f;
 float g_cameraYaw = 0.0f;
 float g_cameraPitch = 0.08f;
 float g_cameraDistance = 2.62f;
+float g_cameraTargetX = 0.0f;
+float g_cameraTargetY = 0.72f;
+float g_cameraTargetZ = 0.0f;
+float g_cameraFovYDegrees = 50.0f;
 float g_displayExposure = kExposure;
 int g_activeGizmo = 1;
-int g_activeScene = 0;
+int g_activeScene = kProductSceneId;
+bool g_focusSceneMode = true;
+int g_focusSceneId = kProductSceneId;
 LONG g_sceneEpoch = 1;
 int g_renderDebugMode = 0;
+bool g_plumeTestMode = false;
+bool g_simPaused = false;
 int g_clientW = kFrameWidth;
 int g_clientH = kFrameHeight;
 bool g_cudaWorkerRequested = false;
@@ -120,6 +119,10 @@ LONG g_lastCopiedWorkerSequence = 0;
 bool g_interactiveGpuKernelLaunchAllowed = false;
 bool g_cudaWorkerBlockedBySafetyGate = false;
 bool g_cudaPreflightPassed = false;
+bool g_cudaWorkerPausedForPower = false;
+bool g_powerTransitionActive = false;
+bool g_d3dDeviceLost = false;
+HRESULT g_lastPresentFailure = S_OK;
 unsigned long long g_lastCopiedWorkerFrameTickMs = 0;
 float g_visualFps = 0.0f;
 unsigned long long g_lastWorkerStartTickMs = 0;
@@ -170,18 +173,13 @@ bool startCudaWorker(bool countAgainstRestartLimit = true);
 bool initializeSharedViewport(bool reset);
 void closeSharedViewport();
 void toggleInteractiveCudaWorker();
+void pauseCudaWorkerForPowerTransition(const char* reason);
+void resumeCudaWorkerAfterPowerTransition(const char* reason);
 const char* placementTargetName();
 bool projectWorldToViewport(Vec3 world, int& sx, int& sy, float& depth);
 Vec3 activePlacementWorld();
 
 bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
-    bool burnerCentersSame = a.burnerCenterCount == b.burnerCenterCount;
-    for (int i = 0; i < 4; ++i) {
-        burnerCentersSame = burnerCentersSame &&
-            a.burnerCenterX[i] == b.burnerCenterX[i] &&
-            a.burnerCenterY[i] == b.burnerCenterY[i] &&
-            a.burnerCenterZ[i] == b.burnerCenterZ[i];
-    }
     return a.width == b.width &&
         a.height == b.height &&
         a.mouseX == b.mouseX &&
@@ -201,10 +199,16 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         a.cameraYaw == b.cameraYaw &&
         a.cameraPitch == b.cameraPitch &&
         a.cameraDistance == b.cameraDistance &&
+        a.cameraTargetX == b.cameraTargetX &&
+        a.cameraTargetY == b.cameraTargetY &&
+        a.cameraTargetZ == b.cameraTargetZ &&
+        a.cameraFovYDegrees == b.cameraFovYDegrees &&
         a.cinematicMode == b.cinematicMode &&
         a.raymarchSteps == b.raymarchSteps &&
         a.emberCount == b.emberCount &&
         a.renderDebugMode == b.renderDebugMode &&
+        a.plumeTestMode == b.plumeTestMode &&
+        a.simPaused == b.simPaused &&
         a.exposure == b.exposure &&
         a.reflectionGain == b.reflectionGain &&
         a.smokeDarkness == b.smokeDarkness &&
@@ -212,35 +216,35 @@ bool sameFireSettings(const FireSettings& a, const FireSettings& b) {
         a.emitterCenterZ == b.emitterCenterZ &&
         a.emitterHeightNorm == b.emitterHeightNorm &&
         a.emitterHeightBandNorm == b.emitterHeightBandNorm &&
-        a.emitterRadius == b.emitterRadius &&
-        burnerCentersSame;
+        a.emitterRadius == b.emitterRadius;
+}
+
+FrameHealthInput currentFrameHealthInput() {
+    FrameHealthInput input;
+    input.cudaWorkerBlockedBySafetyGate = g_cudaWorkerBlockedBySafetyGate;
+    input.cudaWorkerRequested = g_cudaWorkerRequested && g_sharedViewport != nullptr;
+    input.cudaWorkerFrameLive = g_cudaWorkerFrameLive;
+    input.workerStatus = g_sharedViewport == nullptr ? 0 : g_sharedViewport->workerStatus;
+    input.liveCopiedHz = g_liveCopiedHz;
+    input.workerPublishedHz = g_workerPublishedHz;
+    input.workerPhysicsHz = g_workerPhysicsHz;
+    input.displayFrameAgeMs = g_displayFrameAgeMs;
+    input.workerFrameStaleMs = kWorkerFrameDisplayHoldMs;
+    input.sharedRingCopyStarvationFrames = g_sharedRingCopyStarvationFrames;
+    input.sharedRingAcquireTimeouts = g_sharedRingAcquireTimeouts;
+    return input;
 }
 
 const char* fireStreamHealthLabel() {
-    if (!g_cudaWorkerRequested || g_sharedViewport == nullptr) {
-        return "fire-stream disabled";
-    }
-    if (g_sharedViewport->workerStatus < 0) {
-        return "fire-stream worker error";
-    }
-    if (g_displayFrameAgeMs > kWorkerFrameStaleMs ||
-        g_sharedRingCopyStarvationFrames > 0 ||
-        g_sharedRingNoCandidateFrames > 12) {
-        return "fire-stream stale";
-    }
-    if (g_workerPhysicsHz > 1.0 && g_liveCopiedHz > 1.0 && g_liveCopiedHz < g_workerPhysicsHz * 0.45) {
-        return "fire-stream copy lag";
-    }
-    if (g_sharedRingAcquireTimeouts > 12) {
-        return "fire-stream ring pressure";
-    }
-    return "fire-stream healthy";
+    return classifyFireStreamHealthLabel(currentFrameHealthInput());
 }
 
 bool fireStreamNeedsOperatorWarning() {
-    const char* health = fireStreamHealthLabel();
-    return std::strcmp(health, "fire-stream healthy") != 0 &&
-           std::strcmp(health, "fire-stream disabled") != 0;
+    return fireStreamHealthNeedsOperatorWarning(fireStreamHealthLabel());
+}
+
+const char* frameHealthStateName() {
+    return classifyFrameHealthState(currentFrameHealthInput());
 }
 
 bool overlayStateDirty(const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
@@ -259,26 +263,79 @@ void rememberOverlayState(const FireSettings& settings, bool cudaBackend, bool c
 }
 
 void refreshSceneInstance(int sceneId, LONG sceneEpoch) {
-    const int scene = clampSceneId(sceneId);
+    (void)sceneId;
+    const int scene = kProductSceneId;
     g_sceneInstances[scene] = makeSceneInstance(scene, sceneEpoch, g_sceneEmitters[scene]);
 }
 
 const SceneInstance& activeSceneInstanceFor(int sceneId) {
-    const int scene = clampSceneId(sceneId);
+    (void)sceneId;
+    const int scene = kProductSceneId;
     return g_sceneInstances[scene];
 }
 
 void applyPlacementOverrides(FireSettings& settings) {
-    const int scene = clampSceneId(settings.sceneId);
+    settings.sceneId = kProductSceneId;
+    const int scene = kProductSceneId;
     const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
+    settings.sceneEpoch = sceneEpoch;
     applySceneEmitterToSettings(settings, g_sceneEmitters[scene], sceneEpoch, g_placement.scene(scene));
 }
 
 void applySceneEmitterParams(FireSettings& settings) {
-    const int scene = clampSceneId(settings.sceneId);
+    settings.sceneId = kProductSceneId;
+    const int scene = kProductSceneId;
     const LONG sceneEpoch = settings.sceneEpoch > 0 ? settings.sceneEpoch : g_sceneEpoch;
+    settings.sceneEpoch = sceneEpoch;
     refreshSceneInstance(scene, sceneEpoch);
     applyPlacementOverrides(settings);
+}
+
+void applySceneCameraProfile(int sceneId) {
+    (void)sceneId;
+    const SceneCameraProfile& camera = sceneCameraProfile(kProductSceneId);
+    g_cameraYaw = camera.yaw;
+    g_cameraPitch = camera.pitch;
+    g_cameraDistance = camera.distance;
+    g_cameraTargetX = camera.targetX;
+    g_cameraTargetY = camera.targetY;
+    g_cameraTargetZ = camera.targetZ;
+    g_cameraFovYDegrees = camera.fovYDegrees;
+    g_haveLastOverlaySettings = false;
+}
+
+void applyCameraToSettings(FireSettings& settings) {
+    settings.cameraYaw = g_cameraYaw;
+    settings.cameraPitch = g_cameraPitch;
+    settings.cameraDistance = g_cameraDistance;
+    settings.cameraTargetX = g_cameraTargetX;
+    settings.cameraTargetY = g_cameraTargetY;
+    settings.cameraTargetZ = g_cameraTargetZ;
+    settings.cameraFovYDegrees = g_cameraFovYDegrees;
+}
+
+void applyCanonicalFireSettings(FireSettings& settings);
+
+FireSettings makeBaseFireSettings(float dt, LONG sceneEpoch = g_sceneEpoch) {
+    FireSettings settings = {};
+    settings.width = kFrameWidth;
+    settings.height = kFrameHeight;
+    settings.dt = dt;
+    settings.mouseX = 0.5f;
+    settings.mouseY = 0.12f;
+    settings.leftDown = 0;
+    settings.rightDown = 0;
+    settings.reset = 0;
+    settings.showGizmos = 0;
+    settings.activeGizmo = 1;
+    settings.sceneId = kProductSceneId;
+    settings.sceneEpoch = sceneEpoch;
+    applyCanonicalFireSettings(settings);
+    settings.sceneId = kProductSceneId;
+    settings.sceneEpoch = sceneEpoch;
+    applySceneEmitterParams(settings);
+    applyCameraToSettings(settings);
+    return settings;
 }
 
 float clamp01(float v) {
@@ -392,6 +449,30 @@ bool contains(const UiRect& rect, int x, int y) {
     return x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h;
 }
 
+FireUiRect toFireUiRect(const UiRect& rect) {
+    return {
+        static_cast<float>(rect.x),
+        static_cast<float>(rect.y),
+        static_cast<float>(rect.w),
+        static_cast<float>(rect.h),
+    };
+}
+
+void fillRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r, float g, float b, float alpha);
+void strokeRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r, float g, float b, float alpha);
+void paintNativeSurface(std::vector<std::uint32_t>& pixels, const UiRect& rect, const FireUiSurface& surface, bool active);
+void drawCirclePx(std::vector<std::uint32_t>& pixels, int cx, int cy, int radius, float r, float g, float b, float alpha);
+void drawLinePx(std::vector<std::uint32_t>& pixels, int ax, int ay, int bx, int by, float r, float g, float b, float alpha);
+
+FireUiSurface resolveNativeSurface(FireUiSurfaceRole role, std::uint32_t id, const UiRect& rect, bool active = false) {
+    return fireUiResolveSurface(role, id, toFireUiRect(rect), active);
+}
+
+void fillNativeSurface(std::vector<std::uint32_t>& pixels, FireUiSurfaceRole role, std::uint32_t id, const UiRect& rect, bool active = false) {
+    const FireUiSurface surface = resolveNativeSurface(role, id, rect, active);
+    paintNativeSurface(pixels, rect, surface, active);
+}
+
 void fillRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r, float g, float b, float alpha = 1.0f) {
     const int x0 = std::max(0, rect.x);
     const int y0 = std::max(0, rect.y);
@@ -419,6 +500,10 @@ void strokeRect(std::vector<std::uint32_t>& pixels, const UiRect& rect, float r,
     fillRect(pixels, {rect.x, rect.y + rect.h - 1, rect.w, 1}, r, g, b, alpha);
     fillRect(pixels, {rect.x, rect.y, 1, rect.h}, r, g, b, alpha);
     fillRect(pixels, {rect.x + rect.w - 1, rect.y, 1, rect.h}, r, g, b, alpha);
+}
+
+void paintNativeSurface(std::vector<std::uint32_t>& pixels, const UiRect& rect, const FireUiSurface& surface, bool active) {
+    fireUiPaintSurface(pixels.data(), kFrameWidth, kFrameHeight, toFireUiRect(rect), surface, active);
 }
 
 void drawCirclePx(std::vector<std::uint32_t>& pixels, int cx, int cy, int radius, float r, float g, float b, float alpha) {
@@ -452,100 +537,24 @@ void drawLinePx(std::vector<std::uint32_t>& pixels, int ax, int ay, int bx, int 
     }
 }
 
-struct Glyph {
-    const char* rows[7];
-};
-
-Glyph glyphFor(char c) {
-    if (c >= 'a' && c <= 'z') {
-        c = static_cast<char>(c - 'a' + 'A');
-    }
-    switch (c) {
-    case 'A': return {{" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"}};
-    case 'B': return {{"#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "}};
-    case 'C': return {{" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"}};
-    case 'D': return {{"#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "}};
-    case 'E': return {{"#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"}};
-    case 'F': return {{"#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "}};
-    case 'G': return {{" ####", "#    ", "#    ", "#  ##", "#   #", "#   #", " ####"}};
-    case 'H': return {{"#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"}};
-    case 'I': return {{"#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "#####"}};
-    case 'J': return {{"#####", "   # ", "   # ", "   # ", "   # ", "#  # ", " ##  "}};
-    case 'K': return {{"#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"}};
-    case 'L': return {{"#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"}};
-    case 'M': return {{"#   #", "## ##", "# # #", "#   #", "#   #", "#   #", "#   #"}};
-    case 'N': return {{"#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"}};
-    case 'O': return {{" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "}};
-    case 'P': return {{"#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "}};
-    case 'Q': return {{" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"}};
-    case 'R': return {{"#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"}};
-    case 'S': return {{" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "}};
-    case 'T': return {{"#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "}};
-    case 'U': return {{"#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "}};
-    case 'V': return {{"#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "}};
-    case 'W': return {{"#   #", "#   #", "#   #", "# # #", "# # #", "## ##", "#   #"}};
-    case 'X': return {{"#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"}};
-    case 'Y': return {{"#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "}};
-    case 'Z': return {{"#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"}};
-    case '0': return {{" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "}};
-    case '1': return {{"  #  ", " ##  ", "# #  ", "  #  ", "  #  ", "  #  ", "#####"}};
-    case '2': return {{" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"}};
-    case '3': return {{"#### ", "    #", "    #", " ### ", "    #", "    #", "#### "}};
-    case '4': return {{"#   #", "#   #", "#   #", "#####", "    #", "    #", "    #"}};
-    case '5': return {{"#####", "#    ", "#    ", "#### ", "    #", "    #", "#### "}};
-    case '6': return {{" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "}};
-    case '7': return {{"#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "}};
-    case '8': return {{" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "}};
-    case '9': return {{" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "}};
-    case '.': return {{"     ", "     ", "     ", "     ", "     ", " ##  ", " ##  "}};
-    case ':': return {{"     ", " ##  ", " ##  ", "     ", " ##  ", " ##  ", "     "}};
-    case '-': return {{"     ", "     ", "     ", "#####", "     ", "     ", "     "}};
-    case '+': return {{"     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "}};
-    case '/': return {{"    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "}};
-    case '%': return {{"##  #", "## # ", "  #  ", " #   ", "#    ", "#  ##", "   ##"}};
-    default: return {{"     ", "     ", "     ", "     ", "     ", "     ", "     "}};
-    }
+void drawNativeIcon(std::vector<std::uint32_t>& pixels, const UiRect& rect, const FireUiSurface& surface, float alphaScale = 1.0f) {
+    fireUiDrawIcon(pixels.data(), kFrameWidth, kFrameHeight, toFireUiRect(rect), surface, alphaScale);
 }
 
 int textWidth(const char* text, int scale) {
-    int count = 0;
-    while (text[count] != '\0') {
-        ++count;
-    }
-    return count > 0 ? count * 6 * scale - scale : 0;
+    return fireUiTextWidth(text, scale);
 }
 
 void drawText(std::vector<std::uint32_t>& pixels, int x, int y, const char* text, int scale, float r, float g, float b, float alpha = 1.0f) {
-    int cursorX = x;
-    for (int i = 0; text[i] != '\0'; ++i) {
-        const Glyph glyph = glyphFor(text[i]);
-        for (int row = 0; row < 7; ++row) {
-            for (int col = 0; col < 5; ++col) {
-                if (glyph.rows[row][col] != ' ') {
-                    for (int py = 0; py < scale; ++py) {
-                        for (int px = 0; px < scale; ++px) {
-                            blendPixel(pixels, cursorX + col * scale + px, y + row * scale + py, r, g, b, alpha);
-                        }
-                    }
-                }
-            }
-        }
-        cursorX += 6 * scale;
-    }
+    fireUiDrawText(pixels.data(), kFrameWidth, kFrameHeight, x, y, text, scale, {r, g, b, alpha});
 }
 
 void drawClippedText(std::vector<std::uint32_t>& pixels, int x, int y, const char* text, int maxChars, int scale, float r, float g, float b, float alpha = 1.0f) {
-    char clipped[160] = {};
-    const int limit = std::max(0, std::min(maxChars, static_cast<int>(sizeof(clipped)) - 1));
-    std::memcpy(clipped, text, static_cast<std::size_t>(limit));
-    clipped[limit] = '\0';
-    drawText(pixels, x, y, clipped, scale, r, g, b, alpha);
+    fireUiDrawClippedText(pixels.data(), kFrameWidth, kFrameHeight, x, y, text, maxChars, scale, {r, g, b, alpha});
 }
 
 void drawCenteredText(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* text, int scale, float r, float g, float b, float alpha = 1.0f) {
-    const int x = rect.x + (rect.w - textWidth(text, scale)) / 2;
-    const int y = rect.y + (rect.h - 7 * scale) / 2;
-    drawText(pixels, x, y, text, scale, r, g, b, alpha);
+    fireUiDrawCenteredText(pixels.data(), kFrameWidth, kFrameHeight, toFireUiRect(rect), text, scale, {r, g, b, alpha});
 }
 
 void drawCircle(std::vector<std::uint32_t>& pixels, float cx, float cy, float radius, float r, float g, float b, float alpha) {
@@ -588,7 +597,7 @@ void drawLine(std::vector<std::uint32_t>& pixels, float ax, float ay, float bx, 
 }
 
 void applyRuntimeTransition(RuntimeTransitionReason reason) {
-    g_runtimeState.sceneId = g_activeScene;
+    g_runtimeState.sceneId = kProductSceneId;
     g_runtimeState.debugMode = g_renderDebugMode;
     g_runtimeState.activeGizmo = g_activeGizmo;
     g_runtimeState.needsReset = g_needsReset || g_resetFramesRemaining > 0;
@@ -608,67 +617,71 @@ void requestSimulationReset() {
     applyRuntimeTransition(RuntimeTransitionReason::UserReset);
 }
 
-void switchScene(int scene) {
-    const int nextScene = clampSceneId(scene);
+void requestProductSceneRefresh(int scene) {
+    (void)scene;
+    const int nextScene = kProductSceneId;
     if (g_activeScene == nextScene) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "Product scene already active: NIST methanol");
         return;
     }
     g_activeScene = nextScene;
+    applySceneCameraProfile(nextScene);
     InterlockedIncrement(&g_sceneEpoch);
     invalidateWorkerSceneEpochOnly();
-    g_needsReset = false;
-    g_resetFramesRemaining = 0;
+    g_needsReset = true;
+    g_resetFramesRemaining = 1;
     g_haveLastWorkerSettings = false;
     g_haveLastOverlaySettings = false;
-    applyRuntimeTransition(RuntimeTransitionReason::SceneSwitch);
+    applyRuntimeTransition(RuntimeTransitionReason::ProductSceneRefresh);
 }
 
 void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport);
 
-void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char* label, int activeTool) {
+void drawToolButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, int tool, const char*, int activeTool) {
     const bool active = activeTool == tool;
-    fillRect(pixels, rect, active ? 0.105f : 0.048f, active ? 0.059f : 0.050f, active ? 0.037f : 0.052f, 1.0f);
-    strokeRect(pixels, rect, active ? 1.0f : 0.20f, active ? 0.42f : 0.22f, active ? 0.08f : 0.24f, active ? 0.95f : 0.70f);
-
-    const int cx = rect.x + rect.w / 2;
-    const int cy = rect.y + 20;
-    if (tool == 1) {
-        drawCirclePx(pixels, cx, cy, 11, 1.0f, 0.30f, 0.05f, active ? 1.0f : 0.70f);
-        drawLinePx(pixels, cx - 5, cy + 10, cx + 4, cy - 12, 1.0f, 0.65f, 0.08f, active ? 0.85f : 0.45f);
-    } else if (tool == 2) {
-        drawCirclePx(pixels, cx - 8, cy + 2, 9, 0.78f, 0.80f, 0.82f, active ? 0.95f : 0.58f);
-        drawCirclePx(pixels, cx + 8, cy - 3, 12, 0.60f, 0.62f, 0.65f, active ? 0.80f : 0.42f);
-    } else if (tool == 3) {
-        drawLinePx(pixels, rect.x + 13, cy, rect.x + rect.w - 14, cy, 0.05f, 0.86f, 1.0f, active ? 0.95f : 0.55f);
-        drawLinePx(pixels, rect.x + rect.w - 14, cy, rect.x + rect.w - 23, cy - 8, 0.05f, 0.86f, 1.0f, active ? 0.95f : 0.55f);
-        drawLinePx(pixels, rect.x + rect.w - 14, cy, rect.x + rect.w - 23, cy + 8, 0.05f, 0.86f, 1.0f, active ? 0.95f : 0.55f);
-    } else {
-        drawCirclePx(pixels, cx, cy, 12, 0.85f, 0.25f, 0.96f, active ? 0.95f : 0.55f);
-        drawLinePx(pixels, cx - 12, cy + 8, cx + 12, cy - 9, 0.95f, 0.48f, 1.0f, active ? 0.90f : 0.48f);
-    }
-
-    drawCenteredText(pixels, {rect.x, rect.y + 42, rect.w, 18}, label, 1, 0.88f, 0.90f, 0.86f, active ? 0.98f : 0.70f);
+    const FireUiSurface surface = resolveNativeSurface(FireUiSurfaceRole::ToolButton, static_cast<std::uint32_t>(tool), rect, active);
+    paintNativeSurface(pixels, rect, surface, active);
+    const int iconSize = active ? 34 : 30;
+    drawNativeIcon(
+        pixels,
+        {rect.x + (rect.w - iconSize) / 2, rect.y + (rect.h - iconSize) / 2, iconSize, iconSize},
+        surface,
+        active ? 1.0f : 0.62f);
 }
 
-void drawCommandButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* label, bool active) {
-    fillRect(pixels, rect, active ? 0.080f : 0.046f, active ? 0.078f : 0.048f, active ? 0.064f : 0.050f, 1.0f);
-    strokeRect(pixels, rect, active ? 0.78f : 0.22f, active ? 0.74f : 0.24f, active ? 0.55f : 0.25f, active ? 0.90f : 0.70f);
-    drawCenteredText(pixels, rect, label, 1, 0.84f, 0.85f, 0.80f, 0.92f);
+void drawCommandButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* label, bool active, std::uint32_t semanticId) {
+    const FireUiSurface surface = resolveNativeSurface(FireUiSurfaceRole::CommandButton, semanticId, rect, active);
+    paintNativeSurface(pixels, rect, surface, active);
+    drawNativeIcon(pixels, {rect.x + 8, rect.y + 6, 16, std::max(14, rect.h - 12)}, surface, active ? 0.90f : 0.62f);
+    drawCenteredText(pixels, {rect.x + 22, rect.y, std::max(0, rect.w - 26), rect.h}, label, 1, surface.text.r, surface.text.g, surface.text.b, surface.text.a);
 }
 
-void drawSceneButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* label, bool active) {
-    fillRect(pixels, rect, active ? 0.036f : 0.023f, active ? 0.052f : 0.026f, active ? 0.070f : 0.028f, active ? 0.95f : 0.76f);
-    strokeRect(pixels, rect, active ? 0.38f : 0.16f, active ? 0.66f : 0.18f, active ? 1.00f : 0.20f, active ? 0.92f : 0.68f);
-    drawCenteredText(pixels, rect, label, 1, active ? 0.62f : 0.54f, active ? 0.78f : 0.58f, active ? 1.0f : 0.62f, active ? 0.96f : 0.78f);
+void drawSceneButton(std::vector<std::uint32_t>& pixels, const UiRect& rect, const char* label, bool active, std::uint32_t sceneId) {
+    const FireUiSurface surface = resolveNativeSurface(FireUiSurfaceRole::SceneButton, sceneId, rect, active);
+    paintNativeSurface(pixels, rect, surface, active);
+    drawNativeIcon(pixels, {rect.x + 6, rect.y + 5, 14, 14}, surface, active ? 0.88f : 0.50f);
+    drawCenteredText(pixels, {rect.x + 18, rect.y, std::max(0, rect.w - 20), rect.h}, label, 1, surface.text.r, surface.text.g, surface.text.b, surface.text.a);
 }
 
 void drawSlider(std::vector<std::uint32_t>& pixels, const UiRect& rect, float normalized, float cr, float cg, float cb) {
     normalized = clamp01(normalized);
-    fillRect(pixels, rect, 0.030f, 0.032f, 0.033f, 1.0f);
-    fillRect(pixels, {rect.x, rect.y, static_cast<int>(static_cast<float>(rect.w) * normalized), rect.h}, cr * 0.45f, cg * 0.45f, cb * 0.45f, 1.0f);
-    strokeRect(pixels, rect, 0.20f, 0.21f, 0.20f, 0.82f);
+    const auto baseId = static_cast<std::uint32_t>(rect.x * 19 + rect.y);
+    const FireUiSurface track = resolveNativeSurface(FireUiSurfaceRole::SliderTrack, baseId, rect, false);
+    paintNativeSurface(pixels, rect, track, false);
+    const int fillW = std::max(4, static_cast<int>(static_cast<float>(rect.w) * normalized));
+    const UiRect fill = {rect.x + 2, rect.y + 3, std::max(1, fillW - 4), std::max(1, rect.h - 6)};
+    FireUiSurface fillSurface = resolveNativeSurface(FireUiSurfaceRole::SliderFill, baseId + 1, fill, normalized > 0.02f);
+    fillSurface.fill.r = cr * (0.44f + track.hover * 0.10f);
+    fillSurface.fill.g = cg * (0.44f + track.hover * 0.10f);
+    fillSurface.fill.b = cb * (0.44f + track.hover * 0.10f);
+    fillSurface.accent.r = cr;
+    fillSurface.accent.g = cg;
+    fillSurface.accent.b = cb;
+    paintNativeSurface(pixels, fill, fillSurface, normalized > 0.02f);
     const int thumbX = rect.x + static_cast<int>(static_cast<float>(rect.w) * normalized);
-    fillRect(pixels, {thumbX - 3, rect.y - 5, 6, rect.h + 10}, cr, cg, cb, 0.96f);
+    const UiRect thumbRect = {thumbX - 3, rect.y - 5, 6, rect.h + 10};
+    const FireUiSurface thumb = resolveNativeSurface(FireUiSurfaceRole::SliderThumb, static_cast<std::uint32_t>(rect.x * 23 + rect.y), thumbRect, track.pressure > 0.0f);
+    paintNativeSurface(pixels, thumbRect, thumb, track.pressure > 0.0f);
 }
 
 void blitViewport(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels) {
@@ -750,75 +763,76 @@ void drawAppChrome(std::vector<std::uint32_t>& pixels, const FireSettings& setti
         return;
     }
 
-    fillRect(pixels, kRailRect, 0.020f, 0.022f, 0.022f, 0.74f);
-    fillRect(pixels, kTopBarRect, 0.018f, 0.019f, 0.019f, 0.70f);
-    fillRect(pixels, kInspectorRect, 0.020f, 0.022f, 0.022f, 0.72f);
-    fillRect(pixels, kStatusRect, 0.018f, 0.020f, 0.020f, 0.68f);
-    strokeRect(pixels, kRailRect, 0.15f, 0.16f, 0.15f, 0.75f);
-    strokeRect(pixels, kTopBarRect, 0.15f, 0.16f, 0.15f, 0.75f);
-    strokeRect(pixels, kInspectorRect, 0.15f, 0.16f, 0.15f, 0.75f);
-    strokeRect(pixels, kStatusRect, 0.15f, 0.16f, 0.15f, 0.75f);
+    fillNativeSurface(pixels, FireUiSurfaceRole::RailPanel, 1, kRailRect);
+    fillNativeSurface(pixels, FireUiSurfaceRole::TopBar, 2, kTopBarRect);
+    fillNativeSurface(pixels, FireUiSurfaceRole::InspectorPanel, 3, kInspectorRect);
+    fillNativeSurface(pixels, FireUiSurfaceRole::StatusPanel, 4, kStatusRect);
 
     drawViewportOverlays(pixels, settings);
 
-    drawText(pixels, 30, 26, "NATIVE FIRESIM", 1, 0.88f, 0.90f, 0.84f, 0.96f);
-    drawText(pixels, 224, 26, cudaBackend ? "CUDA 3D FP16 D3D" : "NO LIVE CUDA FRAME", 1, cudaBackend ? 0.55f : 0.46f, cudaBackend ? 0.76f : 0.88f, cudaBackend ? 1.0f : 0.58f, 0.92f);
-    drawSceneButton(pixels, kSceneButtonRects[0], "ROOM", settings.sceneId == 0);
-    drawSceneButton(pixels, kSceneButtonRects[1], "CAMP", settings.sceneId == 1);
-    drawSceneButton(pixels, kSceneButtonRects[2], "BURNER", settings.sceneId == 2);
-    drawText(pixels, 660, 26, cudaBackend ? "RMB ORBIT   WHEEL ZOOM" : "NO CUSTOM CUDA KERNELS", 1, 0.70f, 0.72f, 0.68f, 0.88f);
+    drawText(pixels, 30, 22, "Native FireSim", 1, 0.90f, 0.92f, 0.86f, 0.96f);
+    drawText(pixels, 220, 22, cudaBackend ? "CUDA 3D Volume" : "Safe diagnostic viewport", 1, cudaBackend ? 0.56f : 0.72f, cudaBackend ? 0.78f : 0.68f, cudaBackend ? 1.0f : 0.50f, 0.92f);
+    drawSceneButton(pixels, kProductSceneButtonRect, sceneButtonLabel(kProductSceneId), true, static_cast<std::uint32_t>(kProductSceneId));
+    drawText(pixels, 720, 22, cudaBackend ? "RMB orbit   Wheel zoom" : "No custom CUDA kernels", 1, 0.70f, 0.72f, 0.68f, 0.88f);
 
-    drawCenteredText(pixels, {kRailRect.x, 78, kRailRect.w, 14}, "TOOLS", 1, 0.60f, 0.62f, 0.58f, 0.82f);
+    drawCenteredText(pixels, {kRailRect.x, 78, kRailRect.w, 18}, "Tools", 1, 0.60f, 0.64f, 0.62f, 0.82f);
     drawToolButton(pixels, kToolButtonRects[0], 1, "FIRE", settings.activeGizmo);
     drawToolButton(pixels, kToolButtonRects[1], 2, "SMOKE", settings.activeGizmo);
     drawToolButton(pixels, kToolButtonRects[2], 3, "WIND", settings.activeGizmo);
     drawToolButton(pixels, kToolButtonRects[3], 4, "TURB", settings.activeGizmo);
-    drawCommandButton(pixels, kOverlayButtonRect, "OVERLAY", settings.showGizmos != 0);
-    drawCommandButton(pixels, kResetButtonRect, "RESET", false);
+    drawCommandButton(pixels, kOverlayButtonRect, "OVERLAY", settings.showGizmos != 0, 1);
+    drawCommandButton(pixels, kResetButtonRect, "RESET", false, 2);
     drawCommandButton(
         pixels,
         kCudaWorkerButtonRect,
         g_cudaWorkerRequested ? "CUDA STOP" : (g_interactiveGpuKernelLaunchAllowed && g_cudaPreflightPassed ? "CUDA START" : "CUDA LOCKED"),
-        g_cudaWorkerRequested);
+        g_cudaWorkerRequested,
+        3);
 
-    drawText(pixels, 790, 92, "FIELD", 2, 0.86f, 0.88f, 0.82f, 0.95f);
-    drawText(pixels, 790, 132, "ACTIVE", 1, 0.50f, 0.52f, 0.50f, 0.86f);
-    drawText(pixels, 790, 150, toolName(settings.activeGizmo), 2, 0.96f, 0.65f, 0.26f, 0.95f);
-    drawText(pixels, 790, 172, sceneName(settings.sceneId), 1, 0.54f, 0.74f, 1.0f, 0.86f);
+    drawText(pixels, 790, 92, "Field", 2, 0.88f, 0.90f, 0.84f, 0.95f);
+    drawText(pixels, 790, 132, "Active", 1, 0.52f, 0.56f, 0.54f, 0.86f);
+    drawText(pixels, 790, 150, toolName(settings.activeGizmo), 2, 0.96f, 0.66f, 0.28f, 0.95f);
+    drawText(pixels, 790, 176, sceneName(settings.sceneId), 1, 0.58f, 0.78f, 1.0f, 0.86f);
 
     char value[32] = {};
-    drawText(pixels, 790, 194, "WIND", 1, 0.64f, 0.82f, 0.88f, 0.88f);
+    drawText(pixels, 790, 198, "Wind", 1, 0.64f, 0.82f, 0.88f, 0.88f);
     std::snprintf(value, sizeof(value), "%.2f", settings.wind);
-    drawText(pixels, 866, 194, value, 1, 0.64f, 0.82f, 0.88f, 0.80f);
+    drawText(pixels, 866, 198, value, 1, 0.64f, 0.82f, 0.88f, 0.80f);
     drawSlider(pixels, kWindSliderRect, (settings.wind + 1.0f) * 0.5f, 0.05f, 0.86f, 1.0f);
 
-    drawText(pixels, 790, 284, "TURBULENCE", 1, 0.86f, 0.60f, 0.95f, 0.88f);
+    drawText(pixels, 790, 284, "Turbulence", 1, 0.86f, 0.60f, 0.95f, 0.88f);
     std::snprintf(value, sizeof(value), "%.2f", settings.turbulence);
     drawText(pixels, 876, 284, value, 1, 0.86f, 0.60f, 0.95f, 0.80f);
     drawSlider(pixels, kTurbulenceSliderRect, (settings.turbulence - 0.05f) / 1.45f, 0.85f, 0.25f, 0.96f);
 
-    drawText(pixels, 790, 360, "DRAG SLIDERS", 1, 0.54f, 0.56f, 0.53f, 0.78f);
-    drawText(pixels, 790, 378, "OR KEYS 1-4", 1, 0.54f, 0.56f, 0.53f, 0.78f);
+    drawText(pixels, 790, 360, "Drag sliders", 1, 0.54f, 0.58f, 0.56f, 0.78f);
+    drawText(pixels, 790, 378, "or keys 1-4", 1, 0.54f, 0.58f, 0.56f, 0.78f);
     drawText(pixels, 790, 404, placementTargetName(), 1, 0.70f, 0.78f, 1.0f, 0.88f);
-    drawClippedText(pixels, 790, 422, g_placementStatus, 31, 1, 0.70f, 0.82f, 0.98f, 0.86f);
+    drawClippedText(pixels, 790, 422, g_placementStatus, 16, 1, 0.70f, 0.82f, 0.98f, 0.86f);
     drawText(pixels, 790, 440, "DRAG CENTER XZ", 1, 0.50f, 0.56f, 0.60f, 0.78f);
     drawText(pixels, 790, 458, "DRAG TOP Y   K COPY", 1, 0.50f, 0.56f, 0.60f, 0.78f);
 
-    drawText(
+    drawClippedText(
         pixels,
         406,
         486,
-        cudaBackend ? "REAL CUDA WORKER VOLUME   DRAG HANDLE TO PLACE SOURCE   K COPY COORDS   S SCENE   D DEBUG" : "NO LIVE CUDA FRAME   USE CUDA BUTTON ONLY IN EXPLICIT RISK SESSION   D DEBUG",
+        cudaBackend
+            ? "CUDA worker volume   NIST methanol product path   Drag source handle   K copy   D debug"
+            : "No live CUDA frame   Explicit risk session required for worker   D debug",
+        62,
         1,
         0.76f,
         0.78f,
         0.72f,
         0.88f);
     drawText(pixels, 406, 506, renderDebugName(settings.renderDebugMode), 1, 0.86f, 0.84f, 0.62f, 0.88f);
-    drawClippedText(pixels, 460, 506, g_workerUiStatus, 56, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
+    char health[224] = {};
+    std::snprintf(health, sizeof(health), "FRAME %s  %s", frameHealthStateName(), g_workerUiStatus);
+    drawClippedText(pixels, 460, 506, health, 56, 1, cudaBackend ? 0.46f : 0.90f, cudaBackend ? 0.80f : 0.60f, cudaBackend ? 0.58f : 0.34f, 0.88f);
 }
 
 void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::uint32_t>& simPixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport = false) {
+    fireUiBeginFrame(1.0f / 60.0f, static_cast<float>(g_pointerFrameX), static_cast<float>(g_pointerFrameY), g_leftDown || g_rightDown);
     std::fill(pixels.begin(), pixels.end(), packBgra(0.015f, 0.016f, 0.016f));
     blitViewport(pixels, simPixels);
     if (!cudaBackend) {
@@ -826,12 +840,15 @@ void composeAppFrame(std::vector<std::uint32_t>& pixels, const std::vector<std::
     }
     drawSceneDebugOverlay(pixels, settings, cleanViewport);
     drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
+    fireUiEndFrame();
 }
 
 void composeD3DOverlayFrame(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cudaBackend, bool cleanViewport) {
+    fireUiBeginFrame(1.0f / 60.0f, static_cast<float>(g_pointerFrameX), static_cast<float>(g_pointerFrameY), g_leftDown || g_rightDown);
     std::fill(pixels.begin(), pixels.end(), 0u);
     drawSceneDebugOverlay(pixels, settings, cleanViewport);
     drawAppChrome(pixels, settings, cudaBackend, cleanViewport);
+    fireUiEndFrame();
 }
 
 int hitTestToolButton(int frameX, int frameY) {
@@ -857,10 +874,8 @@ int hitTestCommandButton(int frameX, int frameY) {
 }
 
 int hitTestSceneButton(int frameX, int frameY) {
-    for (int i = 0; i < kInteractiveSceneCount; ++i) {
-        if (contains(kSceneButtonRects[i], frameX, frameY)) {
-            return i;
-        }
+    if (contains(kProductSceneButtonRect, frameX, frameY)) {
+        return kProductSceneId;
     }
     return -1;
 }
@@ -1159,9 +1174,7 @@ bool compileShader(const char* source, const char* entry, const char* target, Co
 }
 
 void loadSceneEmitters() {
-    for (int scene = 0; scene < kSceneCount; ++scene) {
-        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
-    }
+    g_sceneEmitters[kProductSceneId] = loadSceneEmitterParams(kProductSceneId);
 }
 
 const char* d3dShaderSource() {
@@ -1542,6 +1555,39 @@ bool copyD3DWorkerFrame() {
     return true;
 }
 
+bool d3DWorkerHandlesNeedOpen() {
+    if (g_sharedViewport == nullptr) {
+        return false;
+    }
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        const auto handleValue = static_cast<uintptr_t>(g_sharedViewport->sharedTextureHandleValues[slot]);
+        if (handleValue != 0 &&
+            (g_d3d.sharedSimTextures[slot] == nullptr ||
+             reinterpret_cast<uintptr_t>(g_d3d.sharedSimHandles[slot]) != handleValue)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool d3DWorkerHasReadyFrame() {
+    if (g_sharedViewport == nullptr) {
+        return false;
+    }
+    for (int slot = 0; slot < kSharedFrameSlots; ++slot) {
+        const LONG sequence = g_sharedViewport->slotFrameSequences[slot];
+        const LONG slotEpoch = g_sharedViewport->slotSceneEpochs[slot];
+        if (slotEpoch == g_sceneEpoch &&
+            sequence > g_lastCopiedWorkerSequence &&
+            (sequence & 1) == 0 &&
+            g_d3d.sharedSimTextures[slot] != nullptr &&
+            g_d3d.sharedSimMutexes[slot] != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Vec3 sub3(Vec3 a, Vec3 b) {
     return {a.x - b.x, a.y - b.y, a.z - b.z};
 }
@@ -1560,7 +1606,7 @@ Vec3 normalize3(Vec3 v) {
 }
 
 bool projectWorldToViewport(Vec3 world, int& sx, int& sy, float& depth) {
-    const Vec3 target = {0.0f, 0.48f, 0.0f};
+    const Vec3 target = {g_cameraTargetX, g_cameraTargetY, g_cameraTargetZ};
     const float cp = std::cos(g_cameraPitch);
     const Vec3 eye = {
         std::sin(g_cameraYaw) * g_cameraDistance * cp,
@@ -1575,7 +1621,7 @@ bool projectWorldToViewport(Vec3 world, int& sx, int& sy, float& depth) {
         return false;
     }
 
-    const float fovY = 50.0f * 3.1415926535f / 180.0f;
+    const float fovY = std::max(28.0f, std::min(68.0f, g_cameraFovYDegrees)) * 3.1415926535f / 180.0f;
     const float aspect = static_cast<float>(kFrameWidth) / static_cast<float>(kFrameHeight);
     const float f = 1.0f / std::tan(fovY * 0.5f);
     const float ndcX = (dot3(x, rel) * f / aspect) / depth;
@@ -1665,49 +1711,23 @@ void drawProjectedBoxOverlay(std::vector<std::uint32_t>& pixels, Vec3 minCorner,
 }
 
 void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSettings& settings, bool cleanViewport) {
-    if (cleanViewport || (settings.showGizmos == 0 && settings.renderDebugMode == 0)) {
+    if (cleanViewport || (settings.showGizmos == 0 && renderDebugModeIsFinal(settings.renderDebugMode))) {
         return;
     }
 
-    drawProjectedBoxOverlay(pixels, {-1.05f, 0.02f, -0.82f}, {1.05f, 2.05f, 0.82f}, "VOLUME", 0.14f, 0.58f, 1.0f);
+    drawProjectedBoxOverlay(pixels, {-1.05f, 0.02f, -0.82f}, {1.05f, 2.92f, 0.82f}, "VOLUME", 0.14f, 0.58f, 1.0f);
     drawProjectedBoxOverlay(pixels, {-0.92f, 0.0f, -0.66f}, {0.92f, 0.16f, 0.66f}, "FUEL BED", 1.0f, 0.54f, 0.10f);
     drawLinePx(pixels, 900, 478, 950, 478, 1.0f, 0.10f, 0.08f, 0.86f);
     drawLinePx(pixels, 900, 478, 900, 428, 0.08f, 1.0f, 0.18f, 0.86f);
     drawLinePx(pixels, 900, 478, 866, 504, 0.20f, 0.50f, 1.0f, 0.86f);
     char frameLabel[96] = {};
     std::snprintf(frameLabel, sizeof(frameLabel), "FRAME AGE %llums  RING %ld>%ld", g_displayFrameAgeMs, static_cast<long>(g_sharedRingLastCopiedSharedSlot), static_cast<long>(g_sharedRingLastCopiedDisplaySlot));
+    fillNativeSurface(pixels, FireUiSurfaceRole::DebugOverlay, 10, {kViewportRect.x + 12, kViewportRect.y + kViewportRect.h - 52, 430, 46}, !renderDebugModeIsFinal(settings.renderDebugMode));
     drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 28, frameLabel, 1, 0.58f, 0.92f, 0.72f, 0.92f);
     drawText(pixels, kViewportRect.x + 18, kViewportRect.y + kViewportRect.h - 46, "OVERLAY: SOURCE / VOLUME / FUEL BED / AXES / FRESHNESS", 1, 0.76f, 0.80f, 0.72f, 0.86f);
 
     const float emitterY = std::max(0.02f, settings.emitterHeightNorm * 2.03f + 0.02f);
     char sourceCoords[128] = {};
-    if (settings.sceneId == 2 && settings.burnerCenterCount > 0) {
-        std::snprintf(
-            sourceCoords,
-            sizeof(sourceCoords),
-            "SRC XYZ %.3f %.3f %.3f",
-            settings.burnerCenterX[0],
-            emitterY,
-            settings.burnerCenterZ[0]);
-        drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 38, sourceCoords, 1, 0.70f, 0.86f, 1.0f, 0.96f);
-        const int count = std::min(4, settings.burnerCenterCount);
-        for (int i = 0; i < count; ++i) {
-            char label[24] = {};
-            std::snprintf(label, sizeof(label), i == 0 ? "SRC ACTIVE" : "PORT %d", i);
-            const float alphaBias = i == 0 ? 1.0f : 0.72f;
-            const float burnerY = i == 0 ? emitterY : (settings.burnerCenterY[i] > 0.0f ? settings.burnerCenterY[i] : emitterY);
-            drawProjectedEmitterMarker(
-                pixels,
-                {settings.burnerCenterX[i], burnerY, settings.burnerCenterZ[i]},
-                settings.emitterRadius,
-                label,
-                0.18f * alphaBias,
-                0.72f * alphaBias,
-                1.0f);
-        }
-        return;
-    }
-
     std::snprintf(
         sourceCoords,
         sizeof(sourceCoords),
@@ -1715,7 +1735,11 @@ void drawSceneDebugOverlay(std::vector<std::uint32_t>& pixels, const FireSetting
         settings.emitterCenterX,
         emitterY,
         settings.emitterCenterZ);
-    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 38, sourceCoords, 1, 1.0f, 0.62f, 0.18f, 0.96f);
+    const SceneProfile& profile = sceneProfile(kProductSceneId);
+    char activeSource[160] = {};
+    std::snprintf(activeSource, sizeof(activeSource), "%s %s", "SRC ACTIVE", profile.sourceModel);
+    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 38, activeSource, 1, 1.0f, 0.62f, 0.18f, 0.96f);
+    drawText(pixels, kViewportRect.x + 18, kViewportRect.y + 54, sourceCoords, 1, 1.0f, 0.72f, 0.28f, 0.92f);
     drawProjectedEmitterMarker(
         pixels,
         {settings.emitterCenterX, emitterY, settings.emitterCenterZ},
@@ -1813,8 +1837,30 @@ bool presentD3DRenderGraphFrame() {
         ++g_renderGraphStats.skippedPresentPasses;
         return false;
     }
+    if (FAILED(present)) {
+        if (present != g_lastPresentFailure) {
+            g_lastPresentFailure = present;
+            const HRESULT removedReason = g_d3d.device != nullptr ? g_d3d.device->GetDeviceRemovedReason() : S_OK;
+            char detail[160] = {};
+            std::snprintf(
+                detail,
+                sizeof(detail),
+                "present=%s removedReason=%s",
+                hresultString(present).c_str(),
+                hresultString(removedReason).c_str());
+            appendRuntimeEvent("app-d3d-present-failed", detail);
+        }
+        if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
+            g_d3dDeviceLost = true;
+            g_cudaWorkerRequested = false;
+            stopCudaWorker();
+            invalidateDisplayedCudaFrame();
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "D3D device lost after power/display transition; restart app");
+        }
+        return false;
+    }
     ++g_renderGraphStats.presentPasses;
-    return SUCCEEDED(present);
+    return true;
 }
 
 bool renderD3DFrame(bool drawSim, float exposure, bool uploadUi) {
@@ -1841,6 +1887,33 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_clientW = LOWORD(lParam);
         g_clientH = HIWORD(lParam);
         return 0;
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMSUSPEND || wParam == PBT_APMSTANDBY) {
+            pauseCudaWorkerForPowerTransition(wParam == PBT_APMSUSPEND ? "PBT_APMSUSPEND" : "PBT_APMSTANDBY");
+            return TRUE;
+        }
+        if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND || wParam == PBT_APMRESUMECRITICAL) {
+            resumeCudaWorkerAfterPowerTransition(
+                wParam == PBT_APMRESUMEAUTOMATIC ? "PBT_APMRESUMEAUTOMATIC" :
+                (wParam == PBT_APMRESUMESUSPEND ? "PBT_APMRESUMESUSPEND" : "PBT_APMRESUMECRITICAL"));
+            return TRUE;
+        }
+        return TRUE;
+    case WM_DISPLAYCHANGE:
+        appendRuntimeEvent("app-display-change", "");
+        invalidateDisplayedCudaFrame();
+        g_haveLastOverlaySettings = false;
+        return 0;
+    case WM_QUERYENDSESSION:
+        appendRuntimeEvent("app-query-end-session", "");
+        pauseCudaWorkerForPowerTransition("WM_QUERYENDSESSION");
+        return TRUE;
+    case WM_ENDSESSION:
+        appendRuntimeEvent(wParam ? "app-end-session" : "app-end-session-canceled", "");
+        if (wParam) {
+            g_running = false;
+        }
+        return 0;
     case WM_LBUTTONDOWN:
         SetCapture(hwnd);
         g_leftDown = true;
@@ -1852,7 +1925,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (const int scene = hitTestSceneButton(g_pointerFrameX, g_pointerFrameY); scene >= 0) {
-            switchScene(scene);
+            requestProductSceneRefresh(scene);
             return 0;
         }
         if (const int command = hitTestCommandButton(g_pointerFrameX, g_pointerFrameY); command != 0) {
@@ -1947,11 +2020,17 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         if (wParam == 'D') {
-            g_renderDebugMode = (g_renderDebugMode + 1) % 7;
+            g_renderDebugMode = nextRenderDebugMode(g_renderDebugMode);
+            return 0;
+        }
+        if (wParam == VK_SPACE) {
+            g_simPaused = !g_simPaused;
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), g_simPaused ? "SIM PAUSED - orbit and inspect" : "SIM RUNNING");
+            g_haveLastOverlaySettings = false;
             return 0;
         }
         if (wParam == 'S') {
-            switchScene((g_activeScene + 1) % kInteractiveSceneCount);
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "Product scene locked: NIST methanol");
             return 0;
         }
         if (wParam == 'P') {
@@ -1978,11 +2057,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 nudgePlacement(0.0f, step, 0.0f);
             }
-            return 0;
-        }
-        if (wParam == VK_SPACE) {
-            const float step = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0.050f : 0.010f;
-            nudgePlacement(0.0f, 0.0f, -step);
             return 0;
         }
         if (wParam >= '1' && wParam <= '4') {
@@ -2013,7 +2087,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_CLOSE:
+        appendRuntimeEvent("app-window-close", "");
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
+        appendRuntimeEvent("app-window-destroy", "");
         g_running = false;
         PostQuitMessage(0);
         return 0;
@@ -2327,7 +2406,7 @@ int argumentIntValue(const std::string& args, const char* prefix, int fallback, 
 }
 
 void applyCanonicalFireSettings(FireSettings& settings) {
-    settings.sceneId = clampSceneId(settings.sceneId);
+    settings.sceneId = kProductSceneId;
     settings.cinematicMode = 1;
     settings.raymarchSteps = kRaymarchSteps;
     settings.emberCount = kEmberCount;
@@ -2337,7 +2416,8 @@ void applyCanonicalFireSettings(FireSettings& settings) {
     settings.intensity = kFireIntensity;
     settings.smoke = kSmokeGain;
     settings.turbulence = kTurbulence;
-    settings.renderDebugMode = 0;
+    settings.renderDebugMode = kRenderDebugFinal;
+    settings.plumeTestMode = 0;
 }
 
 struct TimerResolutionScope {
@@ -2412,7 +2492,7 @@ void writeWorkerSettings(const FireSettings& settings) {
 }
 
 FireSettings readStableWorkerSettings(const SharedViewportBuffer* shared) {
-    FireSettings settings;
+    FireSettings settings = {};
     for (int attempt = 0; attempt < 4; ++attempt) {
         const LONG sequenceA = shared->settingsSequence;
         if ((sequenceA & 1) != 0) {
@@ -2590,6 +2670,47 @@ void stopCudaWorker() {
         CloseHandle(g_cudaWorkerProcess);
         g_cudaWorkerProcess = nullptr;
     }
+}
+
+void pauseCudaWorkerForPowerTransition(const char* reason) {
+    g_powerTransitionActive = true;
+    g_cudaWorkerPausedForPower = g_cudaWorkerRequested;
+    appendRuntimeEvent("app-power-suspend", reason);
+    if (g_cudaWorkerRequested) {
+        stopCudaWorker();
+    }
+    invalidateDisplayedCudaFrame();
+    clearHostSharedFrameHandles();
+    g_haveLastWorkerSettings = false;
+    g_haveLastOverlaySettings = false;
+    std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "power transition paused CUDA worker");
+}
+
+void resumeCudaWorkerAfterPowerTransition(const char* reason) {
+    appendRuntimeEvent("app-power-resume", reason);
+    g_powerTransitionActive = false;
+    g_d3dDeviceLost = false;
+    g_lastPresentFailure = S_OK;
+    g_cudaPreflightPassed = cudaPreflightArtifactFresh();
+    g_workerRestartCount = 0;
+    g_workerRestartBlockedUntilMs = 0;
+    g_lastWorkerStartTickMs = 0;
+    g_sharedRingAcquireTimeouts = 0;
+    g_sharedRingNoCandidateFrames = 0;
+    g_sharedRingCopyStarvationFrames = 0;
+    g_sharedRingSkippedActiveDisplaySlot = 0;
+    invalidateDisplayedCudaFrame();
+    clearHostSharedFrameHandles();
+    resetSharedViewportBuffer();
+    if (g_cudaWorkerPausedForPower && g_interactiveGpuKernelLaunchAllowed && g_cudaPreflightPassed) {
+        g_cudaWorkerRequested = true;
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker resume restart pending");
+    } else if (g_cudaWorkerPausedForPower) {
+        std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker resume blocked by safety/preflight gate");
+    }
+    g_cudaWorkerPausedForPower = false;
+    g_haveLastWorkerSettings = false;
+    g_haveLastOverlaySettings = false;
 }
 
 void toggleInteractiveCudaWorker() {
@@ -2790,16 +2911,15 @@ int runWorkerBenchmark(const std::string& args) {
     if (!gpuKernelLaunchAllowed(args)) {
         return writeGpuSafetyStop("worker-benchmark");
     }
-    for (int scene = 0; scene < kSceneCount; ++scene) {
-        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
-    }
+    loadSceneEmitters();
     ensureDirectoryTree("out");
     const std::string outputDirArg = argumentValue(args, "--output-dir=");
     const std::string outputDir = outputDirArg.empty() ? "out\\worker-benchmark" : outputDirArg;
     const int benchmarkFrames = argumentIntValue(args, "--benchmark-frames=", 16, 4, 120);
     const int warmupFrames = argumentIntValue(args, "--warmup-frames=", 8, 0, 120);
     const int simEveryFrames = argumentIntValue(args, "--sim-every-frames=", 1, 0, 600);
-    const int benchmarkScene = argumentIntValue(args, "--scene=", 0, 0, kSceneCount - 1);
+    (void)argumentIntValue(args, "--scene=", kProductSceneId, 0, kSceneCount - 1);
+    const int benchmarkScene = kProductSceneId;
     const bool renderOnlyMode = args.find("--render-only") != std::string::npos || simEveryFrames == 0;
     if (!ensureDirectoryTree(outputDir)) {
         return 3;
@@ -2848,6 +2968,11 @@ int runWorkerBenchmark(const std::string& args) {
     double totalLightingMs = 0.0;
     double totalRaymarchMs = 0.0;
     double totalPackMs = 0.0;
+    double totalSparseActiveBrickCount = 0.0;
+    double totalSparseActiveBrickFraction = 0.0;
+    int sparseBrickCount = 0;
+    float maxSparseBrickEmission = 0.0f;
+    float maxSparseBrickExtinction = 0.0f;
     int completedFrames = 0;
     int metricFrames = 0;
     int physicsFrames = 0;
@@ -2855,7 +2980,7 @@ int runWorkerBenchmark(const std::string& args) {
     bool stable = true;
 
     const auto makeBenchmarkSettings = [benchmarkScene](int i) {
-        FireSettings settings;
+        FireSettings settings = {};
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
@@ -2867,11 +2992,16 @@ int runWorkerBenchmark(const std::string& args) {
         settings.showGizmos = 0;
         settings.activeGizmo = 1;
         settings.wind = 0.0f;
-        settings.cameraYaw = 0.18f;
-        settings.cameraPitch = 0.08f;
-        settings.cameraDistance = 2.62f;
         applyCanonicalFireSettings(settings);
         applySceneEmitterParams(settings);
+        const SceneCameraProfile& camera = sceneCameraProfile(benchmarkScene);
+        settings.cameraYaw = camera.yaw;
+        settings.cameraPitch = camera.pitch;
+        settings.cameraDistance = camera.distance;
+        settings.cameraTargetX = camera.targetX;
+        settings.cameraTargetY = camera.targetY;
+        settings.cameraTargetZ = camera.targetZ;
+        settings.cameraFovYDegrees = camera.fovYDegrees;
         return settings;
     };
 
@@ -2990,6 +3120,11 @@ int runWorkerBenchmark(const std::string& args) {
             totalLightingMs += metrics.gpuLightingMs;
             totalRaymarchMs += metrics.gpuRaymarchMs;
             totalPackMs += metrics.gpuPackMs;
+            totalSparseActiveBrickCount += metrics.sparseActiveBrickCount;
+            totalSparseActiveBrickFraction += metrics.sparseActiveBrickFraction;
+            sparseBrickCount = metrics.sparseBrickCount;
+            maxSparseBrickEmission = std::max(maxSparseBrickEmission, metrics.sparseMaxBrickEmission);
+            maxSparseBrickExtinction = std::max(maxSparseBrickExtinction, metrics.sparseMaxBrickExtinction);
             ++metricFrames;
         }
     }
@@ -3010,6 +3145,18 @@ int runWorkerBenchmark(const std::string& args) {
     const double averageLightingMs = totalLightingMs / measuredMetricFrames;
     const double averageRaymarchMs = totalRaymarchMs / measuredMetricFrames;
     const double averagePackMs = totalPackMs / measuredMetricFrames;
+    const double averageSparseActiveBrickCount = totalSparseActiveBrickCount / measuredMetricFrames;
+    const double averageSparseActiveBrickFraction = totalSparseActiveBrickFraction / measuredMetricFrames;
+    const double effectiveFps = averageFrameMs > 0.0 ? 1000.0 / averageFrameMs : 0.0;
+    const bool performanceContractOk =
+        stable &&
+        effectiveFps >= kEngineMinWorkerEffectiveFps &&
+        averageFrameMs <= kEngineMaxWorkerFrameMs &&
+        averageProjectionMs <= kEngineMaxProjectionMs &&
+        averageReactionMs <= kEngineMaxReactionMs &&
+        averageRaymarchMs <= kEngineMaxRaymarchMs &&
+        averageLightingMs <= kEngineMaxLightingMs;
+    stable = stable && performanceContractOk;
     std::array<std::pair<const char*, double>, 6> hotspots = {{
         {"velocity", averageVelocityMs},
         {"reaction", averageReactionMs},
@@ -3053,7 +3200,28 @@ int runWorkerBenchmark(const std::string& args) {
     report << "  \"averageGpuLightingMs\": " << averageLightingMs << ",\n";
     report << "  \"averageGpuRaymarchMs\": " << averageRaymarchMs << ",\n";
     report << "  \"averageGpuPackMs\": " << averagePackMs << ",\n";
-    report << "  \"effectiveFps\": " << (averageFrameMs > 0.0 ? 1000.0 / averageFrameMs : 0.0) << ",\n";
+    report << "  \"sparseBrickEffectiveness\": {\n";
+    report << "    \"averageActiveBrickCount\": " << averageSparseActiveBrickCount << ",\n";
+    report << "    \"totalBrickCount\": " << sparseBrickCount << ",\n";
+    report << "    \"averageActiveFraction\": " << averageSparseActiveBrickFraction << ",\n";
+    report << "    \"maxBrickEmission\": " << maxSparseBrickEmission << ",\n";
+    report << "    \"maxBrickExtinction\": " << maxSparseBrickExtinction << ",\n";
+    report << "    \"maxEmptyStride\": " << kSparseRaymarchMaxEmptyStride << ",\n";
+    report << "    \"mediumEmptyStride\": " << kSparseRaymarchMediumEmptyStride << ",\n";
+    report << "    \"activeThreshold\": " << kSparseRaymarchActiveThreshold << ",\n";
+    report << "    \"fineThreshold\": " << kSparseRaymarchFineThreshold << ",\n";
+    report << "    \"traversal\": \"brick-exit-bounded sparse raymarch\"\n";
+    report << "  },\n";
+    report << "  \"effectiveFps\": " << effectiveFps << ",\n";
+    report << "  \"enginePerformanceContract\": {\n";
+    report << "    \"ok\": " << (performanceContractOk ? "true" : "false") << ",\n";
+    report << "    \"minEffectiveFps\": " << kEngineMinWorkerEffectiveFps << ",\n";
+    report << "    \"maxFrameMs\": " << kEngineMaxWorkerFrameMs << ",\n";
+    report << "    \"maxProjectionMs\": " << kEngineMaxProjectionMs << ",\n";
+    report << "    \"maxReactionMs\": " << kEngineMaxReactionMs << ",\n";
+    report << "    \"maxRaymarchMs\": " << kEngineMaxRaymarchMs << ",\n";
+    report << "    \"maxLightingMs\": " << kEngineMaxLightingMs << "\n";
+    report << "  },\n";
     report << "  \"hotspotRanking\": [\n";
     for (std::size_t i = 0; i < hotspots.size(); ++i) {
         report << "    {\"pass\": \"" << hotspots[i].first << "\", \"averageMs\": " << hotspots[i].second << "}";
@@ -3071,9 +3239,7 @@ int runCudaWorker(const std::string& args) {
         return writeGpuSafetyStop("cuda-worker");
     }
     TimerResolutionScope timerResolution;
-    for (int scene = 0; scene < kSceneCount; ++scene) {
-        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
-    }
+    loadSceneEmitters();
     if (!initializeSharedViewport(false)) {
         return 2;
     }
@@ -3185,7 +3351,7 @@ int runCudaWorker(const std::string& args) {
             settings.sceneId != lastAppliedWorkerScene ||
             settings.sceneEpoch != lastAppliedWorkerEpoch;
         if (workerSceneChanged) {
-            settings.reset = lastAppliedWorkerScene < 0 ? 1 : 0;
+            settings.reset = 1;
             accumulatedPhysicsDt = 0.0f;
             framesSincePhysics = kWorkerPhysicsFrameInterval;
             lastAppliedWorkerScene = settings.sceneId;
@@ -3203,9 +3369,33 @@ int runCudaWorker(const std::string& args) {
             settings.reset != 0 ||
             kWorkerPhysicsFrameInterval <= 1 ||
             framesSincePhysics >= kWorkerPhysicsFrameInterval;
-        settings.dt = advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt;
+        const int requestedDebugMode = settings.renderDebugMode;
+        const int requestedPlumeTestMode = settings.plumeTestMode;
+        const int requestedSimPaused = settings.simPaused;
+        const float requestedWind = settings.wind;
+        const float requestedTurbulence = settings.turbulence;
+        const float requestedSmoke = settings.smoke;
+        const float requestedIntensity = settings.intensity;
+        if (requestedSimPaused != 0) {
+            advancePhysics = false;
+        }
+        settings.dt = requestedSimPaused != 0 ? 0.0f : (advancePhysics ? std::max(dt, accumulatedPhysicsDt) : dt);
         applyCanonicalFireSettings(settings);
         applySceneEmitterParams(settings);
+        settings.renderDebugMode = clampRenderDebugMode(requestedDebugMode);
+        settings.plumeTestMode = requestedPlumeTestMode != 0 ? 1 : 0;
+        settings.simPaused = requestedSimPaused != 0 ? 1 : 0;
+        if (settings.plumeTestMode != 0) {
+            settings.wind = 0.0f;
+            settings.turbulence = 0.0f;
+            settings.smoke = 0.20f;
+            settings.intensity = 1.0f;
+        } else {
+            settings.wind = requestedWind;
+            settings.turbulence = std::max(requestedTurbulence, kTurbulence);
+            settings.smoke = requestedSmoke;
+            settings.intensity = requestedIntensity;
+        }
         g_sharedViewport->activeSceneEpoch = settings.sceneEpoch;
         int publishSlot = -1;
         const auto frameStart = Clock::now();
@@ -3315,7 +3505,7 @@ int runCudaWorker(const std::string& args) {
             sizeof(g_sharedViewport->statusText),
             "CUDA worker streaming FP16 D3D11 ring slot %d %s",
             publishSlot,
-            advancePhysics ? "physics" : "render");
+            settings.simPaused != 0 ? "paused" : (advancePhysics ? "physics" : "render"));
     }
 
     fireCudaUnregisterD3D11Texture();
@@ -3814,12 +4004,12 @@ int runInputStressTest() {
     std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
     std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, packBgra(0.020f, 0.022f, 0.022f));
     for (int i = 0; i < 80; ++i) {
-        FireSettings settings;
+        FireSettings settings = {};
         settings.mouseX = (i % 2) == 0 ? -4.0f : 5.0f;
         settings.mouseY = (i % 3) == 0 ? -3.0f : 4.0f;
         settings.showGizmos = 1;
         settings.activeGizmo = (i % 8) - 2;
-        settings.sceneId = i % kSceneCount;
+        settings.sceneId = kProductSceneId;
         settings.wind = -2.0f + static_cast<float>(i % 17) * 0.25f;
         settings.turbulence = -1.0f + static_cast<float>(i % 23) * 0.15f;
         settings.smoke = -0.5f + static_cast<float>(i % 11) * 0.24f;
@@ -3831,11 +4021,58 @@ int runInputStressTest() {
     return 0;
 }
 
+int runNativeUiSnapshot() {
+    CreateDirectoryA("out", nullptr);
+    std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
+    std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, packBgra(0.014f, 0.015f, 0.016f));
+    for (int y = 0; y < kFrameHeight; ++y) {
+        const float fy = static_cast<float>(y) / static_cast<float>(std::max(1, kFrameHeight - 1));
+        for (int x = 0; x < kFrameWidth; ++x) {
+            const float fx = static_cast<float>(x) / static_cast<float>(std::max(1, kFrameWidth - 1));
+            const float sideShade = 0.030f * std::fabs(fx - 0.5f);
+            const float floor = smoothstepf(0.56f, 1.0f, fy);
+            const float ceiling = 1.0f - smoothstepf(0.0f, 0.32f, fy);
+            const float grid = (std::fmod(static_cast<float>(x), 96.0f) < 1.0f || std::fmod(static_cast<float>(y), 54.0f) < 1.0f) ? 0.010f : 0.0f;
+            const float r = 0.015f + floor * 0.018f + ceiling * 0.006f - sideShade + grid;
+            const float g = 0.016f + floor * 0.017f + ceiling * 0.007f - sideShade + grid;
+            const float b = 0.017f + floor * 0.016f + ceiling * 0.009f - sideShade + grid;
+            simFrame[static_cast<std::size_t>(y) * kFrameWidth + x] = packBgra(r, g, b);
+        }
+    }
+    const int floorY = 374;
+    drawLinePx(simFrame, 156, floorY, 804, floorY, 0.15f, 0.18f, 0.18f, 0.42f);
+    drawLinePx(simFrame, 256, 210, 156, floorY, 0.10f, 0.13f, 0.14f, 0.36f);
+    drawLinePx(simFrame, 704, 210, 804, floorY, 0.10f, 0.13f, 0.14f, 0.36f);
+    for (int i = -4; i <= 4; ++i) {
+        const int x = 480 + i * 56;
+        drawLinePx(simFrame, x, floorY, 480 + i * 118, 526, 0.08f, 0.11f, 0.12f, 0.28f);
+    }
+    for (int i = 0; i < 6; ++i) {
+        const int y = floorY + i * 22;
+        drawLinePx(simFrame, 160 + i * 24, y, 800 - i * 24, y, 0.08f, 0.11f, 0.12f, 0.26f);
+    }
+    fillRect(simFrame, {432, floorY - 8, 96, 20}, 0.10f, 0.30f, 0.34f, 0.20f);
+    drawCirclePx(simFrame, 480, floorY, 24, 0.12f, 0.72f, 0.84f, 0.54f);
+    drawCirclePx(simFrame, 480, floorY, 5, 0.96f, 0.42f, 0.12f, 0.72f);
+    FireSettings settings = {};
+    applyCanonicalFireSettings(settings);
+    settings.showGizmos = 0;
+    settings.activeGizmo = 1;
+    settings.sceneId = kProductSceneId;
+    settings.wind = 0.0f;
+    settings.turbulence = 1.0f;
+    std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "native UI visual proof snapshot");
+    g_pointerFrameX = kProductSceneButtonRect.x + kProductSceneButtonRect.w / 2;
+    g_pointerFrameY = kProductSceneButtonRect.y + kProductSceneButtonRect.h / 2;
+    g_leftDown = false;
+    g_rightDown = false;
+    composeAppFrame(frame, simFrame, settings, true);
+    return writeBmp("out\\native-ui-snapshot.bmp", frame, kFrameWidth, kFrameHeight) ? 0 : 3;
+}
+
 int runCudaSmokeTest() {
     CreateDirectoryA("out", nullptr);
-    for (int scene = 0; scene < kSceneCount; ++scene) {
-        g_sceneEmitters[scene] = loadSceneEmitterParams(scene);
-    }
+    loadSceneEmitters();
     std::vector<std::uint32_t> frame(kFrameWidth * kFrameHeight, 0xff000000u);
     std::vector<std::uint32_t> simFrame(kFrameWidth * kFrameHeight, 0xff000000u);
 
@@ -3846,7 +4083,7 @@ int runCudaSmokeTest() {
     bool ok = true;
     constexpr int kSmokeFrames = 64;
     for (int i = 0; i < kSmokeFrames; ++i) {
-        FireSettings settings;
+        FireSettings settings = {};
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
@@ -3892,7 +4129,11 @@ int runValidation(const std::string& args) {
     const std::string outputDir = outputDirArg.empty() ? "out" : outputDirArg;
     const int validationFrames = argumentIntValue(args, "--validation-frames=", 96, 8, 240);
     const bool poolFireCalibration = args.find("--pool-fire-calibration") != std::string::npos;
-    const int validationScene = argumentIntValue(args, "--scene=", poolFireCalibration ? 3 : 0, 0, kSceneCount - 1);
+    (void)argumentIntValue(args, "--scene=", kProductSceneId, 0, kSceneCount - 1);
+    const int validationScene = kProductSceneId;
+    const int validationDebugMode = argumentIntValue(args, "--debug-mode=", kRenderDebugFinal, kRenderDebugFinal, kRenderDebugModeCount - 1);
+    const bool plumeTestMode = args.find("--plume-test") != std::string::npos;
+    const bool debugCaptureMode = !renderDebugModeIsFinal(validationDebugMode);
     g_sceneEmitters[validationScene] = loadSceneEmitterParams(validationScene);
     if (!ensureDirectoryTree(outputDir)) {
         return 3;
@@ -3922,7 +4163,9 @@ int runValidation(const std::string& args) {
            "maxProgress,maxTurbulenceEnergy,flameHeightMeters,"
            "meanOpticalDepth,meanSceneLight,meanSceneShadow,flameMassProxy,smokeMassProxy,flameSmokeOverlapProxy,"
            "meanVolumetricShadow,meanRoomIrradiance,heatReleaseProxy,divergenceBeforeL2,divergenceAfterL2,"
-           "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,invalidCells\n";
+           "divergenceBeforeMax,divergenceAfterMax,divergenceReduction,"
+           "sparseActiveBrickCount,sparseBrickCount,sparseActiveBrickFraction,sparseMaxBrickEmission,sparseMaxBrickExtinction,"
+           "sparseMaxEmptyStride,sparseMediumEmptyStride,sparseActiveThreshold,sparseFineThreshold,invalidCells\n";
     csv << std::fixed << std::setprecision(6);
 
     FireCudaFrameMetrics finalMetrics = {};
@@ -3936,6 +4179,10 @@ int runValidation(const std::string& args) {
     double totalLightingMs = 0.0;
     double totalRaymarchMs = 0.0;
     double totalPackMs = 0.0;
+    double totalSparseActiveBrickCount = 0.0;
+    double totalSparseActiveBrickFraction = 0.0;
+    float maxSparseBrickEmission = 0.0f;
+    float maxSparseBrickExtinction = 0.0f;
     double totalReduction = 0.0;
     float worstAfterL2 = 0.0f;
     float worstAfterMax = 0.0f;
@@ -3946,7 +4193,7 @@ int runValidation(const std::string& args) {
     metricFrames.reserve(static_cast<std::size_t>(validationFrames));
 
     for (int i = 0; i < validationFrames; ++i) {
-        FireSettings settings;
+        FireSettings settings = {};
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
@@ -3967,12 +4214,26 @@ int runValidation(const std::string& args) {
         settings.detail = 0.98f;
         applyCanonicalFireSettings(settings);
         applySceneEmitterParams(settings);
-        settings.turbulence = std::max(settings.turbulence, 1.08f);
-        settings.smoke = std::max(settings.smoke, 1.02f);
-        settings.intensity = std::max(settings.intensity, 1.18f);
-        settings.cameraYaw = 0.18f;
-        settings.cameraPitch = 0.08f;
-        settings.cameraDistance = 2.62f;
+        settings.renderDebugMode = validationDebugMode;
+        settings.plumeTestMode = plumeTestMode ? 1 : 0;
+        if (plumeTestMode) {
+            settings.wind = 0.0f;
+            settings.turbulence = 0.0f;
+            settings.smoke = 0.20f;
+            settings.intensity = 1.0f;
+        } else {
+            settings.turbulence = std::max(settings.turbulence, 0.82f);
+            settings.smoke = std::max(settings.smoke, 1.02f);
+            settings.intensity = std::max(settings.intensity, 1.18f);
+        }
+        const SceneCameraProfile& camera = sceneCameraProfile(validationScene);
+        settings.cameraYaw = camera.yaw;
+        settings.cameraPitch = camera.pitch;
+        settings.cameraDistance = camera.distance;
+        settings.cameraTargetX = camera.targetX;
+        settings.cameraTargetY = camera.targetY;
+        settings.cameraTargetZ = camera.targetZ;
+        settings.cameraFovYDegrees = camera.fovYDegrees;
 
         FireCudaFrameMetrics metrics;
         if (!fireCudaStepAndRenderMeasured(simFrame.data(), settings, &metrics)) {
@@ -3993,7 +4254,10 @@ int runValidation(const std::string& args) {
             << metrics.flameMassProxy << "," << metrics.smokeMassProxy << "," << metrics.flameSmokeOverlapProxy << ","
             << metrics.meanVolumetricShadow << "," << metrics.meanRoomIrradiance << "," << metrics.heatReleaseProxy << "," << metrics.divergenceBeforeL2 << ","
             << metrics.divergenceAfterL2 << "," << metrics.divergenceBeforeMax << "," << metrics.divergenceAfterMax << ","
-            << metrics.divergenceReduction << "," << metrics.invalidCells << "\n";
+            << metrics.divergenceReduction << "," << metrics.sparseActiveBrickCount << "," << metrics.sparseBrickCount << ","
+            << metrics.sparseActiveBrickFraction << "," << metrics.sparseMaxBrickEmission << "," << metrics.sparseMaxBrickExtinction << ","
+            << metrics.sparseRaymarchMaxEmptyStride << "," << metrics.sparseRaymarchMediumEmptyStride << ","
+            << metrics.sparseRaymarchActiveThreshold << "," << metrics.sparseRaymarchFineThreshold << "," << metrics.invalidCells << "\n";
 
         stable = stable && metrics.invalidCells == 0;
         stable = stable && metrics.divergenceAfterL2 < 1.25f;
@@ -4006,12 +4270,16 @@ int runValidation(const std::string& args) {
         totalLightingMs += metrics.gpuLightingMs;
         totalRaymarchMs += metrics.gpuRaymarchMs;
         totalPackMs += metrics.gpuPackMs;
+        totalSparseActiveBrickCount += metrics.sparseActiveBrickCount;
+        totalSparseActiveBrickFraction += metrics.sparseActiveBrickFraction;
         totalReduction += metrics.divergenceReduction;
         worstAfterL2 = std::max(worstAfterL2, metrics.divergenceAfterL2);
         worstAfterMax = std::max(worstAfterMax, metrics.divergenceAfterMax);
         minReduction = std::min(minReduction, metrics.divergenceReduction);
         maxHeat = std::max(maxHeat, metrics.maxHeat);
         maxFlameHeight = std::max(maxFlameHeight, metrics.flameHeightMeters);
+        maxSparseBrickEmission = std::max(maxSparseBrickEmission, metrics.sparseMaxBrickEmission);
+        maxSparseBrickExtinction = std::max(maxSparseBrickExtinction, metrics.sparseMaxBrickExtinction);
         finalMetrics = metrics;
         finalSettings = settings;
         metricFrames.push_back(metrics);
@@ -4027,6 +4295,8 @@ int runValidation(const std::string& args) {
     const double averageLightingMs = totalLightingMs / frames;
     const double averageRaymarchMs = totalRaymarchMs / frames;
     const double averagePackMs = totalPackMs / frames;
+    const double averageSparseActiveBrickCount = totalSparseActiveBrickCount / frames;
+    const double averageSparseActiveBrickFraction = totalSparseActiveBrickFraction / frames;
     const double averageReduction = totalReduction / frames;
     std::vector<TargetEnvelope> targets = loadTargetEnvelopes(targetPath);
     const CalibrationReport calibration = compareCalibrationSeries(calibrationPath, geometryPath, metricFrames);
@@ -4050,6 +4320,8 @@ int runValidation(const std::string& args) {
             target.observed = finalMetrics.meanSceneLight;
         } else if (target.metric == "finalMeanSceneShadow") {
             target.observed = finalMetrics.meanSceneShadow;
+        } else if (target.metric == "finalMeanRoomIrradiance") {
+            target.observed = finalMetrics.meanRoomIrradiance;
         } else if (target.metric == "finalHeatReleaseProxy") {
             target.observed = finalMetrics.heatReleaseProxy;
         } else if (target.metric == "finalCharSum") {
@@ -4094,8 +4366,14 @@ int runValidation(const std::string& args) {
             target.observed = static_cast<float>(averageSolveMs);
         } else if (target.metric == "averageGpuRenderMs") {
             target.observed = static_cast<float>(averageRenderMs);
+        } else if (target.metric == "averageGpuReactionMs") {
+            target.observed = static_cast<float>(averageReactionMs);
+        } else if (target.metric == "averageGpuProjectionMs") {
+            target.observed = static_cast<float>(averageProjectionMs);
         } else if (target.metric == "averageGpuLightingMs") {
             target.observed = static_cast<float>(averageLightingMs);
+        } else if (target.metric == "averageGpuRaymarchMs") {
+            target.observed = static_cast<float>(averageRaymarchMs);
         } else if (target.metric == "calibrationHrrShapeRmse") {
             target.observed = calibration.hrrShapeRmse;
         } else if (target.metric == "calibrationMassShapeRmse") {
@@ -4128,20 +4406,47 @@ int runValidation(const std::string& args) {
     stable = stable && finalMetrics.frameIndex >= validationFrames - 1;
     stable = stable && maxHeat > 0.50f;
     stable = stable && maxFlameHeight > 0.20f;
-    stable = stable && imageStats.maxLuma > envelope.minMaxLuma;
-    stable = stable && imageStats.meanLuma > envelope.minMeanLuma;
-    stable = stable && finalMetrics.flameMassProxy >= envelope.minFlameMassProxy;
-    stable = stable && imageStats.brightPixels >= envelope.minBrightPixels;
-    if (!poolFireCalibration) {
+    if (!debugCaptureMode) {
+        stable = stable && imageStats.maxLuma > envelope.minMaxLuma;
+        stable = stable && imageStats.meanLuma > envelope.minMeanLuma;
+        stable = stable && finalMetrics.flameMassProxy >= envelope.minFlameMassProxy;
+        stable = stable && imageStats.brightPixels >= envelope.minBrightPixels;
+    }
+    if (!poolFireCalibration && !debugCaptureMode) {
         stable = stable && maxFlameHeight <= envelope.maxFlameHeightMeters;
         stable = stable && finalMetrics.smokeMassProxy <= std::max(1.0f, finalMetrics.flameMassProxy) * envelope.maxSmokeToFlameRatio;
         stable = stable && finalMetrics.charSum <= envelope.maxCharSum;
         stable = stable && finalMetrics.ashSum <= envelope.maxAshSum;
     }
+    const bool methanolTruthContractOk =
+        !poolFireCalibration ||
+        debugCaptureMode ||
+        (calibration.calibrationReadable &&
+            calibration.geometryReadable &&
+            calibration.hrrSamplesCompared > 0 &&
+            calibration.massSamplesCompared > 0 &&
+            calibration.smokeOpticalDepthSamplesCompared > 0 &&
+            calibration.radiantHeatFluxSamplesCompared > 0 &&
+            calibration.hrrShapeRmse >= 0.0f &&
+            calibration.hrrShapeRmse <= kNistMethanolMaxHrrShapeRmse &&
+            calibration.massShapeRmse >= 0.0f &&
+            calibration.massShapeRmse <= kNistMethanolMaxMassShapeRmse &&
+            calibration.smokeOpticalDepthShapeRmse >= 0.0f &&
+            calibration.smokeOpticalDepthShapeRmse <= kNistMethanolMaxSmokeShapeRmse &&
+            calibration.radiantHeatFluxShapeRmse >= 0.0f &&
+            calibration.radiantHeatFluxShapeRmse <= kNistMethanolMaxRadiantHeatFluxShapeRmse &&
+            averageSolveMs <= kNistMethanolMaxAverageSolveMs &&
+            averageRenderMs <= kNistMethanolMaxAverageRenderMs &&
+            averageRaymarchMs <= kNistMethanolMaxAverageRaymarchMs &&
+            imageStats.brightPixels >= kNistMethanolMinBrightPixels &&
+            imageStats.whiteCoreFraction >= kNistMethanolMinWhiteCoreFraction &&
+            maxFlameHeight <= envelope.maxFlameHeightMeters &&
+            finalMetrics.meanRoomIrradiance >= kEngineMinMeanRoomIrradiance);
+    stable = stable && methanolTruthContractOk;
     stable = stable && (averageReduction > 0.02 || worstAfterL2 < 0.02f);
 
     finalSettings.showGizmos = 0;
-    finalSettings.renderDebugMode = 0;
+    finalSettings.renderDebugMode = validationDebugMode;
     composeAppFrame(appFrame, simFrame, finalSettings, true);
     const bool wroteRaw = writeBmp(rawFramePath.c_str(), simFrame, kFrameWidth, kFrameHeight);
     const bool wroteApp = writeBmp(appFramePath.c_str(), appFrame, kFrameWidth, kFrameHeight);
@@ -4159,19 +4464,35 @@ int runValidation(const std::string& args) {
     json << "    \"runtime\": \"CUDA-only\",\n";
     json << "    \"pressureSolver\": \"weighted red-black SOR\",\n";
     json << "    \"scalarTransport\": \"clamped MacCormack/BFECC correction over semi-Lagrangian backtraces\",\n";
-    json << "    \"combustion\": \"fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable\",\n";
+    json << "    \"combustion\": \"fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable; methanol-pool mode uses NIST mass-burn-rate, heat-of-combustion, radiative-fraction, soot-yield, ambient-temperature, and stoichiometric oxygen constants\",\n";
     json << "    \"turbulence\": \"LES-style scalar turbulence-energy closure\",\n";
     json << "    \"soot\": \"soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\",\n";
     json << "    \"renderer\": \"linear HDR blackbody Beer-Lambert participating media with scene radiance volume GI, volume shadowing, emitter scattering, and ACES display tonemapping\"\n";
     json << "  },\n";
     json << "  \"runtimeConfig\": \"" << (poolFireCalibration ? "nist-pool-fire-calibration" : "canonical") << "\",\n";
+    json << "  \"plumeTestMode\": " << (plumeTestMode ? "true" : "false") << ",\n";
+    json << "  \"debugCaptureMode\": " << (debugCaptureMode ? "true" : "false") << ",\n";
+    json << "  \"renderDebugMode\": \"" << renderDebugModeShortName(validationDebugMode) << "\",\n";
     json << "  \"sceneProfile\": {\n";
     json << "    \"key\": \"" << profile.key << "\",\n";
     json << "    \"sourceModel\": \"" << profile.sourceModel << "\",\n";
     json << "    \"fuelPhase\": \"" << profile.fuelPhase << "\",\n";
-    json << "    \"flameEnvelope\": \"" << profile.flameEnvelope << "\",\n";
-    json << "    \"expectsSelectedBurner\": " << (profile.expectsSelectedBurner ? "true" : "false") << "\n";
+    json << "    \"flameEnvelope\": \"" << profile.flameEnvelope << "\"\n";
     json << "  },\n";
+    if (poolFireCalibration) {
+        json << "  \"methanolPhysicalContract\": {\n";
+        json << "    \"poolDiameterMeters\": " << kNistMethanolPoolDiameterMeters << ",\n";
+        json << "    \"initialFuelMassKg\": " << kNistMethanolInitialFuelMassKg << ",\n";
+        json << "    \"measuredMassBurnRateGps\": " << kNistMethanolMeasuredMassBurnRateGps << ",\n";
+        json << "    \"massBurnRateUncertaintyGps\": " << kNistMethanolMassBurnRateUncertaintyGps << ",\n";
+        json << "    \"heatOfCombustionMjPerKg\": " << kNistMethanolHeatOfCombustionMjPerKg << ",\n";
+        json << "    \"radiativeFraction\": " << kNistMethanolRadiativeFraction << ",\n";
+        json << "    \"sootYieldKgPerKg\": " << kNistMethanolSootYieldKgPerKg << ",\n";
+        json << "    \"ambientTemperatureK\": " << kNistMethanolAmbientTemperatureK << ",\n";
+        json << "    \"stoichOxygenFuelMassRatio\": " << kNistMethanolStoichOxygenFuelMassRatio << ",\n";
+        json << "    \"maxSmokeOpticalDepth\": " << kNistMethanolMaxSmokeOpticalDepth << "\n";
+        json << "  },\n";
+    }
     json << "  \"datasetId\": \"" << jsonEscape(datasetId) << "\",\n";
     json << "  \"manifestPath\": \"" << jsonEscape(manifestPath) << "\",\n";
     json << "  \"outputDir\": \"" << jsonEscape(outputDir) << "\",\n";
@@ -4213,6 +4534,20 @@ int runValidation(const std::string& args) {
     json << "  \"averageGpuLightingMs\": " << averageLightingMs << ",\n";
     json << "  \"averageGpuRaymarchMs\": " << averageRaymarchMs << ",\n";
     json << "  \"averageGpuPackMs\": " << averagePackMs << ",\n";
+    json << "  \"sparseBrickEffectiveness\": {\n";
+    json << "    \"activeBrickCount\": " << finalMetrics.sparseActiveBrickCount << ",\n";
+    json << "    \"totalBrickCount\": " << finalMetrics.sparseBrickCount << ",\n";
+    json << "    \"activeFraction\": " << finalMetrics.sparseActiveBrickFraction << ",\n";
+    json << "    \"averageActiveBrickCount\": " << averageSparseActiveBrickCount << ",\n";
+    json << "    \"averageActiveFraction\": " << averageSparseActiveBrickFraction << ",\n";
+    json << "    \"maxBrickEmission\": " << maxSparseBrickEmission << ",\n";
+    json << "    \"maxBrickExtinction\": " << maxSparseBrickExtinction << ",\n";
+    json << "    \"maxEmptyStride\": " << finalMetrics.sparseRaymarchMaxEmptyStride << ",\n";
+    json << "    \"mediumEmptyStride\": " << finalMetrics.sparseRaymarchMediumEmptyStride << ",\n";
+    json << "    \"activeThreshold\": " << finalMetrics.sparseRaymarchActiveThreshold << ",\n";
+    json << "    \"fineThreshold\": " << finalMetrics.sparseRaymarchFineThreshold << ",\n";
+    json << "    \"traversal\": \"brick-exit-bounded sparse raymarch\"\n";
+    json << "  },\n";
     json << "  \"averageDivergenceReduction\": " << averageReduction << ",\n";
     json << "  \"minimumDivergenceReduction\": " << minReduction << ",\n";
     json << "  \"worstDivergenceAfterL2\": " << worstAfterL2 << ",\n";
@@ -4225,6 +4560,33 @@ int runValidation(const std::string& args) {
     json << "  \"finalFlameSmokeOverlapProxy\": " << finalMetrics.flameSmokeOverlapProxy << ",\n";
     json << "  \"finalMeanVolumetricShadow\": " << finalMetrics.meanVolumetricShadow << ",\n";
     json << "  \"finalMeanRoomIrradiance\": " << finalMetrics.meanRoomIrradiance << ",\n";
+    json << "  \"productLightingContract\": {\n";
+    json << "    \"ok\": " << (imageStats.meanLuma >= kEngineMinRoomMeanLuma &&
+        imageStats.maxLuma >= kEngineMinRoomMaxLuma &&
+        finalMetrics.meanRoomIrradiance >= kEngineMinMeanRoomIrradiance ? "true" : "false") << ",\n";
+    json << "    \"minMeanLuma\": " << kEngineMinRoomMeanLuma << ",\n";
+    json << "    \"minMaxLuma\": " << kEngineMinRoomMaxLuma << ",\n";
+    json << "    \"minMeanRoomIrradiance\": " << kEngineMinMeanRoomIrradiance << ",\n";
+    json << "    \"irradianceProbeCount\": " << kRoomIrradianceProbeCount << ",\n";
+    json << "    \"shadowRaySteps\": " << kRoomShadowRaySteps << "\n";
+    json << "  },\n";
+    if (poolFireCalibration) {
+        json << "  \"sceneTruthContract\": {\n";
+        json << "    \"ok\": " << (methanolTruthContractOk ? "true" : "false") << ",\n";
+        json << "    \"scene\": \"NIST_FCD_Methanol_1m_Pool_R1\",\n";
+        json << "    \"maxHrrShapeRmse\": " << kNistMethanolMaxHrrShapeRmse << ",\n";
+        json << "    \"maxMassShapeRmse\": " << kNistMethanolMaxMassShapeRmse << ",\n";
+        json << "    \"maxSmokeShapeRmse\": " << kNistMethanolMaxSmokeShapeRmse << ",\n";
+        json << "    \"maxRadiantHeatFluxShapeRmse\": " << kNistMethanolMaxRadiantHeatFluxShapeRmse << ",\n";
+        json << "    \"maxAverageSolveMs\": " << kNistMethanolMaxAverageSolveMs << ",\n";
+        json << "    \"maxAverageRenderMs\": " << kNistMethanolMaxAverageRenderMs << ",\n";
+        json << "    \"maxAverageRaymarchMs\": " << kNistMethanolMaxAverageRaymarchMs << ",\n";
+        json << "    \"minBrightPixels\": " << kNistMethanolMinBrightPixels << ",\n";
+        json << "    \"minWhiteCoreFraction\": " << kNistMethanolMinWhiteCoreFraction << ",\n";
+        json << "    \"maxFlameHeightMeters\": " << envelope.maxFlameHeightMeters << ",\n";
+        json << "    \"minMeanRoomIrradiance\": " << kEngineMinMeanRoomIrradiance << "\n";
+        json << "  },\n";
+    }
     json << "  \"finalHeatReleaseProxy\": " << finalMetrics.heatReleaseProxy << ",\n";
     json << "  \"finalCharSum\": " << finalMetrics.charSum << ",\n";
     json << "  \"finalAshSum\": " << finalMetrics.ashSum << ",\n";
@@ -4276,7 +4638,8 @@ int runCudaPreflight(const std::string& args) {
         return 3;
     }
     const int frames = argumentIntValue(args, "--frames=", 5, 3, 20);
-    const int scene = argumentIntValue(args, "--scene=", 2, 0, kSceneCount - 1);
+    (void)argumentIntValue(args, "--scene=", kProductSceneId, 0, kSceneCount - 1);
+    const int scene = kProductSceneId;
     const int volumeSliceDepth = argumentIntValue(args, "--volume-slice-depth=", 32, 4, 256);
     const int renderSliceRows = argumentIntValue(args, "--render-slice-rows=", 180, 16, 1024);
     const int medianBudgetMs = argumentIntValue(args, "--median-launch-budget-ms=", 800, 50, 2000);
@@ -4291,9 +4654,7 @@ int runCudaPreflight(const std::string& args) {
     budget.vramBudgetFraction = static_cast<float>(vramBudgetPercent) / 100.0f;
     fireCudaSetLaunchBudget(budget);
 
-    for (int i = 0; i < kSceneCount; ++i) {
-        g_sceneEmitters[i] = loadSceneEmitterParams(i);
-    }
+    loadSceneEmitters();
     std::vector<std::uint32_t> frame(static_cast<std::size_t>(kFrameWidth) * kFrameHeight, 0u);
     FireCudaDiagnostics before = {};
     const bool diagnosticsBeforeOk = fireCudaGetDiagnostics(&before);
@@ -4313,7 +4674,7 @@ int runCudaPreflight(const std::string& args) {
     bool stable = diagnosticsBeforeOk && diagnosticsAfterOk;
     FireCudaFrameMetrics lastMetrics = {};
     for (int i = 0; i < frames; ++i) {
-        FireSettings settings;
+        FireSettings settings = {};
         settings.width = kFrameWidth;
         settings.height = kFrameHeight;
         settings.dt = 1.0f / 60.0f;
@@ -4402,7 +4763,8 @@ int runCudaSliceFinder(const std::string& args) {
         return 3;
     }
     const int frames = argumentIntValue(args, "--frames=", 3, 3, 12);
-    const int scene = argumentIntValue(args, "--scene=", 2, 0, kSceneCount - 1);
+    (void)argumentIntValue(args, "--scene=", kProductSceneId, 0, kSceneCount - 1);
+    const int scene = kProductSceneId;
     const int medianBudgetMs = argumentIntValue(args, "--median-launch-budget-ms=", 800, 50, 2000);
     const int p95BudgetMs = argumentIntValue(args, "--p95-launch-budget-ms=", 1200, 50, 3000);
     const bool captureProfilerRange = args.find("--profiler-capture") != std::string::npos;
@@ -4421,9 +4783,7 @@ int runCudaSliceFinder(const std::string& args) {
     std::vector<SliceCandidateResult> results;
     SliceCandidateResult best;
 
-    for (int i = 0; i < kSceneCount; ++i) {
-        g_sceneEmitters[i] = loadSceneEmitterParams(i);
-    }
+    loadSceneEmitters();
 
     if (captureProfilerRange && !fireCudaProfilerStart()) {
         return 4;
@@ -4445,7 +4805,7 @@ int runCudaSliceFinder(const std::string& args) {
             std::vector<double> samples;
             bool stable = fireCudaInitialize(kFrameWidth, kFrameHeight, kSimulationGridWidth, kSimulationGridHeight);
             for (int frameIndex = 0; stable && frameIndex < frames; ++frameIndex) {
-                FireSettings settings;
+                FireSettings settings = {};
                 settings.width = kFrameWidth;
                 settings.height = kFrameHeight;
                 settings.dt = 1.0f / 60.0f;
@@ -4530,6 +4890,46 @@ int runCudaSliceFinder(const std::string& args) {
     return best.passed && report.good() ? 0 : 4;
 }
 
+int runDumpSceneSettings() {
+    CreateDirectoryA("out", nullptr);
+    std::ofstream out("out\\scene-settings-dump.json", std::ios::binary);
+    if (!out) {
+        return 3;
+    }
+    out << "{\n";
+    out << "  \"sceneSettingsDumpOk\": true,\n";
+    out << "  \"sceneCount\": 1,\n";
+    out << "  \"productSceneId\": " << kProductSceneId << ",\n";
+    out << "  \"productSceneKey\": \"" << sceneProfile(kProductSceneId).key << "\",\n";
+    out << "  \"referenceScenesRemovedFromProductDump\": true,\n";
+    out << "  \"scenes\": [\n";
+    for (int productIndex = 0; productIndex < 1; ++productIndex) {
+        const int scene = kProductSceneId;
+        const SceneEmitterParams emitter = loadSceneEmitterParams(scene);
+        FireSettings settings = {};
+        settings.sceneId = scene;
+        settings.sceneEpoch = scene + 1;
+        applyCanonicalFireSettings(settings);
+        applySceneEmitterToSettings(settings, emitter, settings.sceneEpoch, g_placement.scene(scene));
+        const SceneInstance instance = makeSceneInstance(scene, settings.sceneEpoch, emitter);
+        const std::string emitterPolicy = sceneEmitterSourcePolicy(scene);
+        out << "    {\n";
+        out << "      \"id\": " << scene << ",\n";
+        out << "      \"key\": \"" << sceneProfile(scene).key << "\",\n";
+        out << "      \"sourceMode\": " << settings.sceneSourceMode << ",\n";
+        out << "      \"emitterSourcePolicy\": \"" << jsonEscape(emitterPolicy) << "\",\n";
+        out << "      \"emitterCenterMeters\": [" << emitter.centerX << ", " << (emitter.heightNorm * 2.03f + 0.02f) << ", " << emitter.centerZ << "],\n";
+        out << "      \"settingsSourceMeters\": [" << settings.emitterCenterX << ", " << (settings.emitterHeightNorm * 2.03f + 0.02f) << ", " << settings.emitterCenterZ << "],\n";
+        out << "      \"sceneInstanceSourceMeters\": [" << instance.sourceX << ", " << instance.sourceY << ", " << instance.sourceZ << "],\n";
+        out << "      \"radiusMeters\": " << settings.emitterRadius << ",\n";
+        out << "      \"heightBandMeters\": " << (settings.emitterHeightBandNorm * 2.03f) << "\n";
+        out << "    }" << (productIndex + 1 == 1 ? "\n" : ",\n");
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.good() ? 0 : 3;
+}
+
 int runDiagnostics() {
     CreateDirectoryA("out", nullptr);
     FireCudaDiagnostics diagnostics;
@@ -4555,6 +4955,21 @@ int runDiagnostics() {
         out << "freeGlobalMemMiB=" << (diagnostics.freeGlobalMem / (1024ull * 1024ull)) << "\n";
         out << "allocatedCudaMiB=" << (diagnostics.allocatedBytes / (1024ull * 1024ull)) << "\n";
         out << "stagingCudaMiB=" << (diagnostics.stagingBytes / (1024ull * 1024ull)) << "\n";
+        out << "sparseBrickMetadata=brickSize=8,brickGrid=" << diagnostics.sparseBrickX
+            << "x" << diagnostics.sparseBrickY
+            << "x" << diagnostics.sparseBrickZ
+            << ",brickCount=" << diagnostics.sparseBrickCount
+            << ",channels=activeMask,densityMax,temperatureMax,emissionMax,extinctionMax,velocityMax,aabb\n";
+        out << "sparseBrickEffectiveness=activeBrickCount=" << diagnostics.sparseActiveBrickCount
+            << ",totalBrickCount=" << diagnostics.sparseBrickCount
+            << ",activeFraction=" << diagnostics.sparseActiveBrickFraction
+            << ",maxBrickEmission=" << diagnostics.sparseMaxBrickEmission
+            << ",maxBrickExtinction=" << diagnostics.sparseMaxBrickExtinction
+            << ",maxEmptyStride=" << diagnostics.sparseRaymarchMaxEmptyStride
+            << ",mediumEmptyStride=" << diagnostics.sparseRaymarchMediumEmptyStride
+            << ",activeThreshold=" << diagnostics.sparseRaymarchActiveThreshold
+            << ",fineThreshold=" << diagnostics.sparseRaymarchFineThreshold
+            << ",traversal=brick-exit-bounded-sparse-raymarch\n";
         out << "volumeSliceDepth=" << diagnostics.volumeSliceDepth << "\n";
         out << "renderSliceRows=" << diagnostics.renderSliceRows << "\n";
     } else {
@@ -4563,7 +4978,7 @@ int runDiagnostics() {
 
     out << "runtimeBackend=CUDA\n";
     out << "canonicalRuntimeState=scene,camera,controls,worker,frame,debug,and overlay transitions flow through CanonicalRuntimeState\n";
-    out << "runtimeTransitionReasons=startup,scene-switch,user-reset,worker-stale,worker-frame-copied,overlay-changed\n";
+    out << "runtimeTransitionReasons=startup,product-scene-refresh,user-reset,worker-stale,worker-frame-copied,overlay-changed\n";
     out << "liveCudaDefault=isolated-worker\n";
     out << "mainViewportKernelLaunches=false\n";
     out << "interactiveCudaViewport=FP16 D3D11 shared texture from isolated CUDA worker\n";
@@ -4585,24 +5000,50 @@ int runDiagnostics() {
     out << "workerLifecycleEvents=worker-lifecycle:<reason> entries in out/worker-events.log\n";
     out << "appPumpFps=" << static_cast<int>(kAppPumpFps) << "\n";
     out << "presentationTargetFps=" << static_cast<int>(kDisplayMaxPresentFps) << "\n";
-    out << "presentationPacing=2:1 fixed app pump to present cadence with intentional display-frame reuse\n";
+    out << "presentationPacing=2:1 fixed app pump with present-on-fresh-frame pacing to keep reused CUDA frames from starving the worker\n";
     out << "presentVsync=false\n";
     out << "kernelHotspotProfiling=worker benchmark reports true CUDA submit time, publish time, frame time, and sorted measured pass hotspots without quality reduction\n";
+    out << "enginePerformanceContract=minWorkerEffectiveFps>=" << kEngineMinWorkerEffectiveFps
+        << ",frameMs<=" << kEngineMaxWorkerFrameMs
+        << ",projectionMs<=" << kEngineMaxProjectionMs
+        << ",reactionMs<=" << kEngineMaxReactionMs
+        << ",raymarchMs<=" << kEngineMaxRaymarchMs
+        << ",lightingMs<=" << kEngineMaxLightingMs << "\n";
     out << "sceneRadianceFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "swapchainFormat=DXGI_FORMAT_R16G16B16A16_FLOAT\n";
     out << "renderGraphPasses=" << kRenderGraphPasses << "\n";
-    out << "debugOverlaySystem=source markers, selected burner ports, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness\n";
-    out << "sceneInstanceContract=SceneInstance owns scene id, epoch, emitter, source center/radius/height, and selected burner state\n";
+    out << "rendererContractHeader=src\\firesim_render_contract.h,stages=" << (sizeof(kFireSimRenderContracts) / sizeof(kFireSimRenderContracts[0])) << "\n";
+    out << "debugOverlaySystem=methanol source marker, volume bounds, fuel-bed bounds, origin axes, frame age, and texture ring freshness\n";
+    out << "nativeUiEngine=" << fireUiEngineName() << "\n";
+    out << "nativeUiEnginePath=" << fireUiEnginePath() << "\n";
+    out << "nativeUiAdapter=FireSim overlay panels/buttons/sliders resolve through native UI frame graph, HUD scene metadata, skin packs, skin atlas slots, surface programs, engine icon glyphs, and native-ui-engine canvas rasterization\n";
+    out << "nativeUiFeatures=notched material surfaces, cut-corner chrome, engine-owned icon primitives, cached native font atlas, hover and pressure fields, Tech Cybernetic skin pack, UiHudScene parts, UiSkinAtlas generation, UiSurfaceProgram layer stack\n";
+    out << "sceneInstanceContract=SceneInstance owns product scene id, epoch, emitter, and methanol source center/radius/height\n";
     out << "renderGraphOwnsCameraResponse=true\n";
     out << "hdrCameraPipeline=" << kHdrCameraPipeline << "\n";
     out << "uiOverlayAfterCameraResponse=true\n";
     out << "meshLightingPass=removed; fire scenes are CUDA volumes without imported GLB geometry\n";
     out << "volumeSmokeFlameSeparation=resolved flame-sheet mask suppresses soot absorption and scattering inside emissive samples\n";
-    out << "volumetricShadowing=scene shadow volume stores soot optical transmittance and room rays sample source-to-surface visibility\n";
-    out << "roomLightingLayer=room surfaces receive flame-fed irradiance gated by volumetric shadow and material albedo\n";
-    out << "sceneSourceModels=gas selected low-soot burner ring; campfire log-contact char bed; room tray fuel bed; NIST methanol 1m liquid pool\n";
+    out << "fieldCouplingDebug=plume-test disables wind/turbulence, vertical-velocity view shows signed MAC Y velocity, reaction view shows progress/pyrolysis, and product view shows soot/product opacity\n";
+    out << "volumetricShadowing=scene shadow volume stores soot optical transmittance and product rays sample source-to-surface visibility\n";
+    out << "productLightingLayer=methanol floor/wall response receives flame-fed irradiance gated by volumetric shadow and material albedo\n";
+    out << "productLightingContract=product irradiance probes and volume shadow rays are anchored to the active SceneInstance emitter; probes="
+        << kRoomIrradianceProbeCount << ",shadowSteps=" << kRoomShadowRaySteps << "\n";
+    out << "productSceneIsolation=interactive and desktop runtime expose only the NIST methanol product scene\n";
+    out << "sceneSourceModels=NIST methanol 1m liquid pool product path only; non-product scene assets are disabled backlog, not runtime scenes\n";
     out << "emberSystem=field-spawned char/pyrolysis particles with local velocity advection, drag, cooling, and lifetimes\n";
     out << "fieldOwnership=simulation physical scalars, renderer optical scalars, MAC velocity, and lighting snapshots are copied through explicit ownership tables\n";
+    out << "sparseVolumeTraversal=raymarch uses active-field empty-space skipping with sparse thresholds and adaptive empty strides\n";
+    out << "sparseRaymarchContract=maxSteps=" << kSparseRaymarchMaxSteps
+        << ",maxEmptyStride=" << kSparseRaymarchMaxEmptyStride
+        << ",mediumEmptyStride=" << kSparseRaymarchMediumEmptyStride
+        << ",activeThreshold=" << kSparseRaymarchActiveThreshold
+        << ",fineThreshold=" << kSparseRaymarchFineThreshold << "\n";
+    out << "temporalVolumeSampling=historyFrames=" << kTemporalVolumeHistoryFrames
+        << ",blueNoisePhases=" << kTemporalBlueNoisePhases
+        << ",phaseSource=frame-index jitter\n";
+    out << "radianceCache=scene light volume updates every " << kRadianceCacheUpdateIntervalFrames
+        << " simulation frames unless reset or first frame forces refresh\n";
     out << "gpuKernelSafetyStop=true\n";
     out << "cudaPreflightRequiredForInteractiveStart=true\n";
     out << "cudaPreflightArtifact=out\\cuda-preflight.json\n";
@@ -4612,16 +5053,27 @@ int runDiagnostics() {
     out << "cpuFallback=false\n";
     out << "pressureSolver=weighted red-black SOR\n";
     out << "pressureIterations=40\n";
-    out << "combustionModel=fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable\n";
+    out << "combustionModel=fuel-bed char/ash pyrolysis plus oxygen-limited Arrhenius progress variable; NIST methanol pool uses measured mass-burn rate, heat of combustion, radiative fraction, soot yield, ambient temperature, and stoichiometric oxygen demand\n";
+    out << "methanolPhysicalContract=poolDiameterM=" << kNistMethanolPoolDiameterMeters
+        << ",initialFuelMassKg=" << kNistMethanolInitialFuelMassKg
+        << ",massBurnRateGps=" << kNistMethanolMeasuredMassBurnRateGps
+        << ",massBurnRateUncertaintyGps=" << kNistMethanolMassBurnRateUncertaintyGps
+        << ",heatOfCombustionMjPerKg=" << kNistMethanolHeatOfCombustionMjPerKg
+        << ",radiativeFraction=" << kNistMethanolRadiativeFraction
+        << ",sootYieldKgPerKg=" << kNistMethanolSootYieldKgPerKg
+        << ",ambientTemperatureK=" << kNistMethanolAmbientTemperatureK
+        << ",stoichOxygenFuelMassRatio=" << kNistMethanolStoichOxygenFuelMassRatio
+        << ",maxSmokeOpticalDepth=" << kNistMethanolMaxSmokeOpticalDepth << "\n";
     out << "turbulenceModel=LES-style scalar turbulence-energy closure\n";
     out << "sootModel=soot optical depth with oxidation feedback and particle-size-derived absorption/scattering\n";
     out << "volumeRenderer=linear HDR blackbody Beer-Lambert participating media with scene radiance volume GI, volume shadowing, emitter scattering, and ACES display tonemapping\n";
     out << "rendererStorage=CUDA float4 HDR radiance written directly to mapped FP16 D3D11 surface for live display\n";
-    out << "renderDebugModes=final,flame,soot,transmittance,temperature,fuel-char,velocity\n";
+    out << "renderDebugModes=" << renderDebugModeDiagnosticsList() << "\n";
     out << "cleanViewportMode=C key hides app chrome and CUDA gizmos for visual judging\n";
     out << "scalarTransport=clamped MacCormack/BFECC correction for transported scalar fields\n";
     out << "calibrationInputs=HRR,mass loss,thermocouple,IR,video-derived plume height,geometry sidecar\n";
     out << "runtimeConfig=canonical\n";
+    out << "runtimeQualityContract=src/runtime_quality.h\n";
     out << "requestedGrid=" << kSimulationGridWidth << "x" << kSimulationGridHeight << "\n";
     out << "raymarchSteps=" << kRaymarchSteps << "\n";
     out << "emberCount=" << kEmberCount << "\n";
@@ -4632,8 +5084,12 @@ int runDiagnostics() {
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     const std::string args = commandLine != nullptr ? commandLine : "";
+    appendRuntimeEvent("app-process-entered", args.c_str());
     if (args.find("--diagnostics") != std::string::npos) {
         return runDiagnostics();
+    }
+    if (args.find("--dump-scene-settings") != std::string::npos) {
+        return runDumpSceneSettings();
     }
     if (args.find("--worker-benchmark") != std::string::npos) {
         return runWorkerBenchmark(args);
@@ -4663,6 +5119,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         const int code = runInputStressTest();
         ExitProcess(static_cast<UINT>(code));
     }
+    if (args.find("--native-ui-snapshot") != std::string::npos) {
+        const int code = runNativeUiSnapshot();
+        ExitProcess(static_cast<UINT>(code));
+    }
     g_useCudaBackend = false;
     g_interactiveGpuKernelLaunchAllowed = gpuKernelLaunchAllowed(args);
     g_cudaPreflightPassed = cudaPreflightArtifactFresh();
@@ -4675,11 +5135,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     } else if (workerDefaultRequested && !g_cudaPreflightPassed) {
         std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "CUDA worker locked; run --cuda-preflight first");
     }
-    g_activeScene = argumentIntValue(args, "--scene=", 0, 0, kSceneCount - 1);
-    if (g_activeScene != 0) {
-        g_needsReset = true;
-        g_resetFramesRemaining = 1;
-    }
+    (void)argumentIntValue(args, "--scene=", kProductSceneId, 0, kSceneCount - 1);
+    g_activeScene = kProductSceneId;
+    g_renderDebugMode = argumentIntValue(args, "--debug-mode=", kRenderDebugFinal, kRenderDebugFinal, kRenderDebugModeCount - 1);
+    g_plumeTestMode = args.find("--plume-test") != std::string::npos;
+    const int autoCloseMs = argumentIntValue(args, "--auto-close-ms=", 0, 0, 600000);
+    g_focusSceneMode = true;
+    g_focusSceneId = kProductSceneId;
+    applySceneCameraProfile(kProductSceneId);
+    g_needsReset = true;
+    g_resetFramesRemaining = 1;
 
     timeBeginPeriod(1);
     g_frame.assign(kFrameWidth * kFrameHeight, 0xff000000u);
@@ -4702,6 +5167,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
 
     using Clock = std::chrono::high_resolution_clock;
     auto last = Clock::now();
+    const auto appStart = last;
     auto fpsLast = last;
     auto nextDisplayPresent = last;
     const auto displayPresentStep = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / kDisplayMaxPresentFps));
@@ -4738,10 +5204,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         last = now;
         dt = std::max(1.0f / 240.0f, std::min(dt, 1.0f / 25.0f));
 
-        FireSettings settings;
-        settings.width = kFrameWidth;
-        settings.height = kFrameHeight;
-        settings.dt = dt;
+        FireSettings settings = makeBaseFireSettings(dt, g_sceneEpoch);
         settings.mouseX = g_mouseX;
         settings.mouseY = g_mouseY;
         settings.leftDown = (g_leftDown && g_leftInViewport && g_activeGizmo == 1) ? 1 : 0;
@@ -4749,16 +5212,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         settings.reset = (g_needsReset || g_resetFramesRemaining > 0) ? 1 : 0;
         settings.showGizmos = (g_showGizmos && !g_cleanViewportMode) ? 1 : 0;
         settings.activeGizmo = g_activeGizmo;
-        settings.sceneId = g_activeScene;
         settings.wind = g_wind;
-        applyCanonicalFireSettings(settings);
-        applySceneEmitterParams(settings);
         settings.renderDebugMode = g_renderDebugMode;
-        settings.turbulence = std::max(g_turbulence, kTurbulence);
+        settings.plumeTestMode = g_plumeTestMode ? 1 : 0;
+        settings.simPaused = g_simPaused ? 1 : 0;
+        if (g_plumeTestMode) {
+            settings.wind = 0.0f;
+            settings.turbulence = 0.0f;
+            settings.smoke = 0.20f;
+            settings.intensity = 1.0f;
+        } else {
+            settings.turbulence = std::max(g_turbulence, kTurbulence);
+        }
         settings.detail = 0.92f;
-        settings.cameraYaw = g_cameraYaw;
-        settings.cameraPitch = g_cameraPitch;
-        settings.cameraDistance = g_cameraDistance;
+        applySceneEmitterParams(settings);
+        applyCameraToSettings(settings);
         if (settings.reset != 0) {
             invalidateDisplayedCudaFrame();
             g_needsReset = false;
@@ -4771,12 +5239,20 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         workerSettings.showGizmos = 0;
         writeWorkerSettings(workerSettings);
         serviceCudaWorkerWatchdog();
+        if (g_simPaused && g_cudaWorkerRequested) {
+            std::snprintf(g_workerUiStatus, sizeof(g_workerUiStatus), "SIM PAUSED - orbit and inspect");
+        }
         const bool presentBudgetDue = now >= nextDisplayPresent;
         const auto copyStart = Clock::now();
         bool copiedWorkerFrame = false;
         if (presentBudgetDue) {
-            ++g_liveCopyCalls;
-            copiedWorkerFrame = g_cudaWorkerRequested && copyD3DWorkerFrame();
+            const bool shouldAttemptWorkerCopy =
+                g_cudaWorkerRequested &&
+                (d3DWorkerHandlesNeedOpen() || d3DWorkerHasReadyFrame());
+            if (shouldAttemptWorkerCopy) {
+                ++g_liveCopyCalls;
+                copiedWorkerFrame = copyD3DWorkerFrame();
+            }
         }
         const auto copyEnd = Clock::now();
         const auto copyMicros = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(copyEnd - copyStart).count());
@@ -4934,6 +5410,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
             updateTitle(fps);
         }
 
+        if (autoCloseMs > 0 &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - appStart).count() >= autoCloseMs) {
+            appendRuntimeEvent("app-auto-close", "requested by --auto-close-ms");
+            g_running = false;
+        }
+
         const float renderElapsed = std::chrono::duration<float>(Clock::now() - now).count();
         if (renderElapsed < kTargetFrameSeconds) {
             const auto sleepMs = static_cast<DWORD>((kTargetFrameSeconds - renderElapsed) * 1000.0f);
@@ -4945,8 +5427,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
         }
     }
 
+    appendRuntimeEvent(g_d3dDeviceLost ? "app-main-loop-exit-device-lost" : "app-main-loop-exit", "");
     stopCudaWorker();
     closeSharedViewport();
     timeEndPeriod(1);
+    appendRuntimeEvent("app-process-exiting", "exitCode=0");
     return 0;
 }

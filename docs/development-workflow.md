@@ -29,7 +29,7 @@ Only use the risky path when the PR specifically changes CUDA kernel execution, 
 Use the native app directly for manual visual review:
 
 ```powershell
-.\build\NativeFireSim.exe --scene=2 --allow-gpu-kernels --accept-bugcheck-risk
+.\build\NativeFireSim.exe --scene=0 --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
 The live viewport is not a substitute for the local gates. If the UI, source overlay, CUDA volume, or worker status looks wrong, capture the window and attach it to the PR body.
@@ -41,7 +41,7 @@ Every visual, render, CUDA, scene, or performance PR should include:
 - the issue numbers it addresses
 - the exact verification commands that passed
 - before/after screenshots or GIFs when pixels changed
-- debug-overlay captures when alignment, source placement, or scene switching changed
+- debug-overlay captures when alignment, source placement, or product-scene placement changed
 - trace or timing output when performance, stutter, worker lifecycle, or interop changed
 - a remaining-issues section that says what still looks wrong
 
@@ -51,7 +51,7 @@ The PR should not say a ticket is complete unless the acceptance criteria in the
 
 Prefer stacked PRs when later tickets depend on earlier runtime work. Keep each PR small enough to review as a real change:
 
-- runtime state and scene switching
+- runtime state and product-scene refresh
 - telemetry and frame pacing
 - capture/regression tooling
 - scene manifest contracts

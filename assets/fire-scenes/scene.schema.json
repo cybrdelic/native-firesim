@@ -10,4 +10,12 @@
     "expectedBehavior"
   ],
   "description": "Native FireSim scene contract. Every scene defines source, volume, lighting, material, and expected behavior in one place. Imported GLB scene geometry is intentionally not part of the runtime contract."
+  ,
+  "emitterSourcePolicy": {
+    "enum": [
+      "authored",
+      "mask-derived",
+      "authored-with-mask-debug"
+    ]
+  }
 }

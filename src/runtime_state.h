@@ -2,7 +2,7 @@
 
 enum class RuntimeTransitionReason {
     Startup,
-    SceneSwitch,
+    ProductSceneRefresh,
     UserReset,
     WorkerStale,
     WorkerFrameCopied,

@@ -1,10 +1,11 @@
 #pragma once
 
-#include <array>
-
 #include "fire_cuda.h"
 
-constexpr int kSceneCount = 4;
+constexpr int kSceneCount = 1;
+constexpr int kProductSceneId = 0;
+constexpr bool kProductRuntimeSceneLocked = true;
+constexpr const char* kProductSceneKey = "methanol-pool";
 
 struct Vec3 {
     float x;
@@ -18,10 +19,6 @@ struct SceneEmitterParams {
     float heightNorm = 0.0f;
     float heightBandNorm = 0.06f;
     float radius = 0.48f;
-    int burnerCenterCount = 0;
-    float burnerCenterX[4] = {};
-    float burnerCenterY[4] = {};
-    float burnerCenterZ[4] = {};
 };
 
 struct SceneInstance {
@@ -33,7 +30,6 @@ struct SceneInstance {
     float sourceZ = 0.0f;
     float sourceRadius = 0.48f;
     float sourceHeightBandMeters = 0.12f;
-    bool hasSelectedBurner = false;
 };
 
 struct SceneValidationEnvelope {
@@ -45,6 +41,16 @@ struct SceneValidationEnvelope {
     float maxSmokeToFlameRatio = 8.0f;
     float maxCharSum = 10000000.0f;
     float maxAshSum = 10000000.0f;
+};
+
+struct SceneCameraProfile {
+    float yaw = 0.0f;
+    float pitch = 0.08f;
+    float distance = 2.62f;
+    float targetX = 0.0f;
+    float targetY = 0.72f;
+    float targetZ = 0.0f;
+    float fovYDegrees = 50.0f;
 };
 
 struct SceneSourceCoefficients {
@@ -68,6 +74,12 @@ struct SceneCombustionCoefficients {
     float pyrolysisFuelScale = 3.70f;
     float pyrolysisSootScale = 1.0f;
     float sootYieldScale = 1.0f;
+    float stoichOxygenFuelMassRatio = 1.0f;
+    float heatOfCombustionProxy = 7.0f;
+    float radiativeFraction = 0.30f;
+    float targetMassBurnRateGps = 0.0f;
+    float measuredSootYield = 0.020f;
+    float ambientTemperatureK = 293.0f;
     float curlScale = 1.0f;
     float buoyancyScale = 1.0f;
     float buoyancyCeiling = 0.96f;
@@ -92,9 +104,6 @@ struct SceneRenderCoefficients {
     float warmScatter = 0.30f;
     float smokeScale = 1.0f;
     float sourcePlaneMode = 0.0f;
-    float burnerJetScale = 0.0f;
-    float campTongueScale = 0.0f;
-    float roomTrayScale = 1.0f;
     float convectiveHeightTop = 0.88f;
     float convectiveHeightBottom = 0.030f;
     float flameHeightTop = 0.76f;
@@ -104,8 +113,6 @@ struct SceneRenderCoefficients {
     float roomCoverageScale = 1.24f;
     float topDissolveTop = 0.88f;
     float topDissolveBottom = 0.42f;
-    float campHoleScale = 0.0f;
-    float campTongueDensityScale = 0.0f;
     float blueEmissionScale = 0.0f;
     float blueJetEmissionScale = 0.0f;
     float flameColorR = 1.32f;
@@ -150,12 +157,12 @@ struct SceneCudaCoefficients {
 struct SceneProfile {
     int sceneId = 0;
     const char* key = "room";
-    const char* sourceModel = "tray-fuel-bed";
-    const char* fuelPhase = "solid";
-    const char* flameEnvelope = "broad turbulent plume";
-    bool expectsSelectedBurner = false;
+    const char* sourceModel = "nist-1m-liquid-pool";
+    const char* fuelPhase = "liquid";
+    const char* flameEnvelope = "low-soot axisymmetric methanol pool flame";
     SceneCudaCoefficients cuda;
     SceneValidationEnvelope validation;
+    SceneCameraProfile camera;
 };
 
 struct ScenePlacement {
@@ -164,7 +171,7 @@ struct ScenePlacement {
 
 struct PlacementCoordinateState {
     int target = 0;
-    std::array<ScenePlacement, kSceneCount> scenes = {};
+    ScenePlacement productScene = {};
 
     ScenePlacement& scene(int sceneId);
     const ScenePlacement& scene(int sceneId) const;
@@ -172,6 +179,7 @@ struct PlacementCoordinateState {
 
 int clampSceneId(int sceneId);
 const SceneProfile& sceneProfile(int sceneId);
+const SceneCameraProfile& sceneCameraProfile(int sceneId);
 Vec3 sceneSourceWorld(const SceneEmitterParams& emitter, const ScenePlacement& placement, int sceneId);
 SceneInstance makeSceneInstance(int sceneId, long sceneEpoch, const SceneEmitterParams& emitter);
 void applySceneEmitterToSettings(FireSettings& settings, const SceneEmitterParams& emitter, long sceneEpoch, const ScenePlacement& placement);

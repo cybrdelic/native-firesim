@@ -94,10 +94,10 @@ Run the completed-frame worker benchmark for the live CUDA/D3D path:
 .\build\NativeFireSim.exe --worker-benchmark --warmup-frames=8 --benchmark-frames=16 --output-dir=out\worker-benchmark --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
-Run validation against an external target envelope:
+Run validation against the NIST methanol target envelope:
 
 ```powershell
-.\build\NativeFireSim.exe --validation --targets=benchmarks\reference-fire-room-envelope.csv --allow-gpu-kernels --accept-bugcheck-risk
+.\build\NativeFireSim.exe --validation --targets=benchmarks\nist-fcd\methanol-1m-pool-r1\validation-targets.csv --allow-gpu-kernels --accept-bugcheck-risk
 ```
 
 Run the manifest-driven NIST FCD calibration runner. This verifies the real dataset first, launches the bounded CUDA validation path only with explicit risk acceptance, then writes experiment-scoped metrics, a sim-vs-measured CSV, JSON, PNG, and GIF:
@@ -155,8 +155,8 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - GPU fuel-bed state seeded as broken material chunks with char, ash, pyrolysis release, oxygen-limited heat release, soot formation, soot oxidation, and radiative cooling terms
 - flame-front progress variable and LES-style scalar turbulence-energy closure coupled into buoyancy and breakup
 - clamped MacCormack/BFECC correction over transported scalar fields to reduce numerical smearing
-- orbit-camera CUDA volume renderer that raymarches the 3D fields into an HDR float buffer with white-hot blackbody cores, Beer-Lambert extinction, particle-size-derived soot absorption/scattering, colder gray/black smoke, volume self-shadowing, emitter scattering, domain-warped volume sampling, ACES display tonemapping, dithering, and reflective floor response
-- target-room scene model with a shallow tray, dark reflective floor, smoky wall staining, ceiling fixtures, left-side glass, vignetting, and reference material response
+- orbit-camera CUDA volume renderer that raymarches the 3D fields through brick-exit-bounded sparse traversal into an HDR float buffer with white-hot blackbody cores, Beer-Lambert extinction, particle-size-derived soot absorption/scattering, colder gray/black smoke, volume self-shadowing, emitter scattering, domain-warped volume sampling, ACES display tonemapping, dithering, and reflective floor response
+- NIST methanol product scene with a measured liquid-pool source, reference burn envelope, reflective floor response, and smoke/heat diagnostics
 - native Windows presentation
 - copied visual target image
 - interactive input
@@ -169,7 +169,7 @@ The main app path is process-isolated: no custom CUDA kernels are submitted by t
 - CUDA validation metrics for divergence before/after projection, scalar totals, char/ash/pyrolysis/progress/turbulence/soot-optical totals, flame height, optical depth, heat-release proxy, invalid cells, and GPU solve/render timing
 - optional benchmark target envelopes via `--targets=<csv>`, manifest provenance via `--manifest=<json>`, experiment-scoped outputs via `--output-dir=<dir>`, and measured burn sidecars via `--calibration=<csv> --geometry=<json>` for calibration against HRR, derived mass loss, smoke optical depth, radiant heat flux, thermocouples, IR, video-derived plume height, and geometry data
 
-The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 104 raymarch steps, 176 ember samples, neutral black/gray soot, reduced floor glow, and target-room shading. It uses 40 weighted red/black pressure iterations, early ray termination, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and direct FP16 D3D11 surface publication without an intermediate CUDA FP16 staging buffer. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
+The CUDA backend has one canonical runtime configuration: requested 384x240 simulation grid, capped internally to 176x208x128, 104 raymarch steps, 176 ember samples, neutral black/gray soot, reduced floor glow, and NIST methanol product-scene shading. It uses 40 weighted red/black pressure iterations, early ray termination, sparse brick metadata with brick-exit-bounded empty traversal, bounded z-sliced volume launches, bounded row-sliced raymarch launches, an internal HDR radiance buffer, and direct FP16 D3D11 surface publication without an intermediate CUDA FP16 staging buffer. Metrics collection is only enabled by the validation path. The main app process does not call this path; the worker does.
 
 Next hardening steps are explicit interprocess GPU fence/semaphore publication, video/frame export, calibrated material constants from a real burn dataset, sparse brick allocation for inactive volume regions, and replacing the fixed SOR projection with a residual-targeted multigrid or PCG solve.
 
@@ -186,7 +186,9 @@ See:
 
 `C:\Users\alexf\Desktop\FireSim.lnk` opens:
 
-`C:\Users\alexf\Documents\Codex\2026-04-30\all-right-so-i-want-you\native-firesim\launch-firesim.ps1`
+`C:\Users\alexf\projects\native-firesim\launch-firesim.ps1`
+
+The launcher defaults to product scene `0`, the NIST 1 m methanol pool fire. Stale nonzero scene arguments are clamped back to `0` and logged instead of preventing the app from opening. Its `-Validation -AllowGpuKernels -AcceptBugcheckRisk` mode runs `scripts\run-nist-calibration.ps1`, which uses the real NIST FCD manifest, geometry, calibration CSV, target envelope, and `--pool-fire-calibration` runtime path.
 
 By default it opens the native app with the isolated CUDA worker enabled, so the viewport can display the real 3D volume while the UI process remains outside CUDA. The old April launcher path delegates to this script so stale calls still work. GPU flags are accepted only with `-SmokeTest` or `-Validation`.
 

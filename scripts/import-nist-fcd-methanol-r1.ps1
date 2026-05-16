@@ -266,7 +266,7 @@ Raw CSV: $sourceUrl
 FCD DOI: https://doi.org/10.18434/mds2-2314
 License/terms: $licenseUrl
 
-This benchmark includes direct CSV channels for HRR, natural-gas burner HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived `massRemainingKg` and `smokeOpticalDepth` columns.
+This benchmark includes direct CSV channels for HRR, auxiliary HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived `massRemainingKg` and `smokeOpticalDepth` columns.
 
 `validation-targets.csv` declares the first bounded CUDA-vs-NIST comparison envelopes. They are deliberately broad until calibration work tightens the model.
 

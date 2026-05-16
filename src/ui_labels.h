@@ -1,41 +1,35 @@
 #pragma once
 
+#include "render_debug_modes.h"
 #include "runtime_state.h"
 
 inline const char* toolName(int tool) {
     switch (tool) {
-    case 1: return "FIRE";
-    case 2: return "SMOKE";
-    case 3: return "WIND";
-    case 4: return "TURB";
-    default: return "NONE";
+    case 1: return "Fire";
+    case 2: return "Smoke";
+    case 3: return "Wind";
+    case 4: return "Turb";
+    default: return "None";
     }
 }
 
 inline const char* renderDebugName(int mode) {
-    switch (mode) {
-    case 1: return "FLAME";
-    case 2: return "SOOT";
-    case 3: return "TRANS";
-    case 4: return "TEMP";
-    case 5: return "FUEL";
-    case 6: return "VEL";
-    default: return "FINAL";
-    }
+    return renderDebugModeShortName(mode);
 }
 
 inline const char* sceneName(int scene) {
-    switch (scene) {
-    case 1: return "CAMPFIRE";
-    case 2: return "GAS BURNER";
-    case 3: return "NIST METHANOL";
-    default: return "ROOM";
-    }
+    (void)scene;
+    return "NIST methanol";
+}
+
+inline const char* sceneButtonLabel(int scene) {
+    (void)scene;
+    return "NIST Methanol";
 }
 
 inline const char* transitionReasonName(RuntimeTransitionReason reason) {
     switch (reason) {
-    case RuntimeTransitionReason::SceneSwitch: return "scene-switch";
+    case RuntimeTransitionReason::ProductSceneRefresh: return "product-scene-refresh";
     case RuntimeTransitionReason::UserReset: return "user-reset";
     case RuntimeTransitionReason::WorkerStale: return "worker-stale";
     case RuntimeTransitionReason::WorkerFrameCopied: return "worker-frame-copied";

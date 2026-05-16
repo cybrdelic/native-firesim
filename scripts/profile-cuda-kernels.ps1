@@ -5,7 +5,7 @@ param(
     [int]$WarmupFrames = 8,
     [int]$BenchmarkFrames = 16,
     [int]$SimEveryFrames = 1,
-    [ValidateRange(0, 3)]
+    [ValidateRange(0, 0)]
     [int]$Scene = 0,
     [int]$LaunchSkip = 0,
     [int]$LaunchCount = 64,
