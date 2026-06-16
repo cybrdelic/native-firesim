@@ -3,28 +3,28 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $assetRootFull = Join-Path $repoRoot $AssetRoot
-$expected = @(
-    @{ Scene = "campfire"; Required = @("runtime-mesh.json", "scene.glb", "geometry.json", "emitter-mask.json") },
-    @{ Scene = "gas-burner-aver1"; Required = @("runtime-mesh.json", "scene.glb", "geometry.json", "emitter-mask.json") }
-)
+$productScene = Join-Path $assetRootFull "methanol-pool"
+$scenePath = Join-Path $productScene "scene.json"
 
-$missing = @()
-foreach ($entry in $expected) {
-    $sceneDir = Join-Path $assetRootFull $entry.Scene
-    foreach ($name in $entry.Required) {
-        $path = Join-Path $sceneDir $name
-        if (-not (Test-Path $path)) {
-            $missing += $path
-        }
+if (-not (Test-Path -LiteralPath $scenePath)) {
+    throw "missing methanol product scene contract: $scenePath"
+}
+
+$sceneDirs = Get-ChildItem -LiteralPath $assetRootFull -Directory
+foreach ($dir in $sceneDirs) {
+    if ($dir.Name -ne "methanol-pool") {
+        throw "non-product scene asset still present: $($dir.FullName)"
     }
 }
 
-if ($missing.Count -gt 0) {
-    Write-Host "scene asset check failed: required imported runtime meshes are missing"
-    foreach ($path in $missing) {
-        Write-Host "missing: $path"
+$meshPayloads = Get-ChildItem -Path $assetRootFull -Recurse -Include *.glb,*.gltf,runtime-mesh.json -File -ErrorAction SilentlyContinue
+if ($meshPayloads.Count -gt 0) {
+    Write-Host "scene asset check failed: imported GLB/runtime mesh payloads must not be present"
+    foreach ($path in $meshPayloads) {
+        Write-Host "unexpected: $($path.FullName)"
     }
     exit 2
 }
@@ -34,5 +34,5 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "scene asset check: real imported runtime meshes present"
+Write-Host "scene asset check: only methanol product scene is present"
 exit 0

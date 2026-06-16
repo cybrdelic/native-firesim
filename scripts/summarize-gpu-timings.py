@@ -72,6 +72,20 @@ def main() -> None:
         )
         for index, item in enumerate(hotspot_ranking, start=1):
             lines.append(f"| {index} | `{item.get('pass', 'unknown')}` | {float(item.get('averageMs', 0.0)):.4f} |")
+    sparse = data.get("sparseBrickEffectiveness", {})
+    if sparse:
+        lines.extend(
+            [
+                "",
+                "## Sparse Brick Effectiveness",
+                "",
+                f"- Traversal: `{sparse.get('traversal', 'unknown')}`",
+                f"- Active bricks: `{float(sparse.get('averageActiveBrickCount', 0.0)):.2f}` / `{sparse.get('totalBrickCount', 'unknown')}`",
+                f"- Active fraction: `{float(sparse.get('averageActiveFraction', 0.0)):.4f}`",
+                f"- Max emission/extinction: `{float(sparse.get('maxBrickEmission', 0.0)):.4f}` / `{float(sparse.get('maxBrickExtinction', 0.0)):.4f}`",
+                f"- Sparse strides: max `{sparse.get('maxEmptyStride', 'unknown')}`, medium `{sparse.get('mediumEmptyStride', 'unknown')}`",
+            ]
+        )
     lines.extend(
         [
             "",

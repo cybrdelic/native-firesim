@@ -10,6 +10,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $vcvars = "C:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 & (Join-Path $PSScriptRoot "lint.ps1")
+& (Join-Path $PSScriptRoot "verify-architecture-boundaries.ps1")
 & (Join-Path $PSScriptRoot "verify-lab-grade.ps1")
 
 if (-not (Test-Path -LiteralPath $vcvars)) {
@@ -40,6 +41,18 @@ function Invoke-NativeFireSimCheck {
 Push-Location $root
 try {
     $diagCode = Invoke-NativeFireSimCheck -Arguments @("--diagnostics")
+    $uiSnapshotCode = Invoke-NativeFireSimCheck -Arguments @("--native-ui-snapshot")
+    python (Join-Path $PSScriptRoot "verify-scene-contracts.py")
+    & (Join-Path $PSScriptRoot "verify-render-contract-boundaries.ps1") -SkipDiagnostics
+    & (Join-Path $PSScriptRoot "verify-scene-source-models.ps1") -SkipDiagnostics
+    & (Join-Path $PSScriptRoot "verify-product-scene-isolation.ps1")
+    & (Join-Path $PSScriptRoot "verify-methanol-physical-contract.ps1") -SkipDiagnostics
+    & (Join-Path $PSScriptRoot "verify-scene-settings-dump.ps1")
+    & (Join-Path $PSScriptRoot "verify-gas-debug-views.ps1")
+    & (Join-Path $PSScriptRoot "verify-native-ui-engine-adapter.ps1")
+    & (Join-Path $PSScriptRoot "verify-worker-lifecycle.ps1")
+    & (Join-Path $PSScriptRoot "verify-methanol-truth-gate.ps1") -StaticOnly
+    & (Join-Path $PSScriptRoot "verify-desktop-shortcut-product-scene.ps1") -NoLaunch
 
     $inputCode = Invoke-NativeFireSimCheck -Arguments @("--input-stress-test")
 
@@ -54,6 +67,7 @@ try {
         $smokeCode = Invoke-NativeFireSimCheck -Arguments @("--smoke-test", "--allow-gpu-kernels", "--accept-bugcheck-risk") -TimeoutMs 300000
         & (Join-Path $PSScriptRoot "run-nist-calibration.ps1") -RunGpuKernels -AcceptBugcheckRisk -SkipBuild
         $validationCode = $LASTEXITCODE
+        & (Join-Path $PSScriptRoot "verify-methanol-truth-gate.ps1")
     }
 } finally {
     Pop-Location
@@ -62,6 +76,10 @@ try {
 if ($diagCode -ne 0) {
     Write-Error "Diagnostics failed with exit code $diagCode"
     exit $diagCode
+}
+if ($uiSnapshotCode -ne 0) {
+    Write-Error "Native UI snapshot failed with exit code $uiSnapshotCode"
+    exit $uiSnapshotCode
 }
 if ($inputCode -ne 0) {
     Write-Error "Input stress test failed with exit code $inputCode"

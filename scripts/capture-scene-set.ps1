@@ -17,9 +17,7 @@ if (-not $AcceptBugcheckRisk) {
 }
 
 $scenes = @(
-    @{ Name = "room"; Id = 0 },
-    @{ Name = "campfire"; Id = 1 },
-    @{ Name = "burner"; Id = 2 }
+    @{ Name = "nist-methanol-pool"; Id = 0 }
 )
 
 $outRoot = Join-Path $root "out\scene-visual-audit"
@@ -29,15 +27,17 @@ foreach ($scene in $scenes) {
     $outDir = Join-Path $outRoot $scene.Name
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Write-Host "capturing scene $($scene.Name) -> $outDir"
-    & $exe `
-        --validation `
-        "--scene=$($scene.Id)" `
-        "--validation-frames=$Frames" `
-        "--output-dir=$outDir" `
-        --allow-gpu-kernels `
-        --accept-bugcheck-risk
-    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        throw "scene capture failed for $($scene.Name) with exit code $LASTEXITCODE"
+    $arguments = @(
+        "--validation",
+        "--scene=$($scene.Id)",
+        "--validation-frames=$Frames",
+        "--output-dir=$outDir",
+        "--allow-gpu-kernels",
+        "--accept-bugcheck-risk"
+    )
+    $process = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -Wait -PassThru -WindowStyle Hidden
+    if ($process.ExitCode -ne 0) {
+        throw "scene capture failed for $($scene.Name) with exit code $($process.ExitCode)"
     }
     $framePath = Join-Path $outDir "validation-frame.bmp"
     $appFramePath = Join-Path $outDir "validation-app-frame.bmp"

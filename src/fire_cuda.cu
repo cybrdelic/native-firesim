@@ -1,15 +1,22 @@
 #include "fire_cuda.h"
+#include "render_debug_modes.h"
+#include "runtime_quality.h"
+#include "volume_bricks.h"
+#include "render_sparse_integrator.h"
 
 #include <cuda_runtime.h>
 #include <cuda_d3d11_interop.h>
+#include <cuda_profiler_api.h>
 #include <cuda_fp16.h>
 #include <surface_functions.h>
 #include <d3d11.h>
+#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -39,6 +46,10 @@ struct SimParams {
     float cameraYaw;
     float cameraPitch;
     float cameraDistance;
+    float cameraTargetX;
+    float cameraTargetY;
+    float cameraTargetZ;
+    float cameraFovYDegrees;
     float3 cameraEye;
     float3 cameraForward;
     float3 cameraRight;
@@ -47,8 +58,15 @@ struct SimParams {
     float cameraAspect;
     int cinematicMode;
     int raymarchSteps;
+    int sparseRaymarchMaxEmptyStride;
+    int sparseRaymarchMediumEmptyStride;
+    float sparseRaymarchActiveThreshold;
+    float sparseRaymarchFineThreshold;
+    int temporalJitterPhase;
+    int radianceCacheUpdateInterval;
     int emberCount;
     int renderDebugMode;
+    int plumeTestMode;
     float exposure;
     float reflectionGain;
     float smokeDarkness;
@@ -57,10 +75,88 @@ struct SimParams {
     float emitterHeightNorm;
     float emitterHeightBandNorm;
     float emitterRadius;
-    int burnerCenterCount;
-    float burnerCenterX[4];
-    float burnerCenterY[4];
-    float burnerCenterZ[4];
+    int sceneSourceMode;
+    float sceneSourceHeightCeiling;
+    float sceneCharScale;
+    float sceneSootScale;
+    float sceneInitialFuelBase;
+    float sceneInitialFuelNoise;
+    float sceneGasFeed;
+    float scenePyrolysisGain;
+    float sceneFuelGain;
+    float sceneHeatGain;
+    float sceneSootGain;
+    float sceneCharGrowth;
+    float sceneAshScale;
+    float sceneBedHeatBase;
+    float scenePyrolysisFuelScale;
+    float scenePyrolysisSootScale;
+    float sceneSootYieldScale;
+    float sceneStoichOxygenFuelMassRatio;
+    float sceneHeatOfCombustionProxy;
+    float sceneRadiativeFraction;
+    float sceneTargetMassBurnRateGps;
+    float sceneMeasuredSootYield;
+    float sceneAmbientTemperatureK;
+    float sceneCurlScale;
+    float sceneBuoyancyScale;
+    float sceneBuoyancyCeiling;
+    float sceneBuoyancyFloor;
+    float sceneFloorGlowR;
+    float sceneFloorGlowG;
+    float sceneFloorGlowB;
+    float sceneFloorTongueR;
+    float sceneFloorTongueG;
+    float sceneFloorTongueB;
+    float sceneFloorGlowScale;
+    float sceneFloorTongueScale;
+    float sceneWallGlowR;
+    float sceneWallGlowG;
+    float sceneWallGlowB;
+    float sceneWallGlowScale;
+    float sceneOrangeEmissionScale;
+    float sceneFilamentEmissionScale;
+    float sceneWarmScatter;
+    float sceneSmokeScale;
+    float sceneSourcePlaneMode;
+    float sceneConvectiveHeightTop;
+    float sceneConvectiveHeightBottom;
+    float sceneFlameHeightTop;
+    float sceneFlameHeightBottom;
+    float sceneLowerWhiteHeight;
+    float sceneRoomCoverageBase;
+    float sceneRoomCoverageScale;
+    float sceneTopDissolveTop;
+    float sceneTopDissolveBottom;
+    float sceneBlueEmissionScale;
+    float sceneBlueJetEmissionScale;
+    float sceneFlameColorR;
+    float sceneFlameColorG;
+    float sceneFlameColorB;
+    float sceneAlternateFlameColorR;
+    float sceneAlternateFlameColorG;
+    float sceneAlternateFlameColorB;
+    float sceneAlternateFlameColorScale;
+    float sceneEmberRejectAbove;
+    float sceneEmberLifeRateBase;
+    float sceneEmberLifeRateJitter;
+    float sceneEmberLifeRateAdd;
+    float sceneEmberSpawnMode;
+    float sceneEmberStartVBase;
+    float sceneEmberStartVJitter;
+    float sceneEmberLift;
+    float sceneEmberLifeScale;
+    float sceneEmberDrag;
+    float sceneEmberRadiusBase;
+    float sceneEmberRadiusJitter;
+    float sceneEmberTrailCap;
+    float sceneEmberHotR;
+    float sceneEmberHotG;
+    float sceneEmberHotB;
+    float sceneEmberCoolR;
+    float sceneEmberCoolG;
+    float sceneEmberCoolB;
+    float sceneEmberAlphaScale;
     int launchZStart;
     int launchZEnd;
     int launchFrameYStart;
@@ -101,17 +197,28 @@ struct MetricAccumulator {
     int invalidCells;
 };
 
+struct SparseBrickEffectiveness {
+    int activeBrickCount = 0;
+    int totalBrickCount = 0;
+    float activeFraction = 0.0f;
+    float maxEmission = 0.0f;
+    float maxExtinction = 0.0f;
+};
+
 constexpr int kPressureIterations = 40;
 constexpr float kPressureOmega = 1.52f;
-constexpr float kRoomHeightMeters = 2.03f;
+constexpr float kFireDomainHeightMeters = 2.90f;
+constexpr float kRenderVolumeFloorMeters = 0.02f;
+constexpr float kRenderVolumeHeightMeters = kFireDomainHeightMeters + kRenderVolumeFloorMeters;
 constexpr float kAdvectionScale = 0.62f;
 constexpr int kCudaBlockThreads = 256;
+constexpr int kSparseBrickSize = 8;
 constexpr int kMaxRaymarchSteps = 120;
 constexpr int kMaxEmberCount = 192;
-constexpr int kVolumeLaunchDepth = 256;
-constexpr int kRenderLaunchRows = 1024;
+constexpr int kDefaultVolumeLaunchDepth = 32;
+constexpr int kDefaultRenderLaunchRows = 180;
 constexpr int kRenderSnapshotSlots = 2;
-constexpr int kSceneCount = 3;
+constexpr int kProductSceneId = 0;
 
 float* g_heat = nullptr;
 float* g_heatNext = nullptr;
@@ -149,6 +256,7 @@ float4* g_hdrFrameDevice = nullptr;
 float4* g_sceneLight = nullptr;
 float4* g_sceneLightNext = nullptr;
 float* g_sceneShadow = nullptr;
+BrickMeta* g_brickMeta = nullptr;
 float* g_renderHeat[kRenderSnapshotSlots] = {};
 float* g_renderFuel[kRenderSnapshotSlots] = {};
 float* g_renderOxygen[kRenderSnapshotSlots] = {};
@@ -185,14 +293,29 @@ int g_frameH = 0;
 int g_lightNx = 0;
 int g_lightNy = 0;
 int g_lightNz = 0;
+int g_brickNx = 0;
+int g_brickNy = 0;
+int g_brickNz = 0;
+int g_brickCount = 0;
 int g_frameIndex = 0;
 float g_time = 0.0f;
 float g_renderTime = 0.0f;
+int g_volumeLaunchDepth = kDefaultVolumeLaunchDepth;
+int g_renderLaunchRows = kDefaultRenderLaunchRows;
+std::uint64_t g_allocatedBytes = 0;
+std::uint32_t* g_hostFrameStaging = nullptr;
+std::size_t g_hostFrameStagingBytes = 0;
 int g_renderSnapshotFront = 0;
 int g_renderSnapshotBack = 1;
 unsigned long long g_renderSnapshotVersion = 0;
 bool g_haveRenderSnapshot = false;
 char g_lastError[512] = "No CUDA error.";
+
+using NvtxPushFn = int(__cdecl*)(const char*);
+using NvtxPopFn = int(__cdecl*)();
+HMODULE g_nvtxModule = nullptr;
+NvtxPushFn g_nvtxPush = nullptr;
+NvtxPopFn g_nvtxPop = nullptr;
 
 bool fail(const char* label, cudaError_t err) {
     std::snprintf(g_lastError, sizeof(g_lastError), "%s: %s", label, cudaGetErrorString(err));
@@ -205,6 +328,95 @@ bool check(const char* label, cudaError_t err) {
     }
     return true;
 }
+
+bool allocateDeviceBuffer(const char* label, void** ptr, std::size_t bytes) {
+    if (ptr == nullptr || bytes == 0) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "%s: invalid allocation request", label);
+        return false;
+    }
+    if (!check(label, cudaMalloc(ptr, bytes))) {
+        return false;
+    }
+    g_allocatedBytes += static_cast<std::uint64_t>(bytes);
+    return true;
+}
+
+bool allocatePinnedHostBuffer(const char* label, void** ptr, std::size_t bytes) {
+    if (ptr == nullptr || bytes == 0) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "%s: invalid pinned allocation request", label);
+        return false;
+    }
+    if (!check(label, cudaHostAlloc(ptr, bytes, cudaHostAllocPortable))) {
+        return false;
+    }
+    return true;
+}
+
+bool collectSparseBrickEffectiveness(SparseBrickEffectiveness* stats) {
+    if (stats == nullptr) {
+        std::snprintf(g_lastError, sizeof(g_lastError), "Sparse brick metrics output pointer was null.");
+        return false;
+    }
+    *stats = {};
+    stats->totalBrickCount = g_brickCount;
+    if (g_brickMeta == nullptr || g_brickCount <= 0) {
+        return true;
+    }
+
+    std::vector<BrickMeta> bricks(static_cast<std::size_t>(g_brickCount));
+    const std::size_t bytes = static_cast<std::size_t>(g_brickCount) * sizeof(BrickMeta);
+    if (!check("cudaMemcpy sparse brick metrics", cudaMemcpy(bricks.data(), g_brickMeta, bytes, cudaMemcpyDeviceToHost))) {
+        return false;
+    }
+
+    int activeCount = 0;
+    float maxEmission = 0.0f;
+    float maxExtinction = 0.0f;
+    for (const BrickMeta& brick : bricks) {
+        const float activity = std::max(brick.emissionMax, std::max(brick.extinctionMax, brick.densityMax * 0.20f));
+        if (brick.activeMask != 0u || activity > kSparseRaymarchActiveThreshold) {
+            ++activeCount;
+        }
+        maxEmission = std::max(maxEmission, brick.emissionMax);
+        maxExtinction = std::max(maxExtinction, brick.extinctionMax);
+    }
+
+    stats->activeBrickCount = activeCount;
+    stats->activeFraction = g_brickCount > 0 ? static_cast<float>(activeCount) / static_cast<float>(g_brickCount) : 0.0f;
+    stats->maxEmission = maxEmission;
+    stats->maxExtinction = maxExtinction;
+    return true;
+}
+
+void ensureNvtxLoaded() {
+    if (g_nvtxPush != nullptr && g_nvtxPop != nullptr) {
+        return;
+    }
+    if (g_nvtxModule == nullptr) {
+        g_nvtxModule = LoadLibraryA("nvToolsExt64_1.dll");
+    }
+    if (g_nvtxModule == nullptr) {
+        return;
+    }
+    g_nvtxPush = reinterpret_cast<NvtxPushFn>(GetProcAddress(g_nvtxModule, "nvtxRangePushA"));
+    g_nvtxPop = reinterpret_cast<NvtxPopFn>(GetProcAddress(g_nvtxModule, "nvtxRangePop"));
+}
+
+struct NvtxRange {
+    bool active = false;
+    explicit NvtxRange(const char* label) {
+        ensureNvtxLoaded();
+        if (g_nvtxPush != nullptr && g_nvtxPop != nullptr) {
+            g_nvtxPush(label);
+            active = true;
+        }
+    }
+    ~NvtxRange() {
+        if (active && g_nvtxPop != nullptr) {
+            g_nvtxPop();
+        }
+    }
+};
 
 int clampHost(int v, int lo, int hi) {
     return std::max(lo, std::min(hi, v));
@@ -267,10 +479,6 @@ __host__ __device__ float dot3(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-__host__ __device__ float length3(float3 v) {
-    return sqrtf(fmaxf(0.0f, dot3(v, v)));
-}
-
 __host__ __device__ float luminance3(float3 color) {
     return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
 }
@@ -314,7 +522,7 @@ struct CameraState {
 
 __host__ __device__ CameraState computeCameraFromSettings(const SimParams& p) {
     CameraState cam = {};
-    const float3 target = make_float3(0.0f, 0.72f, 0.0f);
+    const float3 target = make_float3(p.cameraTargetX, p.cameraTargetY, p.cameraTargetZ);
     const float cp = cosf(p.cameraPitch);
     cam.eye = make_float3(
         sinf(p.cameraYaw) * p.cameraDistance * cp,
@@ -323,7 +531,8 @@ __host__ __device__ CameraState computeCameraFromSettings(const SimParams& p) {
     cam.forward = normalize3(sub3(target, cam.eye));
     cam.right = normalize3(cross3(cam.forward, make_float3(0.0f, 1.0f, 0.0f)));
     cam.up = normalize3(cross3(cam.right, cam.forward));
-    cam.tanHalfFov = 0.50f;
+    const float fovY = fminf(68.0f, fmaxf(28.0f, p.cameraFovYDegrees)) * 0.017453292519943295f;
+    cam.tanHalfFov = tanf(fovY * 0.5f);
     cam.aspect = static_cast<float>(p.frameW) / static_cast<float>(p.frameH);
     return cam;
 }
@@ -743,63 +952,32 @@ __device__ float orientedCapsuleMask(float x, float z, float cx, float cz, float
     return smoothstepf(radius, radius * 0.22f, dist);
 }
 
-__device__ float fuelBedMaterial(float x, float z, const SimParams& p) {
-    if (p.sceneId == 1) {
-        const float logA = orientedCapsuleMask(x, z, -0.06f, 0.01f, 0.38f, 0.34f, 0.060f);
-        const float logB = orientedCapsuleMask(x, z, 0.07f, -0.02f, -0.58f, 0.33f, 0.058f);
-        const float logC = orientedCapsuleMask(x, z, 0.01f, 0.08f, 1.34f, 0.24f, 0.050f);
-        const float contactAB = fminf(logA, logB) * 1.25f;
-        const float contactBC = fminf(logB, logC) * 1.10f;
-        const float contactCA = fminf(logC, logA) * 0.92f;
-        const float coalNoise = fbm(make_float2(x * 9.4f + z * 1.7f, z * 11.2f - x * 3.1f));
-        const float coalBed = smoothstepf(0.38f, 0.08f, sqrtf(x * x * 1.35f + z * z * 2.40f)) *
-            smoothstepf(0.34f, 0.88f, coalNoise);
-        const float cracks = smoothstepf(0.65f, 0.93f, fbm(make_float2(x * 21.0f - z * 6.0f, z * 24.0f + x * 4.0f)));
-        const float contactPyrolysis = saturate(contactAB + contactBC + contactCA);
-        return saturate((logA * 0.72f + logB * 0.70f + logC * 0.54f + coalBed * 0.84f + contactPyrolysis * 1.18f) * (1.0f - cracks * 0.24f));
-    }
-    if (p.sceneId == 2) {
-        const float sourceRadius = fmaxf(0.04f, p.emitterRadius);
-        float source = 0.0f;
-        const int centerCount = 1;
-        for (int i = 0; i < centerCount; ++i) {
-            const float cx = p.burnerCenterCount > 0 ? p.burnerCenterX[i] : p.emitterCenterX;
-            const float cz = p.burnerCenterCount > 0 ? p.burnerCenterZ[i] : p.emitterCenterZ;
-            const float px = x - cx;
-            const float pz = z - cz;
-            const float radius = sqrtf(px * px + pz * pz);
-            const float angle = atan2f(pz, px);
-            const float ring = smoothstepf(sourceRadius * 0.072f, sourceRadius * 0.014f, fabsf(radius - sourceRadius));
-            const float innerRing = smoothstepf(sourceRadius * 0.052f, sourceRadius * 0.012f, fabsf(radius - sourceRadius * 0.52f));
-            const float ports = 0.5f + 0.5f * cosf(angle * 32.0f);
-            const float portMask = smoothstepf(0.80f, 0.992f, ports);
-            const float centerPilot = smoothstepf(sourceRadius * 0.22f, 0.000f, radius) * 0.045f;
-            source = fmaxf(source, (ring * (0.035f + portMask * 1.72f) + innerRing * 0.055f + centerPilot) *
-                smoothstepf(sourceRadius * 1.28f, sourceRadius * 1.05f, radius));
-        }
-        return saturate(source);
-    }
-    const float tray = smoothstepf(1.08f, 0.030f, fabsf(x)) * smoothstepf(0.56f, 0.026f, fabsf(z));
-    const float emberMat = smoothstepf(1.00f, 0.018f, fabsf(x)) * smoothstepf(0.50f, 0.020f, fabsf(z));
-    const float mound = expf(-(x * x * 0.70f + z * z * 2.15f));
-    const float logMass = fbm(make_float2(x * 3.7f + z * 0.9f, z * 5.4f - x * 0.6f));
-    const float chips = fbm(make_float2(x * 15.0f + z * 4.0f, z * 18.0f - x * 5.0f));
-    const float strand = 0.5f + 0.5f * sinf((x * 19.0f + z * 7.0f) + fbm(make_float2(z * 4.0f, x * 3.0f)) * 4.2f);
-    const float cracks = smoothstepf(0.44f, 0.74f, chips) * smoothstepf(0.20f, 0.84f, logMass);
-    const float voids = smoothstepf(0.70f, 0.93f, chips * 0.72f + strand * 0.34f);
-    const float clumps = smoothstepf(0.22f, 0.86f, logMass * 0.82f + chips * 0.36f + strand * 0.18f);
-    const float porousFuel = (0.24f + clumps * 0.94f + emberMat * 0.20f) * (0.64f + mound * 0.46f);
-    return saturate(tray * porousFuel * (1.0f - cracks * 0.46f) * (1.0f - voids * 0.34f));
+__device__ float solidFuelBedMaterial(float x, float z, const SimParams& p) {
+    const float dx = x - p.emitterCenterX;
+    const float dz = z - p.emitterCenterZ;
+    const float radius = sqrtf(dx * dx + dz * dz);
+    const float edgeFeather = fmaxf(0.035f, p.emitterRadius * 0.10f);
+    const float pool = 1.0f - smoothstepf(p.emitterRadius - edgeFeather, p.emitterRadius + edgeFeather, radius);
+    const float edgeNoise = fbm(make_float2(dx * 7.5f + p.time * 0.030f, dz * 8.0f - p.time * 0.026f));
+    const float coreNoise = fbm(make_float2(dx * 15.0f - p.time * 0.070f, dz * 16.0f + p.time * 0.061f));
+    return saturate(pool * (0.70f + edgeNoise * 0.42f + coreNoise * 0.10f));
 }
 
 __device__ float fuelBedSource(float x, float z, float h, const SimParams& p) {
-    const float material = fuelBedMaterial(x, z, p);
-    const float height = p.sceneId == 2
-        ? smoothstepf(fmaxf(0.005f, p.emitterHeightBandNorm * 0.34f), fmaxf(0.0015f, p.emitterHeightBandNorm * 0.055f), fabsf(h - p.emitterHeightNorm))
-        : smoothstepf(p.sceneId == 1 ? 0.245f : 0.145f, 0.00f, h);
-    const float emberBreathing = 0.84f + 0.16f * fbm(make_float2(x * 9.0f + p.time * 0.035f, z * 11.0f - p.time * 0.025f));
-    const float exposedFuel = saturate(material * emberBreathing);
-    return saturate(height * exposedFuel);
+    const float material = solidFuelBedMaterial(x, z, p);
+    const float dx = x - p.emitterCenterX;
+    const float dz = z - p.emitterCenterZ;
+    const float radius = sqrtf(dx * dx + dz * dz);
+    const float edgeFeather = fmaxf(0.035f, p.emitterRadius * 0.12f);
+    const float radial = 1.0f - smoothstepf(p.emitterRadius - edgeFeather, p.emitterRadius + edgeFeather, radius);
+    const float surfaceSigma = fmaxf(0.012f, p.emitterHeightBandNorm * 0.50f);
+    const float y = h - p.emitterHeightNorm;
+    const float vertical = expf(-(y * y) / fmaxf(1.0e-6f, 2.0f * surfaceSigma * surfaceSigma));
+    const float edgeNoise = fbm(make_float2(x * 8.0f + p.time * 0.37f, z * 8.0f - p.time * 0.31f));
+    const float coreNoise = fbm(make_float2(x * 16.0f - p.time * 0.73f, z * 16.0f + p.time * 0.61f));
+    const float brokenRadial = saturate(radial * (0.62f + 0.58f * edgeNoise));
+    const float vaporCore = smoothstepf(p.emitterRadius * 0.88f, p.emitterRadius * 0.18f, radius);
+    return saturate(material * brokenRadial * vertical * (0.42f + vaporCore * 0.42f + coreNoise * 0.22f));
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) resetScalarsKernel(
@@ -828,21 +1006,22 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) resetScalarsKernel(
     const float w = (static_cast<float>(z) + 0.5f) / static_cast<float>(p.nz);
     const float worldX = (u - 0.50f) * 2.10f;
     const float worldZ = (w - 0.50f) * 1.64f;
-    const float material = fuelBedMaterial(worldX, worldZ, p);
+    const float material = solidFuelBedMaterial(worldX, worldZ, p);
+    const float initialSource = fuelBedSource(worldX, worldZ, v, p);
+    const float sourceLayer = smoothstepf(p.sceneSourceHeightCeiling, 0.0f, v);
     const float chunkNoise = fbm(make_float2(worldX * 18.0f + worldZ * 2.0f, worldZ * 22.0f - worldX * 5.0f));
-    const float bed = fuelBedSource(worldX, worldZ, v, p);
-    const float charScale = p.sceneId == 2 ? 0.004f : (p.sceneId == 1 ? 1.18f : 1.0f);
-    const float sootScale = p.sceneId == 2 ? 0.004f : (p.sceneId == 1 ? 0.92f : 1.0f);
-    heat[idx] = bed * (p.sceneId == 2 ? 1.34f : (p.sceneId == 1 ? 0.78f + chunkNoise * 0.26f : 0.86f + chunkNoise * 0.24f));
-    fuel[idx] = bed * (p.sceneId == 2 ? 1.42f : (p.sceneId == 1 ? 1.05f + chunkNoise * 0.30f : 1.08f + chunkNoise * 0.26f));
+    const float charScale = p.sceneCharScale;
+    const float materialFuel = initialSource * (p.sceneInitialFuelBase + chunkNoise * p.sceneInitialFuelNoise);
+    heat[idx] = 0.0f;
+    fuel[idx] = fmaxf(0.0f, materialFuel);
     oxygen[idx] = 1.0f;
-    soot[idx] = bed * (p.sceneId == 2 ? 0.00065f : 0.018f) * sootScale;
-    charField[idx] = material * (0.92f + chunkNoise * 0.72f) * charScale;
-    ash[idx] = material * (0.018f + smoothstepf(0.56f, 0.86f, chunkNoise) * 0.055f) * (p.sceneId == 2 ? 0.10f : 1.0f);
-    pyrolysis[idx] = bed * (p.sceneId == 2 ? 0.018f : (p.sceneId == 1 ? 0.060f + chunkNoise * 0.034f : 0.058f + chunkNoise * 0.028f));
-    progress[idx] = bed * (p.sceneId == 2 ? 0.11f : (p.sceneId == 1 ? 0.24f : 0.21f));
-    turbulenceEnergy[idx] = bed * (p.sceneId == 2 ? 0.012f : (p.sceneId == 1 ? 0.082f : 0.065f));
-    sootOptics[idx] = bed * (p.sceneId == 2 ? 0.00050f : 0.018f) * sootScale;
+    soot[idx] = 0.0f;
+    charField[idx] = material * sourceLayer * (0.92f + chunkNoise * 0.72f) * charScale;
+    ash[idx] = 0.0f;
+    pyrolysis[idx] = 0.0f;
+    progress[idx] = 0.0f;
+    turbulenceEnergy[idx] = 0.0f;
+    sootOptics[idx] = 0.0f;
     pressure[idx] = 0.0f;
     divergence[idx] = 0.0f;
 }
@@ -978,6 +1157,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
     const float sourceDx = u - p.mouseX;
     const float sourceDy = v - p.mouseY;
     const float sourceDz = w - 0.5f;
+    const float3 vel = sampleVelocity(uField, vField, wField, p, u, v, w);
     const bool outsideInteractiveSource =
         p.leftDown == 0 ||
         (sourceDx * sourceDx + sourceDy * sourceDy + sourceDz * sourceDz) > 0.090f;
@@ -986,20 +1166,22 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
         charIn[idx] < 0.00010f &&
         ashIn[idx] < 0.00010f &&
         outsideInteractiveSource &&
-        p.rightDown == 0) {
-        heatOut[idx] = 0.0f;
-        fuelOut[idx] = 0.0f;
+        p.rightDown == 0 &&
+        vel.y < 0.0015f) {
+        const float upperFade = smoothstepf(0.18f, 0.46f, v);
+        const float inactiveDecay = expf(-p.dt * (2.1f + upperFade * 2.4f));
+        heatOut[idx] = heatIn[idx] * inactiveDecay;
+        fuelOut[idx] = fuelIn[idx] * inactiveDecay;
         oxygenOut[idx] = fminf(1.0f, oxygenIn[idx] + (1.0f - oxygenIn[idx]) * p.dt * 0.08f);
-        sootOut[idx] = 0.0f;
+        sootOut[idx] = sootIn[idx] * inactiveDecay;
         charOut[idx] = charIn[idx];
         ashOut[idx] = ashIn[idx];
-        pyrolysisOut[idx] = 0.0f;
-        progressOut[idx] = 0.0f;
+        pyrolysisOut[idx] = pyrolysisIn[idx] * inactiveDecay;
+        progressOut[idx] = progressIn[idx] * inactiveDecay;
         turbulenceEnergyOut[idx] = turbulenceEnergyIn[idx] * fmaxf(0.0f, 1.0f - p.dt * 0.54f);
-        sootOpticsOut[idx] = 0.0f;
+        sootOpticsOut[idx] = sootOpticsIn[idx] * inactiveDecay;
         return;
     }
-    const float3 vel = sampleVelocity(uField, vField, wField, p, u, v, w);
     const float prevU = u - vel.x * p.dt * kAdvectionScale;
     const float prevV = v - vel.y * p.dt * kAdvectionScale;
     const float prevW = w - vel.z * p.dt * kAdvectionScale;
@@ -1019,30 +1201,34 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
 
     const float worldX = (u - 0.50f) * 2.10f;
     const float worldZ = (w - 0.50f) * 1.64f;
-    const float material = fuelBedMaterial(worldX, worldZ, p);
+    const float material = solidFuelBedMaterial(worldX, worldZ, p);
     const float sourceNoise = 0.70f + 0.48f * fbm(make_float2(worldX * 13.0f + worldZ * 3.0f + p.time * 0.38f, v * 31.0f + worldZ * 11.0f));
     const float exposedChar = saturate(charMass / fmaxf(0.055f, charMass + ash * 1.75f));
     const float charEdges = smoothstepf(0.06f, 0.78f, material) * smoothstepf(0.92f, 0.02f, ash);
-    const float gasFeed = p.sceneId == 2 ? 1.18f : exposedChar * charEdges;
-    const float scenePyrolysisGain = p.sceneId == 2 ? 0.42f : (p.sceneId == 1 ? 1.34f : 1.0f);
-    const float sceneFuelGain = p.sceneId == 2 ? 0.46f : (p.sceneId == 1 ? 1.18f : 1.0f);
-    const float sceneHeatGain = p.sceneId == 2 ? 1.18f : (p.sceneId == 1 ? 1.08f : 1.0f);
-    const float sceneSootGain = p.sceneId == 2 ? 0.18f : (p.sceneId == 1 ? 1.22f : 1.0f);
+    const float gasFeed = p.sceneGasFeed > 0.0f ? p.sceneGasFeed : exposedChar * charEdges;
+    const float scenePyrolysisGain = p.scenePyrolysisGain;
+    const float sceneFuelGain = p.sceneFuelGain;
+    const float sceneHeatGain = p.sceneHeatGain;
+    const float sceneSootGain = p.sceneSootGain;
     const float bed = fuelBedSource(worldX, worldZ, v, p) * sourceNoise * gasFeed * p.intensity;
-    const float ambientK = 293.0f;
-    float tempK = ambientK + heat * 335.0f;
+    const float ambientK = fmaxf(250.0f, p.sceneAmbientTemperatureK);
+    float tempK = ambientK + heat * 335.0f + progress * 95.0f + pyrolysisRate * 130.0f;
     const float radiativeFeedback = smoothstepf(430.0f, 980.0f, tempK);
     const float solidOxygen = saturate(oxygen * 1.28f - soot * 0.030f);
     const float heatFlux = saturate((tempK - 405.0f) / 900.0f) + bed * 0.34f + sootOptics * 0.024f;
     const float charRelease = fminf(charMass, charMass * heatFlux * solidOxygen * (0.14f + radiativeFeedback * 1.38f) * p.dt);
     pyrolysisRate += (bed * (0.34f + radiativeFeedback * 1.05f) * p.dt + charRelease * (2.45f + sourceNoise * 0.72f)) * scenePyrolysisGain;
-    charMass += material * p.dt * (p.sceneId == 2 ? 0.00005f : (p.sceneId == 1 ? 0.050f : 0.026f));
+    charMass += material * p.dt * p.sceneCharGrowth;
     charMass -= charRelease * 0.92f;
-    ash += charRelease * (p.sceneId == 2 ? 0.025f : 0.16f + 0.22f * saturate(1.0f - oxygen));
+    ash += charRelease * (0.16f + 0.22f * saturate(1.0f - oxygen)) * p.sceneAshScale;
+    if (p.sceneCharScale <= 0.0001f) {
+        charMass = 0.0f;
+        ash = 0.0f;
+    }
 
-    heat += (bed * (p.sceneId == 2 ? 10.40f : 6.20f) * p.dt * (1.0f + radiativeFeedback * 1.12f) + charRelease * 3.35f) * sceneHeatGain;
-    fuel += pyrolysisRate * (p.sceneId == 2 ? 1.34f : 3.70f) * sceneFuelGain;
-    soot += pyrolysisRate * (0.090f + ash * 0.032f + saturate(1.0f - oxygen) * 0.13f) * p.smokeGain * (p.sceneId == 2 ? 0.010f : (p.sceneId == 1 ? 0.92f : 1.0f)) * sceneSootGain;
+    heat += (bed * p.sceneBedHeatBase * p.dt * (1.0f + radiativeFeedback * 1.12f) + charRelease * 3.35f) * sceneHeatGain;
+    fuel += pyrolysisRate * p.scenePyrolysisFuelScale * sceneFuelGain;
+    soot += pyrolysisRate * (0.090f + ash * 0.032f + saturate(1.0f - oxygen) * 0.13f) * p.smokeGain * p.scenePyrolysisSootScale * sceneSootGain;
 
     if (p.leftDown != 0) {
         const float mx = p.mouseX;
@@ -1062,39 +1248,74 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
         fuel *= 1.0f - source * p.dt * 0.7f;
     }
 
-    tempK = ambientK + heat * 335.0f;
-    const float thermalActivation = smoothstepf(575.0f, 1220.0f, tempK);
-    const float arrhenius = expf(-3800.0f / fmaxf(640.0f, tempK));
-    const float oxygenLimited = fminf(fuel, oxygen * 1.42f);
-    const float burnMass = fminf(oxygenLimited, oxygenLimited * thermalActivation * arrhenius * (118.0f + p.intensity * 34.0f) * p.dt);
-    const float incomplete = saturate(1.0f - oxygen * 1.30f + fuel * 0.065f + soot * 0.015f);
-    const float heatRelease = burnMass * 7.0f;
-    const float sootYield = burnMass * (0.035f + incomplete * 0.34f) * p.smokeGain * (p.sceneId == 2 ? 0.006f : (p.sceneId == 1 ? 0.96f : 1.0f));
+    tempK = ambientK + heat * 335.0f + progress * 110.0f + pyrolysisRate * 150.0f;
+    const float thermalActivation = smoothstepf(540.0f, 1120.0f, tempK);
+    const float arrhenius = expf(-3300.0f / fmaxf(590.0f, tempK));
+    const float stoichOxygenFuelMassRatio = fmaxf(0.20f, p.sceneStoichOxygenFuelMassRatio);
+    const float oxygenLimited = fminf(fuel, oxygen / stoichOxygenFuelMassRatio);
+    const float burnMass = fminf(oxygenLimited, oxygenLimited * thermalActivation * arrhenius * (168.0f + p.intensity * 52.0f) * p.dt);
+    const float incomplete = saturate(1.0f - oxygen * 1.55f + fuel * 0.025f + soot * 0.006f);
+    const float methanolPoolCalibration = 1.0f;
+    const float heatRelease = burnMass * p.sceneHeatOfCombustionProxy * lerpf(1.0f, 0.36f + p.sceneRadiativeFraction, methanolPoolCalibration);
+    const float visualSootYield = burnMass * (0.012f + incomplete * 0.14f) * p.smokeGain * p.sceneSootYieldScale;
+    const float measuredSootYield = burnMass * p.sceneMeasuredSootYield * (0.18f + incomplete * 0.82f);
+    const float sootYield = lerpf(visualSootYield, measuredSootYield, methanolPoolCalibration);
     const float sootOxidation = soot * oxygen * smoothstepf(760.0f, 1540.0f, tempK) * p.dt * 0.82f;
-    const float frontProduction = burnMass * (9.8f + turbulenceEnergy * 3.4f) + pyrolysisRate * 0.70f + charRelease * 2.10f;
     const float boundaryAir = smoothstepf(0.70f, 0.96f, v) + smoothstepf(0.11f, 0.03f, u) + smoothstepf(0.89f, 0.97f, u) + smoothstepf(0.11f, 0.03f, w) + smoothstepf(0.89f, 0.97f, w);
-    const float upperEntrainment = smoothstepf(0.52f, 0.98f, v);
+    const float upperEntrainment = smoothstepf(0.26f, 0.54f, v);
+    const float reactionRadius = sqrtf((worldX - p.emitterCenterX) * (worldX - p.emitterCenterX) + (worldZ - p.emitterCenterZ) * (worldZ - p.emitterCenterZ));
+    const float reactionRadiusNorm = reactionRadius / fmaxf(0.05f, p.emitterRadius);
+    const float reactionUpper = smoothstepf(0.045f, 0.18f, v);
+    const float reactionNoise = fbm(make_float2(
+        worldX * 7.0f + v * 11.0f + p.time * 0.055f,
+        worldZ * 7.5f - v * 8.0f - p.time * 0.047f));
+    const float reactionFineNoise = fbm(make_float2(
+        worldX * 18.0f + v * 31.0f - p.time * 0.44f,
+        worldZ * 19.0f - v * 27.0f + p.time * 0.39f));
+    const float verticalFilamentNoise = fbm(make_float2(
+        worldX * 11.0f - worldZ * 3.0f + v * 19.0f + p.time * 0.21f,
+        worldZ * 10.0f + worldX * 2.0f - v * 23.0f - p.time * 0.17f));
+    const float reactionWidth = 1.10f - reactionUpper * (0.72f - reactionNoise * 0.10f);
+    const float reactionRadialKeep = lerpf(1.0f, smoothstepf(reactionWidth, reactionWidth * 0.46f, reactionRadiusNorm), reactionUpper * 0.92f);
+    const float upperBreakup = smoothstepf(0.22f, 0.78f, reactionFineNoise * 0.70f + verticalFilamentNoise * 0.30f + turbulenceEnergy * 0.05f);
+    const float verticalBreakup = lerpf(1.0f, upperBreakup, smoothstepf(0.10f, 0.58f, v));
+    const float sourceSurface = fuelBedSource(worldX, worldZ, v, p);
+    const float frontProduction =
+        burnMass * (13.2f + turbulenceEnergy * 2.2f) +
+        pyrolysisRate * p.dt * (2.8f + sourceSurface * 1.4f) +
+        charRelease * 0.90f;
+    const float reactionTarget = saturate(
+        (burnMass * 48.0f + pyrolysisRate * 0.12f + heat * lerpf(0.010f, 0.0025f, reactionUpper) + sourceSurface * 0.20f) *
+        smoothstepf(0.030f, 0.72f, oxygen) *
+        reactionRadialKeep *
+        verticalBreakup) * 1.45f;
 
     heat += heatRelease;
     fuel -= burnMass * 1.20f;
-    oxygen -= burnMass * 0.98f;
+    oxygen -= burnMass * stoichOxygenFuelMassRatio;
     soot += sootYield;
     soot -= sootOxidation;
-    progress += frontProduction;
-    progress *= expf(-p.dt * (0.72f + v * 0.45f + oxygen * 0.16f + saturate(boundaryAir) * 1.05f + upperEntrainment * 0.26f));
+    const float carriedProgress = progress *
+        expf(-p.dt * (2.35f + v * 3.10f + oxygen * 0.32f + saturate(boundaryAir) * 1.25f + upperEntrainment * 7.20f)) *
+        reactionRadialKeep *
+        verticalBreakup;
+    progress = fmaxf(carriedProgress, reactionTarget + frontProduction * 0.035f);
 
     oxygen = lerpf(oxygen, 1.0f, saturate(boundaryAir) * p.dt * 1.7f);
     oxygen += (1.0f - oxygen) * p.dt * 0.08f;
 
-    tempK = ambientK + heat * 335.0f;
+    tempK = ambientK + heat * 335.0f + progress * 90.0f + pyrolysisRate * 80.0f;
     const float radiationBase = fmaxf(0.0f, (tempK - ambientK) / 1560.0f);
     const float radiationSq = radiationBase * radiationBase;
     const float radiationLoss = radiationSq * radiationSq;
     heat -= radiationLoss * p.dt * (0.88f + soot * 0.085f + sootOptics * 0.018f);
-    heat *= expf(-p.dt * (0.31f + v * 0.64f + soot * 0.022f + saturate(boundaryAir) * 0.26f + upperEntrainment * 0.18f));
-    fuel *= expf(-p.dt * (0.58f + heat * 0.20f + v * 0.92f + saturate(boundaryAir) * 0.18f));
+    heat *= expf(-p.dt * (0.31f + v * 1.35f + soot * 0.022f + saturate(boundaryAir) * 0.26f + upperEntrainment * 4.40f));
+    fuel *= expf(-p.dt * (0.58f + heat * 0.20f + v * 1.45f + saturate(boundaryAir) * 0.18f + upperEntrainment * 2.20f));
     soot *= expf(-p.dt * (0.060f + v * 0.092f + oxygen * 0.028f + saturate(boundaryAir) * 0.96f + upperEntrainment * 0.22f));
-    pyrolysisRate *= expf(-p.dt * (1.55f + v * 0.58f + saturate(boundaryAir) * 0.18f));
+    const float methanolLowSootCleanBurn = smoothstepf(0.36f, 0.92f, oxygen) * smoothstepf(0.54f, 1.48f, heat + progress * 0.32f);
+    soot *= expf(-p.dt * (2.10f + methanolLowSootCleanBurn * 4.60f));
+    soot = fminf(soot, kNistMethanolMaxSmokeOpticalDepth * 0.90f + measuredSootYield * 18.0f);
+    pyrolysisRate *= expf(-p.dt * (1.55f + v * 1.05f + saturate(boundaryAir) * 0.18f + upperEntrainment * 3.50f));
 
     const float uL = uField[uIndexUnchecked(x, y, z, p)];
     const float uR = uField[uIndexUnchecked(x + 1, y, z, p)];
@@ -1106,13 +1327,12 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) advectReactKernel(
         fabsf(uR - uL) +
         fabsf(vU - vD) +
         fabsf(wF - wB);
-    const float flameActivity = saturate(progress * 0.64f + burnMass * 5.2f + heat * 0.065f);
-    turbulenceEnergy += p.dt * (shear * (0.72f + progress * 0.06f) + flameActivity * p.turbulence * 0.62f + frontProduction * 0.085f + soot * 0.018f);
+    const float flameActivity = saturate(progress * 0.78f + burnMass * 7.4f + pyrolysisRate * 0.18f + heat * 0.030f);
+    turbulenceEnergy += p.dt * (shear * (0.72f + progress * 0.06f) + flameActivity * p.turbulence * 0.68f + frontProduction * 0.072f + soot * 0.010f);
     turbulenceEnergy *= expf(-p.dt * (0.54f + v * 0.24f + saturate(boundaryAir) * 0.42f + upperEntrainment * 0.16f));
     const float particleGrowth = saturate(incomplete * 0.36f + ash * 0.13f + soot * 0.055f + smoothstepf(0.65f, 1.55f, tempK / 1000.0f) * 0.18f);
     sootOptics = soot * (1.04f + 0.28f * sqrtf(fmaxf(0.0f, heat)) + 0.24f * ash + 0.46f * particleGrowth);
     sootOptics = lerpf(sootOptics, sootOptics * 0.48f, saturate(sootOxidation * 0.92f));
-
     heatOut[idx] = fminf(8.8f, fmaxf(0.0f, heat));
     fuelOut[idx] = fminf(5.5f, fmaxf(0.0f, fuel));
     oxygenOut[idx] = fminf(1.0f, fmaxf(0.0f, oxygen));
@@ -1148,6 +1368,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) forceVelocityKernel(
     const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(p.nx);
     const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.ny);
     const float w = (static_cast<float>(z) + 0.5f) / static_cast<float>(p.nz);
+    const float worldX = (u - 0.50f) * 2.10f;
+    const float worldZ = (w - 0.50f) * 1.64f;
+    const float sourceJet = fuelBedSource(worldX, worldZ, v, p) * (0.62f + h * 0.16f + c * 0.18f);
     const float gradX = heat[scalarIndex(x + 1, y, z, p)] - heat[scalarIndex(x - 1, y, z, p)];
     const float gradY = heat[scalarIndex(x, y + 1, z, p)] - heat[scalarIndex(x, y - 1, z, p)];
     const float gradZ = heat[scalarIndex(x, y, z + 1, p)] - heat[scalarIndex(x, y, z - 1, p)];
@@ -1163,17 +1386,24 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) forceVelocityKernel(
     const float curlMagnitude = fabsf(curlX) + fabsf(curlY) + fabsf(curlZ);
     const float curlNoiseA = fbm(make_float2(u * 9.0f + w * 3.7f + p.time * 0.22f, v * 13.0f - p.time * 0.31f)) - 0.5f;
     const float curlNoiseB = fbm(make_float2(w * 10.0f - p.time * 0.19f, u * 8.0f + v * 5.5f + p.time * 0.27f)) - 0.5f;
-    const float thermalActivity = smoothstepf(0.04f, 4.20f, h + s * 0.28f);
-    const float upperDrag = smoothstepf(0.26f, 0.94f, v);
+    const float reactionLift = saturate(c * 0.70f + sqrtf(fmaxf(0.0f, k)) * 0.30f + h * 0.10f);
+    const float thermalActivity = smoothstepf(0.035f, 3.00f, h + reactionLift * 1.55f);
+    const float upperDrag = smoothstepf(0.20f, 0.58f, v);
     const float lesGain = sqrtf(fmaxf(0.0f, k)) * (0.30f + c * 0.54f);
-    const float sceneCurlScale = p.sceneId == 2 ? 0.38f : (p.sceneId == 1 ? 1.18f : 1.0f);
-    const float sceneBuoyancyScale = p.sceneId == 2 ? 0.42f : (p.sceneId == 1 ? 1.06f : 1.0f);
+    const float sceneCurlScale = p.sceneCurlScale;
+    const float sceneBuoyancyScale = p.sceneBuoyancyScale;
     const float curlGain = p.turbulence * sceneCurlScale * (0.18f + thermalActivity * 0.82f + lesGain * 1.12f);
     const float vortexGain = p.turbulence * sceneCurlScale * thermalActivity * saturate(curlMagnitude * 0.46f) * 0.68f;
-    const float buoyancyFade = p.sceneId == 2 ? smoothstepf(0.24f, 0.035f, v) : smoothstepf(0.96f, 0.08f, v);
+    const float buoyancyFade = smoothstepf(p.sceneBuoyancyCeiling, p.sceneBuoyancyFloor, v);
+    const float sourceRise = (0.62f + smoothstepf(0.0f, 0.12f, v) * 0.38f) * (1.0f - smoothstepf(0.80f, 1.0f, v));
     const float verticalVelocity = 0.5f * (vD + vU);
-    const float verticalDamping = verticalVelocity * (0.10f + upperDrag * 0.72f + s * 0.020f);
-    const float buoyancy = h * sceneBuoyancyScale * (1.62f + p.turbulence * 0.34f + c * 0.16f) * buoyancyFade - s * 0.095f - gradY * 0.18f - verticalDamping;
+    const float verticalDamping = verticalVelocity * (0.10f + upperDrag * 3.40f + s * 0.020f);
+    const float buoyancy = (h * 1.12f + c * 0.88f + k * 0.18f) * sceneBuoyancyScale * (1.55f + p.turbulence * 0.30f) * buoyancyFade +
+        reactionLift * sceneBuoyancyScale * sourceRise * 0.54f +
+        sourceJet * sceneBuoyancyScale * (p.plumeTestMode != 0 ? 1.85f : 1.12f) -
+        s * 0.14f -
+        gradY * 0.10f -
+        verticalDamping;
 
     atomicAdd(&vField[vIndex(x, y + 1, z, p)], p.dt * (buoyancy + curlY * vortexGain * 0.22f));
     atomicAdd(&uField[uIndex(x, y, z, p)], p.dt * (p.wind * (0.34f + v * 0.96f) + (-gradZ * 1.36f + curlNoiseA * (0.20f + upperDrag * 0.16f) + curlX * vortexGain) * curlGain));
@@ -1367,7 +1597,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
     }
 
     const float tempK = 293.0f + heat * 335.0f;
-    const float hrr = (fuel + pyrolysis * 0.42f) * oxygen * smoothstepf(610.0f, 1280.0f, tempK) * expf(-5200.0f / fmaxf(650.0f, tempK));
+    const float stoichOxygenFuelMassRatio = fmaxf(0.20f, p.sceneStoichOxygenFuelMassRatio);
+    const float oxygenLimitedFuel = fminf(fuel + pyrolysis * 0.42f, oxygen / stoichOxygenFuelMassRatio);
+    const float measuredBurnRateScale = p.sceneTargetMassBurnRateGps > 0.0f ? p.sceneTargetMassBurnRateGps / kNistMethanolMeasuredMassBurnRateGps : 1.0f;
+    const float hrr = oxygenLimitedFuel * smoothstepf(610.0f, 1280.0f, tempK) * expf(-5200.0f / fmaxf(650.0f, tempK)) * p.sceneHeatOfCombustionProxy * measuredBurnRateScale;
     const float opticalDepth = sootOptics + soot * (0.24f + 0.05f * sqrtf(fmaxf(0.0f, heat)));
     const float normalizedHeight = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.ny);
     const float flameMass =
@@ -1413,9 +1646,11 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) accumulateMetricsKernel(
     atomicMaxPositiveFloat(&metrics->divergenceBeforeMaxBits, divBefore);
     atomicMaxPositiveFloat(&metrics->divergenceAfterMaxBits, divAfter);
     if (flameMarker > 0.74f) {
-        atomicMaxPositiveFloat(&metrics->flameHeightBits, normalizedHeight * kRoomHeightMeters);
+        atomicMaxPositiveFloat(&metrics->flameHeightBits, normalizedHeight * kFireDomainHeightMeters);
     }
 }
+
+#include "volume_bricks.cu"
 
 __device__ float3 blackbodyColor(float tempK) {
     const float t = fmaxf(1000.0f, fminf(12000.0f, tempK)) / 100.0f;
@@ -1482,10 +1717,11 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) buildSceneLightKernel(
     const float gradHeatX = sampleScalar(heatField, p, u + cellX, v, w) - sampleScalar(heatField, p, u - cellX, v, w);
     const float gradHeatY = sampleScalar(heatField, p, u, v + cellY, w) - sampleScalar(heatField, p, u, v - cellY, w);
     const float gradHeatZ = sampleScalar(heatField, p, u, v, w + cellZ) - sampleScalar(heatField, p, u, v, w - cellZ);
-    const float frontGradient = sqrtf(gradHeatX * gradHeatX + gradHeatY * gradHeatY + gradHeatZ * gradHeatZ) + fuel * oxygen * 0.035f + progress * 0.16f;
+    const float reactionSignal = saturate(progress * 0.70f + pyrolysis * 0.38f + heat * 0.035f);
+    const float frontGradient = sqrtf(gradHeatX * gradHeatX + gradHeatY * gradHeatY + gradHeatZ * gradHeatZ) + reactionSignal * 0.18f + fuel * oxygen * 0.012f;
     const float fineNoise = fbm3(make_float3(u * 34.0f + p.time * 0.45f, v * 42.0f - p.time * 0.82f, w * 34.0f + p.time * 0.22f));
     const float shearNoise = fbm3(make_float3(u * 12.0f - p.time * 0.38f, v * 11.0f - p.time * 0.62f, w * 13.0f + p.time * 0.20f));
-    const float reactionFront = smoothstepf(0.035f, 0.54f, frontGradient + pyrolysis * 0.10f);
+    const float reactionFront = smoothstepf(0.035f, 0.52f, frontGradient + pyrolysis * 0.12f);
     const float flameHeightFade = smoothstepf(0.70f, 0.070f, v);
     const float lowerShadowColumn = smoothstepf(0.62f, 0.06f, v);
     const float plumeShadowColumn = smoothstepf(0.12f, 0.88f, v);
@@ -1493,35 +1729,41 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) buildSceneLightKernel(
         smoothstepf(0.56f, 0.94f, fineNoise * 0.48f + shearNoise * 0.42f + reactionFront * 0.26f + heat * 0.018f) *
         smoothstepf(0.04f, 0.86f, reactionFront) *
         flameHeightFade;
-    const float sheetCore = saturate(sheetGate * (0.42f + progress * 0.22f + pyrolysis * 0.34f));
-    const float tempK = 293.0f + heat * 360.0f + fuel * 44.0f + pyrolysis * 120.0f + progress * 70.0f + sheetCore * 1020.0f;
+    const float sheetCore = saturate(sheetGate * (0.42f + reactionSignal * 0.52f + pyrolysis * 0.22f));
+    const float tempK = 293.0f + heat * 330.0f + pyrolysis * 190.0f + progress * 260.0f + sheetCore * 1200.0f;
+    const float upperRadianceDamp = 1.0f - smoothstepf(0.18f, 0.58f, v) * 0.72f;
+    const float paleSmoke = smoothstepf(0.16f, 0.70f, v) *
+        smoothstepf(0.020f, 0.72f, sootOptics + soot * 0.28f + reactionSignal * 0.030f) *
+        (0.18f + plumeShadowColumn * 0.36f);
     const float flameEmitter =
         domainFade *
         smoothstepf(820.0f, 1880.0f, tempK) *
-        smoothstepf(0.010f, 0.68f, fuel + pyrolysis * 0.30f + heat * 0.040f) *
+        smoothstepf(0.055f, 0.84f, reactionSignal) *
         smoothstepf(0.030f, 0.82f, oxygen) *
         reactionFront *
         sheetGate *
-        (0.24f + sheetCore * 1.42f);
+        (0.24f + sheetCore * 1.42f) *
+        upperRadianceDamp;
     const float emberEmitter =
         smoothstepf(0.002f, 0.22f, charMass + ash * 0.18f) *
         smoothstepf(0.09f, 0.00f, v) *
         (0.10f + heat * 0.012f + pyrolysis * 0.050f);
     const float sootAttenuation = expf(-(sootOptics * 0.25f + soot * 0.090f + ash * 0.035f));
-    const float3 flame = mul3(blackbodyColor(tempK), flameEmitter * sootAttenuation * 3.40f);
+    const float3 flame = mul3(blackbodyColor(tempK), flameEmitter * sootAttenuation * 4.20f);
     const float3 coal = mul3(make_float3(1.0f, 0.22f, 0.040f), emberEmitter * p.reflectionGain * 0.20f);
     const float extinction = saturate(
         sootOptics * (0.26f + plumeShadowColumn * 0.42f) +
         soot * (0.065f + plumeShadowColumn * 0.20f) +
         ash * 0.050f +
-        progress * lowerShadowColumn * 0.020f);
+        progress * lowerShadowColumn * 0.006f +
+        paleSmoke * 0.58f);
 
     const int idx = lightIndexUnchecked(lx, ly, lz, p);
     sceneLight[idx] = make_float4(flame.x + coal.x, flame.y + coal.y, flame.z + coal.z, extinction);
     const float verticalDepth = v * (1.0f + plumeShadowColumn * 0.70f);
     const float radialDepth = expf(-((u - 0.50f) * (u - 0.50f) * 5.5f + (w - 0.50f) * (w - 0.50f) * 7.0f));
-    const float opticalShadow = sootOptics * (0.62f + plumeShadowColumn * 1.15f) + soot * (0.22f + plumeShadowColumn * 0.46f) + ash * 0.072f;
-    sceneShadow[idx] = expf(-(opticalShadow * (0.72f + verticalDepth * 0.42f) + radialDepth * opticalShadow * 0.34f + progress * 0.035f));
+    const float opticalShadow = sootOptics * (0.62f + plumeShadowColumn * 1.15f) + soot * (0.22f + plumeShadowColumn * 0.46f) + ash * 0.072f + paleSmoke * 0.34f;
+    sceneShadow[idx] = expf(-(opticalShadow * (0.72f + verticalDepth * 0.42f) + radialDepth * opticalShadow * 0.34f + progress * 0.010f));
 }
 
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) propagateSceneLightKernel(
@@ -1575,15 +1817,37 @@ __device__ float floorGrid(float x, float z, float scale, float width) {
 __device__ float3 fireVolumeUvFromWorld(float3 p) {
     return make_float3(
         saturate((p.x + 1.05f) / 2.10f),
-        saturate((p.y - 0.02f) / 2.03f),
+        saturate((p.y - kRenderVolumeFloorMeters) / kFireDomainHeightMeters),
         saturate((p.z + 0.82f) / 1.64f));
 }
 
-__device__ float3 fireVolumeWorldFromUv(float3 uv) {
-    return make_float3(
-        uv.x * 2.10f - 1.05f,
-        uv.y * 2.03f + 0.02f,
-        uv.z * 1.64f - 0.82f);
+__device__ float3 sceneEmitterWorld(const SimParams& p) {
+    const float baseY = p.emitterHeightNorm * 2.03f + 0.02f;
+    const float liftY = fmaxf(0.035f, p.emitterHeightBandNorm * 2.03f * 0.28f);
+    return make_float3(p.emitterCenterX, baseY + liftY, p.emitterCenterZ);
+}
+
+__device__ float3 sceneEmitterUv(const SimParams& p) {
+    return fireVolumeUvFromWorld(sceneEmitterWorld(p));
+}
+
+__device__ float3 sceneIrradianceProbeWorld(const SimParams& p, int probeIndex) {
+    const float3 center = sceneEmitterWorld(p);
+    const float radius = fmaxf(0.045f, p.emitterRadius);
+    const float height = fmaxf(0.060f, p.emitterHeightBandNorm * 2.03f * 0.55f);
+    if (probeIndex == 1) {
+        return make_float3(center.x - radius * 0.62f, center.y + height * 0.12f, center.z);
+    }
+    if (probeIndex == 2) {
+        return make_float3(center.x + radius * 0.62f, center.y + height * 0.12f, center.z);
+    }
+    if (probeIndex == 3) {
+        return make_float3(center.x, center.y + height, center.z - radius * 0.48f);
+    }
+    if (probeIndex == 4) {
+        return make_float3(center.x, center.y + height * 0.66f, center.z + radius * 0.48f);
+    }
+    return center;
 }
 
 __device__ float3 gatherSceneIrradiance(
@@ -1595,14 +1859,9 @@ __device__ float3 gatherSceneIrradiance(
     float3 irradiance = make_float3(0.0f, 0.0f, 0.0f);
 
 #pragma unroll
-    for (int i = 0; i < 3; ++i) {
-        float3 sampleUv = make_float3(0.50f, 0.16f, 0.50f);
-        if (i == 1) {
-            sampleUv = make_float3(0.34f, 0.26f, 0.43f);
-        } else if (i == 2) {
-            sampleUv = make_float3(0.66f, 0.26f, 0.57f);
-        }
-
+    for (int i = 0; i < kRoomIrradianceProbeCount; ++i) {
+        const float3 source = sceneIrradianceProbeWorld(p, i);
+        const float3 sampleUv = fireVolumeUvFromWorld(source);
         const float4 light = sampleSceneLight(sceneLightField, p, sampleUv.x, sampleUv.y, sampleUv.z);
         const float3 radiance = make_float3(light.x, light.y, light.z);
         const float lum = luminance3(radiance);
@@ -1610,7 +1869,6 @@ __device__ float3 gatherSceneIrradiance(
             continue;
         }
 
-        const float3 source = fireVolumeWorldFromUv(sampleUv);
         const float3 toLight = sub3(source, hit);
         const float dist2 = fmaxf(0.045f, dot3(toLight, toLight));
         const float3 wi = mul3(toLight, rsqrtf(dist2));
@@ -1631,17 +1889,26 @@ __device__ float volumeShadowRay(
     const float* sceneShadowField,
     const SimParams& p) {
     const float3 targetUv = fireVolumeUvFromWorld(hit);
-    const float3 sourceUv = make_float3(0.50f, 0.12f, 0.50f);
+    const float3 sourceUv = sceneEmitterUv(p);
     float opticalDepth = 0.0f;
 #pragma unroll
-    for (int i = 1; i <= 5; ++i) {
-        const float t = static_cast<float>(i) / 6.0f;
+    for (int i = 1; i <= kRoomShadowRaySteps; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(kRoomShadowRaySteps + 1);
         const float3 uv = lerp3(sourceUv, targetUv, t);
         const float4 light = sampleSceneLight(sceneLightField, p, uv.x, uv.y, uv.z);
         const float shadow = sampleSceneShadow(sceneShadowField, p, uv.x, uv.y, uv.z);
         opticalDepth += light.w * (0.18f + t * 0.22f) + (1.0f - shadow) * (0.08f + t * 0.16f);
     }
     return expf(-opticalDepth);
+}
+
+__device__ float floorFireFootprint(float3 hit, const SimParams& p) {
+    const float dx = hit.x - p.emitterCenterX;
+    const float dz = hit.z - p.emitterCenterZ;
+    const float radius = sqrtf(dx * dx + dz * dz);
+    const float inner = fmaxf(0.18f, p.emitterRadius * 0.90f);
+    const float outer = fmaxf(inner + 0.24f, p.emitterRadius * 1.72f);
+    return smoothstepf(outer, inner, radius);
 }
 
 __device__ float rectMask(float2 p, float2 center, float2 halfSize, float feather) {
@@ -1656,28 +1923,6 @@ __device__ float lineMask(float2 p, float2 a, float2 b, float thickness) {
     const float h = saturate(dot2(pa, ba) / fmaxf(0.000001f, dot2(ba, ba)));
     const float2 d = sub2(pa, mul2(ba, h));
     return smoothstepf(thickness, thickness * 0.25f, sqrtf(dot2(d, d)));
-}
-
-__device__ void sourceModelOverlay(float2 uv, const CameraState& cam, const SimParams& p, float glow, float3* color) {
-    if (uv.x < 0.24f || uv.x > 0.76f || uv.y < 0.42f || uv.y > 0.88f) {
-        return;
-    }
-    if (p.sceneId == 1) {
-        return;
-    }
-    float alpha = 0.0f;
-    float3 modelColor = make_float3(0.0f, 0.0f, 0.0f);
-    const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
-    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
-    const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
-    const float3 c = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
-    const float tray = smoothstepf(0.135f, 0.105f, fabsf(uv.x - c.x)) * smoothstepf(0.050f, 0.036f, fabsf(uv.y - c.y));
-    const float inner = smoothstepf(0.112f, 0.086f, fabsf(uv.x - c.x)) * smoothstepf(0.039f, 0.027f, fabsf(uv.y - c.y));
-    alpha = saturate((tray - inner * 0.55f) * 0.65f);
-    modelColor = lerp3(make_float3(0.015f, 0.013f, 0.011f), make_float3(0.13f, 0.12f, 0.10f), alpha);
-    if (alpha > 0.001f) {
-        *color = lerp3(*color, modelColor, saturate(alpha));
-    }
 }
 
 __device__ float3 roomBackgroundRay(
@@ -1752,48 +1997,30 @@ __device__ float3 roomBackgroundRay(
         materialAlbedo = make_float3(0.26f, 0.26f, 0.25f);
         materialGiScale = 0.22f;
 
-        if (p.sceneId == 1) {
-            const float logMaterial = fuelBedMaterial(hit.x, hit.z, p);
-            const float coal = expf(-(hit.x * hit.x * 1.25f + hit.z * hit.z * 2.45f)) *
-                smoothstepf(0.28f, 0.90f, fbm(make_float2(hit.x * 13.0f, hit.z * 15.0f)));
-            const float scorch = expf(-(hit.x * hit.x * 0.66f + hit.z * hit.z * 1.15f));
-            color = lerp3(color, make_float3(0.018f, 0.015f, 0.012f), saturate(logMaterial * 0.78f + scorch * 0.20f));
-            color = add3(color, mul3(make_float3(0.090f, 0.020f, 0.004f), coal * glow * 0.026f));
-            color = add3(color, mul3(make_float3(0.17f, 0.11f, 0.055f), logMaterial * 0.050f));
-            materialAlbedo = lerp3(materialAlbedo, make_float3(0.040f, 0.030f, 0.022f), logMaterial * 0.86f);
-            materialGiScale = lerpf(materialGiScale, 0.44f, logMaterial * 0.80f);
-        } else if (p.sceneId == 2) {
-            const float radius = sqrtf(hit.x * hit.x + hit.z * hit.z);
-            const float plate = smoothstepf(0.78f, 0.70f, radius);
-            const float burner = fuelBedMaterial(hit.x, hit.z, p);
-            const float radialGrooves = floorGrid(radius, 0.0f, 18.0f, 0.005f);
-            color = lerp3(color, make_float3(0.018f, 0.019f, 0.020f), plate * 0.70f);
-            color = lerp3(color, make_float3(0.005f, 0.005f, 0.005f), burner * 0.72f);
-            color = add3(color, mul3(make_float3(0.11f, 0.10f, 0.09f), radialGrooves * plate * 0.010f));
-            color = add3(color, mul3(make_float3(0.090f, 0.032f, 0.006f), burner * glow * 0.012f));
-            materialAlbedo = lerp3(materialAlbedo, make_float3(0.032f, 0.033f, 0.034f), plate * 0.82f);
-            materialGiScale = lerpf(materialGiScale, 0.42f, plate * 0.72f);
-        } else {
-            const float trayBody = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(1.08f, 0.58f), 0.022f);
-            const float trayInner = rectMask(make_float2(hit.x, hit.z), make_float2(0.0f, 0.0f), make_float2(0.96f, 0.47f), 0.020f);
-            const float trayRim = saturate(trayBody - trayInner * 0.74f);
-            const float emberBed = trayInner * expf(-(hit.x * hit.x * 0.74f + hit.z * hit.z * 2.20f));
-            const float trayContact = trayInner * expf(-(hit.x * hit.x * 1.35f + hit.z * hit.z * 3.35f));
-            const float scorch = expf(-(hit.x * hit.x * 0.82f + hit.z * hit.z * 1.75f));
-            color = lerp3(color, make_float3(0.017f, 0.014f, 0.012f), trayBody * 0.82f);
-            color = lerp3(color, make_float3(0.020f, 0.019f, 0.018f), scorch * (1.0f - trayBody) * 0.16f);
-            color = lerp3(color, make_float3(0.010f, 0.009f, 0.008f), trayContact * 0.22f);
-            color = add3(color, mul3(make_float3(0.056f, 0.014f, 0.003f), emberBed * glow * 0.26f));
-            color = add3(color, mul3(make_float3(0.30f, 0.28f, 0.24f), trayRim * 0.10f));
-            materialAlbedo = lerp3(materialAlbedo, make_float3(0.030f, 0.024f, 0.020f), trayBody * 0.75f);
-            materialGiScale = lerpf(materialGiScale, 0.48f, trayBody * 0.85f);
-        }
+        const float dx = hit.x - p.emitterCenterX;
+        const float dz = hit.z - p.emitterCenterZ;
+        const float radius = sqrtf(dx * dx + dz * dz);
+        const float pan = smoothstepf(p.emitterRadius * 1.14f, p.emitterRadius * 1.02f, radius);
+        const float liquid = smoothstepf(p.emitterRadius, p.emitterRadius * 0.88f, radius);
+        const float rim = pan * (1.0f - liquid);
+        const float meniscus = smoothstepf(p.emitterRadius * 1.00f, p.emitterRadius * 0.94f, radius) *
+            smoothstepf(p.emitterRadius * 0.76f, p.emitterRadius * 0.98f, radius);
+        color = lerp3(color, make_float3(0.022f, 0.020f, 0.017f), pan * 0.10f);
+        color = lerp3(color, make_float3(0.020f, 0.016f, 0.012f), liquid * 0.06f);
+        color = add3(color, mul3(make_float3(0.34f, 0.20f, 0.070f), liquid * glow * 0.32f));
+        const float emberBed = smoothstepf(p.emitterRadius * 0.96f, p.emitterRadius * 0.18f, radius) * pan;
+        color = add3(color, mul3(make_float3(0.34f, 0.16f, 0.045f), emberBed * glow * 0.26f));
+        color = add3(color, mul3(make_float3(0.26f, 0.24f, 0.21f), rim * 0.060f + meniscus * 0.040f));
+        materialAlbedo = lerp3(materialAlbedo, make_float3(0.13f, 0.095f, 0.062f), pan * 0.18f);
+        materialGiScale = lerpf(materialGiScale, 0.36f, pan * 0.70f);
 
         const float reflectCore = expf(-(hit.x * hit.x * 2.45f + (hit.z + 0.18f) * (hit.z + 0.18f) * 1.95f)) * glow;
         const float reflectedTongues = smoothstepf(0.82f, 0.00f, fabsf(hit.x)) * smoothstepf(1.18f, 0.00f, fabsf(hit.z + 0.72f));
         const float streaks = floorGrid(hit.x + hit.z * 0.035f, hit.z, 13.0f, 0.010f);
-        color = add3(color, mul3(make_float3(0.55f, 0.11f, 0.023f), reflectCore * p.reflectionGain * 0.48f));
-        color = add3(color, mul3(make_float3(0.46f, 0.070f, 0.014f), reflectedTongues * streaks * glow * p.reflectionGain * 0.14f));
+        const float3 floorGlowColor = make_float3(p.sceneFloorGlowR, p.sceneFloorGlowG, p.sceneFloorGlowB);
+        const float3 floorTongueColor = make_float3(p.sceneFloorTongueR, p.sceneFloorTongueG, p.sceneFloorTongueB);
+        color = add3(color, mul3(floorGlowColor, reflectCore * p.reflectionGain * p.sceneFloorGlowScale));
+        color = add3(color, mul3(floorTongueColor, reflectedTongues * streaks * glow * p.reflectionGain * p.sceneFloorTongueScale));
     } else if (surface == 2) {
         color = cinematic ? make_float3(0.012f, 0.012f, 0.012f) : make_float3(0.011f, 0.011f, 0.010f);
         materialAlbedo = make_float3(0.24f, 0.24f, 0.23f);
@@ -1828,7 +2055,8 @@ __device__ float3 roomBackgroundRay(
         color = lerp3(color, make_float3(0.010f, 0.011f, 0.012f), soot * 0.82f * p.smokeDarkness);
         materialAlbedo = lerp3(materialAlbedo, make_float3(0.030f, 0.032f, 0.034f), soot * 0.75f);
         const float wallGlow = expf(-(hit.x * hit.x * 1.1f + hit.z * hit.z * 1.3f + (hit.y - 0.70f) * (hit.y - 0.70f) * 1.0f)) * glow;
-        color = add3(color, mul3(make_float3(0.15f, 0.050f, 0.018f), wallGlow * 0.090f));
+        const float3 wallGlowColor = make_float3(p.sceneWallGlowR, p.sceneWallGlowG, p.sceneWallGlowB);
+        color = add3(color, mul3(wallGlowColor, wallGlow * p.sceneWallGlowScale));
         if (surface == 3 && hit.x < 0.0f) {
             const float window = rectMask(make_float2(hit.z, hit.y), make_float2(-1.28f, 0.92f), make_float2(0.06f, 0.62f), 0.030f);
             const float glassNoise = 0.55f + 0.25f * sinf(hit.y * 23.0f + hit.z * 15.0f);
@@ -1837,19 +2065,22 @@ __device__ float3 roomBackgroundRay(
         }
     }
 
+    const float floorFootprint = surface == 1 ? floorFireFootprint(hit, p) : 1.0f;
     const float3 volumeUv = fireVolumeUvFromWorld(hit);
     const float4 giSample = sampleSceneLight(sceneLightField, p, volumeUv.x, volumeUv.y, volumeUv.z);
-    const float sceneShadow = sampleSceneShadow(sceneShadowField, p, volumeUv.x, volumeUv.y, volumeUv.z);
-    const float volumeVisibility = volumeShadowRay(hit, sceneLightField, sceneShadowField, p);
+    const float rawSceneShadow = sampleSceneShadow(sceneShadowField, p, volumeUv.x, volumeUv.y, volumeUv.z);
+    const float rawVolumeVisibility = volumeShadowRay(hit, sceneLightField, sceneShadowField, p);
+    const float sceneShadow = lerpf(1.0f, rawSceneShadow, floorFootprint);
+    const float volumeVisibility = lerpf(1.0f, rawVolumeVisibility, floorFootprint);
     const float3 gatheredIrradiance = gatherSceneIrradiance(hit, surfaceNormal, sceneLightField, sceneShadowField, p);
-    const float3 indirect = mul3(add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.42f), gatheredIrradiance), volumeVisibility);
+    const float3 indirect = mul3(add3(mul3(make_float3(giSample.x, giSample.y, giSample.z), 0.42f * floorFootprint), gatheredIrradiance), volumeVisibility);
     const float grazingFalloff = surface == 2 ? 0.62f : 1.0f;
     const float contactOcclusion = smoothstepf(0.005f, 0.42f, sceneShadow) * expf(-giSample.w * 0.72f) * (0.30f + volumeVisibility * 0.70f);
-    const float irradianceLift = 0.66f + smoothstepf(0.006f, 0.13f, luminance3(indirect)) * 0.72f;
-    const float contactWarmth = surface == 1 ? 1.72f : (surface == 2 ? 0.88f : 1.16f);
+    const float irradianceLift = 0.72f + smoothstepf(0.004f, 0.11f, luminance3(indirect)) * 0.98f;
+    const float contactWarmth = surface == 1 ? 1.72f : (surface == 2 ? 1.02f : 1.46f);
     color = add3(color, mul3(mul3(indirect, materialAlbedo), materialGiScale * grazingFalloff * contactOcclusion * irradianceLift * contactWarmth));
-    const float shadowedSoot = (1.0f - volumeVisibility) * smoothstepf(0.18f, 0.82f, 1.0f - sceneShadow);
-    color = lerp3(color, make_float3(0.006f, 0.007f, 0.008f), shadowedSoot * (surface == 2 ? 0.38f : 0.26f));
+    const float shadowedSoot = floorFootprint * (1.0f - volumeVisibility) * smoothstepf(0.18f, 0.82f, 1.0f - sceneShadow);
+    color = lerp3(color, make_float3(0.006f, 0.007f, 0.008f), shadowedSoot * (surface == 1 ? 0.025f : (surface == 2 ? 0.38f : 0.26f)));
     const float wallHorizontalEdge = surface == 3 ? roomHalf - fabsf(hit.z) : roomHalf - fabsf(hit.x);
     const float cornerDistance = surface == 1 || surface == 2
         ? fminf(roomHalf - fabsf(hit.x), roomHalf - fabsf(hit.z))
@@ -1858,7 +2089,6 @@ __device__ float3 roomBackgroundRay(
 
     const float grain = (hash21(make_float2(floorf(hit.x * 19.0f + hit.z * 13.0f), floorf(hit.y * 15.0f + p.time * 0.08f))) - 0.5f) * 0.006f;
     color = add3(color, make_float3(grain, grain, grain));
-    sourceModelOverlay(uv, cam, p, glow, &color);
     const float fog = smoothstepf(3.8f, 0.2f, bestT);
     const float vignette = smoothstepf(0.78f, 0.20f, sqrtf((uv.x - 0.50f) * (uv.x - 0.50f) + (uv.y - 0.46f) * (uv.y - 0.46f)));
     return mul3(color, (0.12f + fog * 0.56f) * (0.58f + vignette * 0.30f));
@@ -1932,9 +2162,9 @@ __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, con
     if (p.showGizmos == 0) {
         return;
     }
-    const float sourceX = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
-    const float sourceY = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterY[0] : p.emitterHeightNorm * 2.03f + 0.02f;
-    const float sourceZ = p.sceneId == 2 && p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
+    const float sourceX = p.emitterCenterX;
+    const float sourceY = p.emitterHeightNorm * 2.03f + 0.02f;
+    const float sourceZ = p.emitterCenterZ;
     const float3 source = projectPoint(cam, make_float3(sourceX, sourceY, sourceZ));
     if (source.z > 0.0f) {
         const float2 c = make_float2(source.x, source.y);
@@ -1950,6 +2180,8 @@ __device__ void drawGizmos(float3* color, float2 uv, const CameraState& cam, con
     blendGizmo(color, make_float3(0.20f, 0.48f, 1.0f), lineAlpha(uv, axisBase, zAxis, 0.005f));
 }
 
+#include "render_sparse_integrator.cu"
+
 __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     float4* out,
     const float* heatField,
@@ -1964,6 +2196,10 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     const float* sootOpticsField,
     const float4* sceneLightField,
     const float* sceneShadowField,
+    const BrickMeta* brickMeta,
+    int brickNx,
+    int brickNy,
+    int brickNz,
     const float* uField,
     const float* vField,
     const float* wField,
@@ -1992,33 +2228,131 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
     float debugTemperature = 0.0f;
     float debugFuel = 0.0f;
     float debugVelocity = 0.0f;
+    float debugVelocityDown = 0.0f;
+    float debugGas = 0.0f;
+    float debugReaction = 0.0f;
+    float debugProduct = 0.0f;
+    float debugSource = 0.0f;
+    float debugSourceMaterial = 0.0f;
+    float debugOxygenSupply = 0.0f;
+    float debugOxygenDepletion = 0.0f;
+    float debugActiveBrick = 0.0f;
+    float debugSkippedBrick = 0.0f;
+    float debugEmission = 0.0f;
+    float debugExtinction = 0.0f;
+    float3 debugFlowVector = make_float3(0.0f, 0.0f, 0.0f);
+    float debugFlowMagnitude = 0.0f;
 
-    if (intersectBox(cam.eye, rd, make_float3(-1.05f, 0.02f, -0.82f), make_float3(1.05f, 2.05f, 0.82f), &boxNear, &boxFar)) {
+    if (intersectBox(cam.eye, rd, make_float3(-1.05f, kRenderVolumeFloorMeters, -0.82f), make_float3(1.05f, kRenderVolumeHeightMeters, 0.82f), &boxNear, &boxFar)) {
         const int raySteps = min(max(p.raymarchSteps, 24), kMaxRaymarchSteps);
+        const int maxEmptyStride = min(max(p.sparseRaymarchMaxEmptyStride, 1), 12);
+        const int mediumEmptyStride = min(max(p.sparseRaymarchMediumEmptyStride, 1), maxEmptyStride);
+        const float sparseActiveThreshold = fmaxf(0.00010f, p.sparseRaymarchActiveThreshold);
+        const float sparseFineThreshold = fmaxf(sparseActiveThreshold * 1.50f, p.sparseRaymarchFineThreshold);
         const float t0 = fmaxf(0.0f, boxNear);
         const float t1 = fminf(boxFar, t0 + 3.05f);
         const float stepT = (t1 - t0) / static_cast<float>(raySteps);
-        const float rayJitter = hash21(make_float2(
+        const float blueNoiseJitter = hash21(make_float2(
             (static_cast<float>(x) + 0.5f) * 0.754877f,
             (static_cast<float>(y) + 0.5f) * 0.569840f));
+        const int temporalPhase = (p.temporalJitterPhase % kTemporalBlueNoisePhases + kTemporalBlueNoisePhases) % kTemporalBlueNoisePhases;
+        const float temporalJitter = (static_cast<float>(temporalPhase) + blueNoiseJitter) / static_cast<float>(kTemporalBlueNoisePhases);
+        const float rayJitter = fracf(blueNoiseJitter * 0.73f + temporalJitter * 0.61803398875f);
 
         for (int i = 0; i < raySteps && trans > 0.018f; ++i) {
             const float t = t0 + (static_cast<float>(i) + rayJitter) * stepT;
             const float3 wp = add3(cam.eye, mul3(rd, t));
             const float fu = saturate((wp.x + 1.05f) / 2.10f);
-            const float fv = saturate((wp.y - 0.02f) / 2.03f);
+            const float fv = saturate((wp.y - kRenderVolumeFloorMeters) / kFireDomainHeightMeters);
             const float fw = saturate((wp.z + 0.82f) / 1.64f);
             const float domainFade = volumeDomainFade(fu, fv, fw);
             if (domainFade <= 0.001f) {
+                i += maxEmptyStride - 1;
                 continue;
+            }
+            if (renderDebugModeNeedsBrickProbe(p.renderDebugMode)) {
+                const SparseBrickProbe brickProbe = sparseRaymarchBrickProbe(
+                    brickMeta,
+                    brickNx,
+                    brickNy,
+                    brickNz,
+                    fu,
+                    fv,
+                    fw,
+                    p,
+                    sparseActiveThreshold);
+                if (brickProbe.valid) {
+                    const float activity = saturate(brickProbe.activity * 8.0f);
+                    debugActiveBrick = fmaxf(debugActiveBrick, brickProbe.active ? fmaxf(0.22f, activity) : 0.0f);
+                    debugSkippedBrick = fmaxf(debugSkippedBrick, brickProbe.active ? 0.0f : 0.72f + activity * 0.28f);
+                }
+            }
+            const SparseRaymarchSkipDecision brickSkip = sparseRaymarchBrickSkipDecision(
+                brickMeta,
+                brickNx,
+                brickNy,
+                brickNz,
+                fu,
+                fv,
+                fw,
+                p,
+                maxEmptyStride,
+                mediumEmptyStride,
+                sparseActiveThreshold,
+                sparseFineThreshold);
+            if (brickSkip.skip) {
+                const int exitStride = sparseRaymarchBrickExitStride(
+                    brickMeta,
+                    brickNx,
+                    brickNy,
+                    brickNz,
+                    fu,
+                    fv,
+                    fw,
+                    wp,
+                    rd,
+                    stepT,
+                    p,
+                    brickSkip.stride);
+                i += exitStride - 1;
+                continue;
+            }
+            if (brickSkip.stride > 1) {
+                const int exitStride = sparseRaymarchBrickExitStride(
+                    brickMeta,
+                    brickNx,
+                    brickNy,
+                    brickNz,
+                    fu,
+                    fv,
+                    fw,
+                    wp,
+                    rd,
+                    stepT,
+                    p,
+                    brickSkip.stride);
+                i += exitStride - 1;
+            }
+            if (renderDebugModeNeedsSourceProbe(p.renderDebugMode)) {
+                const float materialMask = solidFuelBedMaterial(wp.x, wp.z, p);
+                const float sourceMask = fuelBedSource(wp.x, wp.z, fv, p);
+                const float sourceHeightBand = smoothstepf(
+                    fmaxf(0.005f, p.emitterHeightBandNorm * 0.54f),
+                    fmaxf(0.0015f, p.emitterHeightBandNorm * 0.080f),
+                    fabsf(fv - p.emitterHeightNorm));
+                debugSource = fmaxf(debugSource, domainFade * saturate(sourceMask * 1.35f + sourceHeightBand * materialMask * 0.55f));
+                debugSourceMaterial = fmaxf(debugSourceMaterial, domainFade * saturate(materialMask));
             }
             const float coarseHeat = sampleScalar(heatField, p, fu, fv, fw);
             const float coarseFuel = sampleScalar(fuelField, p, fu, fv, fw);
             const float coarseSoot = sampleScalar(sootField, p, fu, fv, fw);
             const float coarseProgress = sampleScalar(progressField, p, fu, fv, fw);
-            const float coarseActive = (coarseHeat + coarseFuel * 0.42f + coarseSoot * 0.34f + coarseProgress * 0.32f) * domainFade;
-            if (coarseActive <= 0.00150f) {
-                ++i;
+            const float coarseActive = (coarseHeat + coarseFuel * 0.42f + coarseSoot * 0.34f + coarseProgress * 0.92f) * domainFade;
+            if (coarseActive <= sparseActiveThreshold && !renderDebugModeKeepsSparseVolumeSamples(p.renderDebugMode)) {
+                const int emptyStride = coarseActive <= sparseActiveThreshold * 0.35f ? maxEmptyStride : mediumEmptyStride;
+                i += emptyStride - 1;
+                continue;
+            } else if (coarseActive <= sparseActiveThreshold && renderDebugModeNeedsSourceProbe(p.renderDebugMode)) {
                 continue;
             }
 
@@ -2042,16 +2376,34 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float4 sceneLight = sampleSceneLight(sceneLightField, p, warpedFu, warpedFv, warpedFw);
             const float sceneShadow = sampleSceneShadow(sceneShadowField, p, warpedFu, warpedFv, warpedFw);
             float3 velocity = make_float3(0.0f, 0.0f, 0.0f);
-            if (p.renderDebugMode == 6) {
+            if (renderDebugModeNeedsVelocity(p.renderDebugMode)) {
                 velocity = sampleVelocity(uField, vField, wField, p, warpedFu, warpedFv, warpedFw);
             }
-            const float activeField = (heat + fuel * 0.42f + soot * 0.34f + progress * 0.32f + pyrolysis * 0.18f) * domainFade;
-            if (activeField <= 0.0025f) {
+            const float activeField = (heat + fuel * 0.10f + soot * 0.12f + sootOptics * 0.45f + progress * 1.20f + pyrolysis * 0.45f + turbulenceEnergy * 0.28f) * domainFade;
+            if (activeField <= 0.0025f && !renderDebugModeKeepsSparseVolumeSamples(p.renderDebugMode)) {
+                i += (activeField <= sparseFineThreshold * 0.35f ? mediumEmptyStride : 1) - 1;
                 continue;
             }
             debugFuel = fmaxf(debugFuel, domainFade * saturate(fuel * 0.18f + charMass * 0.22f + pyrolysis * 0.30f));
-            if (p.renderDebugMode == 6) {
-                debugVelocity = fmaxf(debugVelocity, saturate(sqrtf(dot3(velocity, velocity)) * 0.22f));
+            if (p.renderDebugMode == kRenderDebugVelocity) {
+                debugVelocity = fmaxf(debugVelocity, saturate(velocity.y * 0.34f));
+                debugVelocityDown = fmaxf(debugVelocityDown, saturate(-velocity.y * 0.46f));
+            }
+            debugReaction = fmaxf(debugReaction, domainFade * saturate(progress * 0.46f + pyrolysis * 0.34f + heat * 0.025f));
+            debugProduct = fmaxf(debugProduct, domainFade * saturate(sootOptics * 0.72f + soot * 0.22f + ash * 0.10f));
+            if (renderDebugModeNeedsGasProbe(p.renderDebugMode)) {
+                const float gasVapor = domainFade * saturate(fuel * 0.22f + pyrolysis * 0.56f + progress * 0.055f);
+                const float speed = sqrtf(dot3(velocity, velocity));
+                debugGas = fmaxf(debugGas, gasVapor);
+                debugOxygenSupply = fmaxf(debugOxygenSupply, domainFade * saturate(oxygen));
+                debugOxygenDepletion = fmaxf(debugOxygenDepletion, domainFade * saturate((1.0f - oxygen) * (0.18f + fuel * 0.13f + heat * 0.020f + progress * 0.065f)));
+                if (p.renderDebugMode == kRenderDebugFlow) {
+                    debugFlowVector = add3(debugFlowVector, mul3(velocity, gasVapor * stepT * 22.0f));
+                    debugFlowMagnitude = fmaxf(debugFlowMagnitude, saturate(speed * (0.13f + gasVapor * 0.32f)));
+                }
+            }
+            if (activeField <= 0.0025f && renderDebugModeKeepsSparseVolumeSamples(p.renderDebugMode)) {
+                continue;
             }
             const float cellX = 1.0f / static_cast<float>(p.nx);
             const float cellY = 1.0f / static_cast<float>(p.ny);
@@ -2061,8 +2413,9 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float gradHeatZ = sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw + cellZ) - sampleScalar(heatField, p, warpedFu, warpedFv, warpedFw - cellZ);
             const float frontGradient =
                 sqrtf(gradHeatX * gradHeatX + gradHeatY * gradHeatY + gradHeatZ * gradHeatZ) +
-                fabsf(fuel - coarseFuel) * 0.62f;
-            const float reactionFront = smoothstepf(0.020f, 0.46f, frontGradient * 1.35f + fuel * oxygen * 0.040f + progress * 0.18f + pyrolysis * 0.080f);
+                fabsf(fuel - coarseFuel) * 0.18f;
+            const float reactionSignal = saturate(progress * 0.58f + pyrolysis * 0.32f + heat * 0.034f);
+            const float reactionFront = smoothstepf(0.020f, 0.46f, frontGradient * 1.35f + reactionSignal * 0.34f + fuel * oxygen * 0.012f);
 
             const float fineNoise = fbm3(make_float3(warpedFu * 42.0f + p.time * 0.72f, warpedFv * 54.0f - p.time * 1.28f, warpedFw * 43.0f + p.time * 0.38f));
             const float shearNoise = fbm3(make_float3(warpedFu * 15.0f - p.time * 0.72f, warpedFv * 13.0f - p.time * 1.08f, warpedFw * 17.0f + p.time * 0.32f));
@@ -2071,26 +2424,43 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float lesBreakup = saturate(turbulenceEnergy * 0.48f + progress * 0.28f);
             const float raggedEdge =
                 smoothstepf(0.18f, 0.92f, fineNoise * (0.46f + lesBreakup * 0.30f) + shearNoise * 0.38f + plumeNoise * 0.32f + saturate(activeField * 0.08f));
-            const float fieldEdge = smoothstepf(0.05f, 2.30f, heat + fuel * 0.32f) * (0.10f + reactionFront * 0.90f);
+            const float fieldEdge = smoothstepf(0.05f, 2.30f, heat + reactionSignal * 0.85f + fuel * 0.08f) * (0.10f + reactionFront * 0.90f);
             const float fieldFilament =
                 smoothstepf(0.60f, 1.0f, fineNoise + lesBreakup * 0.10f) *
                 smoothstepf(0.38f, 0.92f, shearNoise + (0.72f - fv) * 0.12f + reactionFront * 0.10f) *
                 smoothstepf(1.0f, 0.02f, fv) *
                 fieldEdge;
-            const float sourceLocalV = p.sceneId == 2 ? fmaxf(0.0f, fv - p.emitterHeightNorm) : fv;
-            const float burnerLowJet = p.sceneId == 2 ? smoothstepf(fmaxf(0.012f, p.emitterHeightBandNorm * 0.68f), fmaxf(0.003f, p.emitterHeightBandNorm * 0.10f), fabsf(fv - p.emitterHeightNorm)) * smoothstepf(0.05f, 0.58f, fuel + heat * 0.025f) * smoothstepf(0.50f, 1.0f, oxygen) : 0.0f;
-            const float burnerPortJet = p.sceneId == 2 ? burnerLowJet * smoothstepf(0.68f, 0.98f, fineNoise + shearNoise * 0.18f) : 0.0f;
-            const float campTongueBias = p.sceneId == 1 ? smoothstepf(0.035f, 0.72f, fuel + pyrolysis * 0.50f + charMass * 0.12f) * smoothstepf(0.76f, 0.035f, fv) : 0.0f;
-            const float roomTraySheet = p.sceneId == 0 ? smoothstepf(0.018f, 0.42f, fuel + pyrolysis * 0.72f + charMass * 0.08f) * smoothstepf(0.30f, 0.015f, fv) : 0.0f;
-            const float convectiveSheet = smoothstepf(0.42f, 0.88f, shearNoise + heat * 0.040f + plumeNoise * 0.14f + lesBreakup * 0.10f + burnerPortJet * 0.56f + campTongueBias * 0.20f + roomTraySheet * 0.24f) * (p.sceneId == 2 ? smoothstepf(p.emitterHeightNorm + p.emitterHeightBandNorm * 1.20f, p.emitterHeightNorm - p.emitterHeightBandNorm * 0.08f, fv) : smoothstepf(p.sceneId == 1 ? 0.82f : 0.88f, 0.030f, fv)) * fieldEdge;
+            const float sourceSignedV = lerpf(fv, fv - p.emitterHeightNorm, p.sceneSourcePlaneMode);
+            const float sourceAboveV = lerpf(fv, fmaxf(0.0f, sourceSignedV), p.sceneSourcePlaneMode);
+            const float sourceMaterial = solidFuelBedMaterial(wp.x, wp.z, p);
+            const float sourceCellV = 1.0f / static_cast<float>(p.ny);
+            const float sourceBelowTolerance = fmaxf(sourceCellV * 0.55f, p.emitterHeightBandNorm * 0.030f);
+            const float selectedSourcePlaneGate = smoothstepf(
+                    p.emitterHeightNorm - sourceBelowTolerance,
+                    p.emitterHeightNorm + p.emitterHeightBandNorm * 0.03f,
+                    fv);
+            const float sourcePlaneGate = lerpf(1.0f, selectedSourcePlaneGate, p.sceneSourcePlaneMode);
+            const float heightBottom = lerpf(p.sceneConvectiveHeightBottom, p.emitterHeightNorm + p.emitterHeightBandNorm * p.sceneConvectiveHeightBottom, p.sceneSourcePlaneMode);
+            const float heightTop = lerpf(p.sceneConvectiveHeightTop, p.emitterHeightNorm + p.emitterHeightBandNorm * p.sceneConvectiveHeightTop, p.sceneSourcePlaneMode);
+            const float convectiveSheet = smoothstepf(0.42f, 0.88f, shearNoise + heat * 0.040f + plumeNoise * 0.14f + lesBreakup * 0.10f) * smoothstepf(heightTop, heightBottom, fv) * fieldEdge;
             const float breakup = smoothstepf(0.34f, 0.88f, fineNoise * 0.48f + shearNoise * 0.42f + holeNoise * 0.24f + heat * 0.026f);
             const float verticalFade = smoothstepf(0.96f, 0.025f, fv);
-            const float flameHeightFade = p.sceneId == 2 ? smoothstepf(p.emitterHeightNorm + p.emitterHeightBandNorm * 0.72f, p.emitterHeightNorm - p.emitterHeightBandNorm * 0.05f, fv) : smoothstepf(p.sceneId == 1 ? 0.72f : 0.76f, 0.10f, fv);
-            const float lowerWhite = smoothstepf(0.060f, 0.00f, sourceLocalV) * smoothstepf(0.05f, 1.30f, pyrolysis + fuel * 0.20f);
-            const float tempK = 293.0f + heat * 360.0f + fuel * 44.0f + pyrolysis * 90.0f + fieldFilament * 560.0f + convectiveSheet * 420.0f + lowerWhite * 110.0f + progress * 64.0f;
+            const float flameHeightBottom = lerpf(p.sceneFlameHeightBottom, p.emitterHeightNorm + p.emitterHeightBandNorm * p.sceneFlameHeightBottom, p.sceneSourcePlaneMode);
+            const float flameHeightTop = lerpf(p.sceneFlameHeightTop, p.emitterHeightNorm + p.emitterHeightBandNorm * p.sceneFlameHeightTop, p.sceneSourcePlaneMode);
+            const float flameHeightFade = smoothstepf(flameHeightTop, flameHeightBottom, fv);
+            const float freeLowerWhite = smoothstepf(p.sceneLowerWhiteHeight, 0.00f, fv);
+            const float sourceLowerWhite = smoothstepf(fmaxf(0.012f, p.emitterHeightBandNorm * 0.44f), 0.0f, fabsf(sourceSignedV)) * sourcePlaneGate;
+            const float lowerWhite = lerpf(freeLowerWhite, sourceLowerWhite, p.sceneSourcePlaneMode) *
+                smoothstepf(0.05f, 1.30f, reactionSignal + pyrolysis * 0.28f);
+            const float nearSurfaceCore = sourcePlaneGate *
+                smoothstepf(fmaxf(0.018f, p.emitterHeightBandNorm * 0.72f), 0.0f, fabsf(sourceSignedV)) *
+                (0.22f + sourceMaterial * 0.78f) *
+                smoothstepf(0.16f, 1.10f, reactionSignal + pyrolysis * 0.45f + fuel * 0.10f) *
+                smoothstepf(0.20f, 0.86f, oxygen);
+            const float tempK = 293.0f + heat * 350.0f + pyrolysis * 150.0f + progress * 180.0f + fieldFilament * 620.0f + convectiveSheet * 470.0f + lowerWhite * 180.0f + nearSurfaceCore * 420.0f;
             const float combustion =
-                smoothstepf(740.0f, 1630.0f, tempK) *
-                smoothstepf(0.016f, 0.62f, fuel + heat * 0.055f) *
+                smoothstepf(720.0f, 1600.0f, tempK) *
+                smoothstepf(0.080f, 1.20f, reactionSignal) *
                 smoothstepf(0.045f, 0.62f, oxygen) *
                 verticalFade *
                 flameHeightFade;
@@ -2101,30 +2471,80 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
                 smoothstepf(0.55f, 0.94f, fineNoise * 0.46f + shearNoise * 0.44f + plumeNoise * 0.18f + reactionFront * 0.15f + heat * 0.014f - fv * 0.050f) *
                     (1.0f - sheetHole * (0.74f + lesBreakup * 0.12f)) *
                     (1.0f - flameSheetTear * 0.18f),
-                smoothstepf(0.18f, 0.030f, sourceLocalV) * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
+                smoothstepf(0.18f, 0.030f, sourceAboveV) * sourcePlaneGate * smoothstepf(0.75f, 2.0f, heat) * thinFront * 0.030f);
+            const float basePoolSheet =
+                sourceMaterial *
+                sourcePlaneGate *
+                smoothstepf(fmaxf(0.026f, p.emitterHeightBandNorm * 0.95f), 0.0f, fabsf(sourceSignedV)) *
+                smoothstepf(0.10f, 0.92f, reactionSignal + pyrolysis * 0.32f + fuel * 0.08f) *
+                smoothstepf(0.18f, 0.88f, oxygen) *
+                (0.68f + fineNoise * 0.14f + shearNoise * 0.10f);
             const float coherentSheet = saturate(fieldFilament * 0.86f + convectiveSheet * 0.55f + thinFront * 0.74f);
             const float sheetConfinement = saturate(coherentSheet + reactionFront * 0.08f);
-            const float roomCoverageBoost = p.sceneId == 0 ? (0.72f + roomTraySheet * 1.24f) : 1.0f;
-            const float flameDensity = domainFade *
-                combustion * reactionFront * flameSheet * (0.010f + fieldFilament * 0.92f + convectiveSheet * 0.24f + thinFront * 1.22f) *
+            const float upperTongueRegion = smoothstepf(0.085f, 0.24f, fv);
+            const float upperTongueSignal = saturate(
+                fieldFilament * 0.74f +
+                thinFront * 0.42f +
+                reactionFront * 0.20f +
+                plumeNoise * 0.34f -
+                holeNoise * 0.22f -
+                smoothstepf(0.20f, 0.68f, fv) * 0.10f);
+            const float upperTongueMask = lerpf(1.0f, smoothstepf(0.22f, 0.78f, upperTongueSignal), upperTongueRegion);
+            const float plumeDx = wp.x - p.emitterCenterX;
+            const float plumeDz = wp.z - p.emitterCenterZ;
+            const float plumeRadiusMeters = sqrtf(plumeDx * plumeDx + plumeDz * plumeDz);
+            const float normalizedPlumeRadius = plumeRadiusMeters / fmaxf(0.05f, p.emitterRadius);
+            const float upperConfinement = smoothstepf(0.045f, 0.18f, fv);
+            const float localPlumeWidth = lerpf(
+                1.18f,
+                0.46f + plumeNoise * 0.20f + lesBreakup * 0.10f + thinFront * 0.08f,
+                upperConfinement * 0.96f);
+            const float plumeRadialMask = lerpf(
+                1.0f,
+                smoothstepf(localPlumeWidth, localPlumeWidth * 0.42f, normalizedPlumeRadius),
+                upperConfinement);
+            const float sourceCoverageBoost = p.sceneRoomCoverageBase;
+            const float upwardStretch = smoothstepf(0.030f, 0.34f, fv) * (1.0f + fv * 1.20f);
+            const float baseBulbDamp = 1.0f - basePoolSheet * smoothstepf(0.070f, 0.24f, fv) * 0.45f;
+            float flameDensity = domainFade *
+                combustion * reactionFront * (flameSheet + basePoolSheet * 0.28f) * (0.010f + fieldFilament * 1.08f + convectiveSheet * 0.36f + thinFront * 1.34f + basePoolSheet * 0.34f) *
                 (0.052f + breakup * 0.78f + raggedEdge * 0.56f + lesBreakup * 0.34f) *
                 (0.18f + thinFront * 2.55f) *
-                (0.060f + sheetConfinement * 0.94f + burnerPortJet * 0.72f + campTongueBias * 0.34f) *
-                flameHeightFade * roomCoverageBoost;
+                (0.060f + sheetConfinement * 0.94f + nearSurfaceCore * 0.28f + basePoolSheet * 0.24f + upwardStretch * 0.20f) *
+                flameHeightFade * sourceCoverageBoost * sourcePlaneGate * baseBulbDamp * upperTongueMask * plumeRadialMask;
+            const float upperEmissiveStart = 0.12f + plumeNoise * 0.055f + fieldFilament * 0.045f + thinFront * 0.030f;
+            const float upperEmissiveSpan = 0.34f + raggedEdge * 0.10f + lesBreakup * 0.06f;
+            const float upperEmissiveFade = smoothstepf(upperEmissiveStart, upperEmissiveStart + upperEmissiveSpan, fv);
+            const float upperEmissiveDamp = 1.0f - upperEmissiveFade * (0.46f + smoothstepf(0.06f, 0.44f, sootOptics + soot * 0.28f) * 0.12f);
+            flameDensity *= saturate(upperEmissiveDamp + basePoolSheet * 0.28f);
             const float plumeVoid = smoothstepf(0.54f, 0.90f, holeNoise + fineNoise * 0.26f + shearNoise * 0.22f + fv * 0.20f);
-            const float topDissolve = smoothstepf(p.sceneId == 1 ? 0.82f : 0.88f, p.sceneId == 1 ? 0.34f : 0.42f, fv);
+            const float topDissolve = smoothstepf(p.sceneTopDissolveTop, p.sceneTopDissolveBottom, fv);
             const float raggedPlume = 1.0f - plumeVoid * smoothstepf(0.18f, 0.74f, fv) * 0.96f;
             const float upperPlume =
                 smoothstepf(0.14f, 0.48f, fv) *
                 smoothstepf(0.030f, 1.20f, sootOptics + soot * 0.42f) *
                 (0.025f + fineNoise * 0.035f + shearNoise * 0.034f + plumeNoise * 0.34f + raggedEdge * 0.12f + turbulenceEnergy * 0.035f) *
                 topDissolve * raggedPlume;
-            const float sceneSmokeScale = p.sceneId == 2 ? 0.035f : (p.sceneId == 1 ? 0.56f : 1.0f);
+            const float sceneSmokeScale = p.sceneSmokeScale;
+            const float nonEmissivePlumeCarrier =
+                domainFade *
+                smoothstepf(0.12f, 0.72f, fv) *
+                smoothstepf(0.82f, 0.22f, fv) *
+                smoothstepf(0.030f, 1.80f, sootOptics * 1.30f + soot * 0.42f + turbulenceEnergy * 0.10f) *
+                (0.10f + plumeNoise * 0.22f + raggedEdge * 0.14f + lesBreakup * 0.06f);
+            const float paleSmokeLayer =
+                smoothstepf(0.14f, 0.52f, fv) *
+                smoothstepf(0.020f, 1.30f, sootOptics * 1.8f + soot * 0.34f + turbulenceEnergy * 0.10f + nonEmissivePlumeCarrier * 0.72f) *
+                smoothstepf(0.98f, 0.22f, fv) *
+                (0.22f + plumeNoise * 0.38f + raggedEdge * 0.16f);
             const float rawSootDensity = domainFade * sceneSmokeScale * (
                 smoothstepf(0.020f, 1.05f, sootOptics + soot * 0.32f) *
                     smoothstepf(0.16f, 0.42f, fv) *
                     (0.028f + fineNoise * 0.040f + shearNoise * 0.052f + plumeNoise * 0.38f + raggedEdge * 0.16f + ash * 0.016f) +
-                upperPlume * (0.22f + plumeNoise * 0.30f) + smoothstepf(0.004f, 0.34f, sootOptics) * (0.020f + plumeNoise * 0.034f));
+                upperPlume * (0.22f + plumeNoise * 0.30f) +
+                paleSmokeLayer * 0.54f +
+                nonEmissivePlumeCarrier * 0.18f +
+                smoothstepf(0.004f, 0.34f, sootOptics) * (0.020f + plumeNoise * 0.034f));
             const float flameFrontMask = saturate(flameDensity * 4.8f + combustion * reactionFront * flameSheet * (0.08f + thinFront * 0.56f + fieldFilament * 0.18f));
             const float emissiveMask = saturate(flameFrontMask);
             const float resolvedFlameSheet = smoothstepf(0.030f, 0.32f, emissiveMask) * smoothstepf(0.035f, 0.72f, oxygen);
@@ -2133,48 +2553,43 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float nearFlameSootCleanout = 1.0f - smoothstepf(0.025f, 0.34f, resolvedFlameSheet) * 0.82f;
             const float smokeOnlyHeight = smoothstepf(0.20f, 0.70f, fv) * (1.0f - smoothstepf(0.02f, 0.20f, emissiveMask));
             const float upperSootNeutrality = smoothstepf(0.18f, 0.78f, fv) * scatterSeparation;
-            const float absorptionDensity = rawSootDensity * nearFlameSootCleanout * (1.10f + smokeOnlyHeight * 2.20f + upperSootNeutrality * 2.40f);
-            const float scatterDensity = rawSootDensity * scatterSeparation * smoothstepf(0.10f, 0.55f, fv + sootOptics * 0.10f) * (0.24f + (1.0f - smokeOnlyHeight) * 0.34f);
+            const float absorptionDensity = rawSootDensity * nearFlameSootCleanout * (1.18f + smokeOnlyHeight * 2.70f + upperSootNeutrality * 2.80f);
+            const float scatterDensity = rawSootDensity * scatterSeparation * smoothstepf(0.10f, 0.55f, fv + sootOptics * 0.10f) * (0.30f + (1.0f - smokeOnlyHeight) * 0.38f + paleSmokeLayer * 0.22f);
 
             const float particleRadius = saturate(0.08f + sootOptics * 0.028f + ash * 0.085f + saturate(1.0f - oxygen) * 0.12f);
-            const float sootAbsorption = absorptionDensity * (3.10f + particleRadius * 4.60f + sootOptics * 0.70f + upperSootNeutrality * 2.85f) * p.smokeDarkness;
-            const float sootScattering = scatterDensity * (0.018f + (1.0f - particleRadius) * 0.050f) * (0.20f + p.smokeGain * 0.10f);
+            const float sootAbsorption = absorptionDensity * (3.85f + particleRadius * 5.20f + sootOptics * 0.82f + upperSootNeutrality * 3.30f + nonEmissivePlumeCarrier * 0.82f) * p.smokeDarkness;
+            const float sootScattering = scatterDensity * (0.072f + (1.0f - particleRadius) * 0.120f + nonEmissivePlumeCarrier * 0.045f) * (0.58f + p.smokeGain * 0.18f);
             const float sootExtinction = sootAbsorption + sootScattering;
-            const float flameExtinction = flameDensity * (0.12f + (1.0f - resolvedFlameSheet) * 0.12f);
+            const float flameExtinction = flameDensity * (0.035f + (1.0f - resolvedFlameSheet) * 0.045f);
             const float extinction = (sootExtinction + flameExtinction) * stepT;
             const float smokeAlpha = 1.0f - expf(-sootAbsorption * stepT);
             const float scatterAlpha = 1.0f - expf(-sootScattering * stepT);
             const float lightVisibility = sceneShadow * (0.35f + sceneShadow * 0.65f);
             const float3 localIrradiance = make_float3(sceneLight.x, sceneLight.y, sceneLight.z);
-            const float sootLoad = saturate(sootOptics * 0.74f + soot * 0.20f + upperPlume * 0.46f);
+            const float sootLoad = saturate(sootOptics * 0.82f + soot * 0.24f + upperPlume * 0.18f);
             const float whiteCore =
                 smoothstepf(2450.0f, 3450.0f, tempK) *
                 combustion *
                 smoothstepf(0.32f, 0.90f, oxygen) *
-                smoothstepf(0.72f, 0.02f, fv) *
-                (0.02f + thinFront * 0.48f + fieldFilament * 0.18f) *
+                smoothstepf(0.78f, 0.015f, fv) *
+                (0.02f + thinFront * 0.48f + fieldFilament * 0.18f + nearSurfaceCore * 0.42f) *
                 (1.0f - smoothstepf(0.16f, 0.74f, sootLoad) * 0.68f);
             const float radiantBase = saturate((tempK - 760.0f) / 2000.0f);
             const float radiantCurve = radiantBase * radiantBase * (0.82f + radiantBase * 0.18f);
-            const float radiantPower = radiantCurve * (1.42f + fieldFilament * 3.15f + convectiveSheet * 1.60f + progress * 0.26f + whiteCore * 0.92f);
-            const float blackbodyCoreStructure = saturate(whiteCore * (0.080f + fieldFilament * 0.28f + thinFront * 0.32f));
+            const float radiantPower = radiantCurve * (1.72f + fieldFilament * 3.75f + convectiveSheet * 1.90f + progress * 0.32f + whiteCore * 1.26f + nearSurfaceCore * 1.05f + basePoolSheet * 0.80f);
+            const float blackbodyCoreStructure = saturate(whiteCore * (0.105f + fieldFilament * 0.34f + thinFront * 0.38f + nearSurfaceCore * 0.30f));
             const float whiteFilament = blackbodyCoreStructure * (0.55f + fineNoise * 0.30f + shearNoise * 0.18f);
-            const float orangeEdge = (1.0f - whiteFilament * 0.72f) * thinFront * reactionFront * flameSheet * (0.52f + breakup * 0.95f) * smoothstepf(0.08f, 0.80f, oxygen);
-            float3 flameColor = lerp3(make_float3(1.32f, 0.27f, 0.038f), blackbodyColor(tempK), saturate(whiteCore * 0.92f + whiteFilament * 0.82f));
-            if (p.sceneId == 2) {
-                const float blueBase = burnerPortJet * smoothstepf(0.010f, 0.11f, flameDensity + combustion * 0.18f);
-                flameColor = lerp3(make_float3(0.020f, 0.18f, 2.40f), make_float3(0.36f, 0.58f, 1.95f), saturate(whiteCore * 0.34f + blueBase * 0.20f));
-            } else if (p.sceneId == 1) {
-                flameColor = lerp3(flameColor, make_float3(1.52f, 0.24f, 0.028f), saturate(campTongueBias * (1.0f - whiteCore) * 0.58f));
-            }
-            float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.10f + whiteCore * 0.38f));
-            if (p.sceneId == 2) {
-                flameEmission = mul3(flameEmission, 0.42f);
-                flameEmission = add3(flameEmission, mul3(make_float3(0.012f, 0.28f, 5.20f), burnerPortJet * combustion * stepT * 4.40f));
-            }
-            flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 1.02f, 0.86f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 0.82f));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.70f, 0.30f, 0.040f), orangeEdge * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.06f : (p.sceneId == 1 ? 3.20f : 3.10f))));
-            flameEmission = add3(flameEmission, mul3(make_float3(1.36f, 0.070f, 0.008f), fieldFilament * (1.0f + flameSheetTear * 0.55f) * flameDensity * radiantPower * stepT * (p.sceneId == 2 ? 0.035f : (p.sceneId == 1 ? 1.55f : 1.10f)) * (1.0f - whiteCore * 0.62f)));
+            const float orangeEdge = (1.0f - whiteFilament * 0.72f) * thinFront * reactionFront * flameSheet * (0.35f + breakup * 0.55f) * smoothstepf(0.08f, 0.80f, oxygen) * (1.0f - saturate(basePoolSheet * 0.82f));
+            float3 flameColor = lerp3(make_float3(p.sceneFlameColorR, p.sceneFlameColorG, p.sceneFlameColorB), blackbodyColor(tempK), saturate(whiteCore * 0.96f + whiteFilament * 0.88f + basePoolSheet * 0.42f));
+            float3 flameEmission = mul3(flameColor, flameDensity * radiantPower * stepT * (1.34f + whiteCore * 0.56f + nearSurfaceCore * 0.24f + basePoolSheet * 0.24f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 1.02f, 0.86f), whiteFilament * whiteFilament * flameDensity * radiantPower * stepT * 1.30f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.28f, 1.13f, 0.78f), nearSurfaceCore * nearSurfaceCore * flameDensity * radiantPower * stepT * 1.08f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.18f, 1.05f, 0.72f), basePoolSheet * flameDensity * radiantPower * stepT * 0.74f));
+            flameEmission = add3(flameEmission, mul3(make_float3(0.58f, 0.76f, 1.0f), basePoolSheet * nearSurfaceCore * flameDensity * radiantPower * stepT * 0.34f));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.46f, 0.34f, 0.070f), orangeEdge * flameDensity * radiantPower * stepT * p.sceneOrangeEmissionScale));
+            flameEmission = add3(flameEmission, mul3(make_float3(1.10f, 0.18f, 0.030f), fieldFilament * (1.0f + flameSheetTear * 0.55f) * flameDensity * radiantPower * stepT * p.sceneFilamentEmissionScale * (1.0f - whiteCore * 0.76f) * upperEmissiveDamp));
+            debugEmission = fmaxf(debugEmission, saturate(luminance3(flameEmission) * 7.5f));
+            debugExtinction = saturate(debugExtinction + extinction * 1.8f);
             const float upperSmokeMask = smoothstepf(0.18f, 0.72f, fv) * scatterSeparation;
             const float ashVeil = saturate(ash * 0.014f + smoothstepf(0.30f, 0.88f, fv) * (1.0f - sootLoad) * 0.003f);
             const float3 smokeBlack = make_float3(0.0018f, 0.0020f, 0.0024f);
@@ -2182,15 +2597,16 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
             const float3 smokeAsh = make_float3(0.014f, 0.0165f, 0.0210f);
             float3 smokeColor = lerp3(smokeCoal, smokeBlack, sootLoad);
             smokeColor = lerp3(smokeColor, smokeAsh, ashVeil);
+            smokeColor = lerp3(smokeColor, make_float3(0.115f, 0.118f, 0.122f), saturate(paleSmokeLayer * 1.30f + nonEmissivePlumeCarrier * 0.68f));
             smokeColor = mul3(smokeColor, smokeOnlyMask);
             const float localIrradianceLuma = luminance3(localIrradiance);
             const float warmScatterDamp = 1.0f - upperSootNeutrality * 0.985f;
-            const float nearFlameWarmLeak = (1.0f - upperSootNeutrality) * (1.0f - smokeOnlyHeight) * 0.18f;
-            const float sceneWarmScatter = p.sceneId == 2 ? 0.010f : (p.sceneId == 1 ? 0.18f : 0.30f);
+            const float nearFlameWarmLeak = (1.0f - upperSootNeutrality) * (1.0f - smokeOnlyHeight) * 0.08f;
+            const float sceneWarmScatter = p.sceneWarmScatter;
             const float backScatter = scatterAlpha * lightVisibility * (0.00085f + localIrradianceLuma * 0.0011f * warmScatterDamp + baseGlow * 0.00010f * sceneWarmScatter) * (0.018f + (1.0f - particleRadius) * 0.018f) * scatterSeparation;
             smokeColor = add3(smokeColor, mul3(make_float3(0.010f, 0.012f, 0.016f), backScatter));
-            const float scatterGain = scatterAlpha * (0.00046f + lightVisibility * 0.00072f * warmScatterDamp + flameDensity * 0.00008f * sceneWarmScatter + turbulenceEnergy * 0.00018f) * (0.038f + (1.0f - particleRadius) * 0.045f) * scatterSeparation;
-            const float sceneScatter = scatterAlpha * scatterSeparation * (0.0065f + (1.0f - particleRadius) * 0.014f) * lightVisibility;
+            const float scatterGain = scatterAlpha * (0.00125f + lightVisibility * 0.00175f * warmScatterDamp + flameDensity * 0.000055f * sceneWarmScatter + turbulenceEnergy * 0.00022f + nonEmissivePlumeCarrier * 0.00032f) * (0.070f + (1.0f - particleRadius) * 0.086f) * scatterSeparation;
+            const float sceneScatter = scatterAlpha * scatterSeparation * (0.020f + (1.0f - particleRadius) * 0.034f + nonEmissivePlumeCarrier * 0.022f) * lightVisibility;
             const float3 neutralScatterLight = make_float3(localIrradianceLuma * 0.052f, localIrradianceLuma * 0.064f, localIrradianceLuma * 0.086f);
             const float3 smokeScatterLight = lerp3(neutralScatterLight, localIrradiance, nearFlameWarmLeak);
             const float coalGlow = smoothstepf(0.004f, 0.18f, charMass) * smoothstepf(0.54f, 0.02f, fv) * (0.070f + pyrolysis * 0.12f + heat * 0.009f);
@@ -2208,21 +2624,64 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
         }
     }
 
-    if (p.renderDebugMode != 0) {
+    if (!renderDebugModeIsFinal(p.renderDebugMode)) {
         float3 debugColor = make_float3(0.0f, 0.0f, 0.0f);
-        if (p.renderDebugMode == 1) {
+        if (p.renderDebugMode == kRenderDebugFlame) {
             debugColor = debugHeatColor(debugFlame);
-        } else if (p.renderDebugMode == 2) {
+        } else if (p.renderDebugMode == kRenderDebugSoot) {
             const float od = saturate(debugOpticalDepth);
             debugColor = make_float3(od, od * 0.90f, od * 0.78f);
-        } else if (p.renderDebugMode == 3) {
+        } else if (p.renderDebugMode == kRenderDebugTransmittance) {
             debugColor = make_float3(trans, trans, trans);
-        } else if (p.renderDebugMode == 4) {
+        } else if (p.renderDebugMode == kRenderDebugTemperature) {
             debugColor = debugHeatColor(debugTemperature);
-        } else if (p.renderDebugMode == 5) {
+        } else if (p.renderDebugMode == kRenderDebugFuel) {
             debugColor = make_float3(debugFuel * 0.82f, debugFuel * 0.48f, debugFuel * 0.18f);
+        } else if (p.renderDebugMode == kRenderDebugVelocity) {
+            debugColor = make_float3(debugVelocityDown, debugVelocity, debugVelocity * 0.22f);
+        } else if (p.renderDebugMode == kRenderDebugGas) {
+            const float gas = saturate(debugGas);
+            debugColor = make_float3(gas * 0.08f, gas * 0.72f, gas);
+        } else if (p.renderDebugMode == kRenderDebugFlow) {
+            const float mag = saturate(debugFlowMagnitude + sqrtf(dot3(debugFlowVector, debugFlowVector)) * 0.70f);
+            const float3 dir = normalize3(debugFlowVector);
+            debugColor = make_float3(
+                saturate(0.42f + dir.x * 0.48f) * mag,
+                saturate(0.42f + dir.y * 0.58f) * mag,
+                saturate(0.42f + dir.z * 0.48f) * mag);
+            debugColor = add3(debugColor, make_float3(debugGas * 0.015f, debugGas * 0.055f, debugGas * 0.085f));
+        } else if (p.renderDebugMode == kRenderDebugSource) {
+            const float src = saturate(debugSource);
+            const float mat = saturate(debugSourceMaterial);
+            debugColor = make_float3(
+                saturate(src + mat * 0.18f),
+                saturate(src * 0.86f + mat * 0.38f),
+                saturate(src * 0.18f + mat * 0.12f));
+        } else if (p.renderDebugMode == kRenderDebugActiveBricks) {
+            const float active = saturate(debugActiveBrick);
+            debugColor = make_float3(active * 0.16f, active, active * 0.38f);
+        } else if (p.renderDebugMode == kRenderDebugSkippedBricks) {
+            const float skipped = saturate(debugSkippedBrick);
+            debugColor = make_float3(skipped, skipped * 0.52f, skipped * 0.08f);
+        } else if (p.renderDebugMode == kRenderDebugEmission) {
+            const float e = saturate(debugEmission);
+            debugColor = make_float3(e * 1.00f, e * 0.74f, e * 0.22f);
+        } else if (p.renderDebugMode == kRenderDebugExtinction) {
+            const float od = saturate(debugExtinction);
+            debugColor = make_float3(od * 0.58f, od * 0.66f, od * 0.72f);
+        } else if (p.renderDebugMode == kRenderDebugReaction) {
+            const float reaction = saturate(debugReaction);
+            debugColor = make_float3(reaction, reaction * 0.58f, reaction * 0.08f);
+        } else if (p.renderDebugMode == kRenderDebugProduct) {
+            const float product = saturate(debugProduct);
+            debugColor = make_float3(product * 0.18f, product * 0.28f, product * 0.74f);
         } else {
-            debugColor = make_float3(debugVelocity * 0.20f, debugVelocity * 0.72f, debugVelocity);
+            const float o2 = saturate(debugOxygenSupply);
+            const float depleted = saturate(debugOxygenDepletion);
+            debugColor = make_float3(
+                saturate(depleted * 0.95f + o2 * 0.04f),
+                saturate(o2 * 0.78f + depleted * 0.12f),
+                saturate(o2 + depleted * 0.28f));
         }
         out[y * p.frameW + x] = make_float4(debugColor.x, debugColor.y, debugColor.z, 1.0f);
         return;
@@ -2234,8 +2693,8 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) renderKernel(
         color = add3(mul3(roomColor, trans), accum);
     }
 
-    const float bloom = saturate(flameGlow * 0.10f) * (1.0f - saturate(smokeOcclusion * 0.95f));
-    color = add3(color, mul3(make_float3(1.0f, 0.25f, 0.045f), bloom * bloom * 0.017f * p.reflectionGain));
+    const float bloom = saturate(flameGlow * 0.16f) * (1.0f - saturate(smokeOcclusion * 0.82f));
+    color = add3(color, mul3(make_float3(1.0f, 0.31f, 0.060f), bloom * bloom * 0.038f * p.reflectionGain));
     out[y * p.frameW + x] = make_float4(
         fmaxf(0.0f, color.x),
         fmaxf(0.0f, color.y),
@@ -2348,23 +2807,18 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     const float h1 = hash21(make_float2(seed, 9.1f));
     const float h2 = hash21(make_float2(seed, 19.4f));
     const float h3 = hash21(make_float2(seed, 31.6f));
-    if (p.sceneId == 1 && h2 > 0.34f) {
+    if (h2 > p.sceneEmberRejectAbove) {
         return;
     }
-    if (p.sceneId == 2 && h0 > 0.14f) {
-        return;
-    }
-    const float life = fracf(p.time * (0.20f + h2 * 0.18f + (p.sceneId == 2 ? 0.36f : 0.0f)) + h0);
+    const float life = fracf(p.time * (p.sceneEmberLifeRateBase + h2 * p.sceneEmberLifeRateJitter + p.sceneEmberLifeRateAdd) + h0);
     const float spawnAngle = h0 * 6.2831853f;
     float startX = 0.0f;
     float startZ = 0.0f;
-    if (p.sceneId == 2) {
+    if (p.sceneEmberSpawnMode > 1.5f) {
         const float sourceRadius = fmaxf(0.04f, p.emitterRadius);
-        const float cx = p.burnerCenterCount > 0 ? p.burnerCenterX[0] : p.emitterCenterX;
-        const float cz = p.burnerCenterCount > 0 ? p.burnerCenterZ[0] : p.emitterCenterZ;
-        startX = cx + cosf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
-        startZ = cz + sinf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
-    } else if (p.sceneId == 1) {
+        startX = p.emitterCenterX + cosf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
+        startZ = p.emitterCenterZ + sinf(spawnAngle) * sourceRadius * (0.82f + h1 * 0.18f);
+    } else if (p.sceneEmberSpawnMode > 0.5f) {
         const float logA = orientedCapsuleMask(cosf(spawnAngle) * 0.34f, sinf(spawnAngle) * 0.25f, -0.06f, 0.01f, 0.38f, 0.34f, 0.095f);
         const float logB = orientedCapsuleMask(cosf(spawnAngle + 1.7f) * 0.35f, sinf(spawnAngle + 1.7f) * 0.25f, 0.07f, -0.02f, -0.58f, 0.33f, 0.092f);
         const float contactBlend = saturate(logA + logB + h3 * 0.35f);
@@ -2379,7 +2833,7 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     }
     const float startU = saturate((startX / 2.10f) + 0.50f);
     const float startW = saturate((startZ / 1.64f) + 0.50f);
-    const float startV = p.sceneId == 2 ? p.emitterHeightNorm : (p.sceneId == 1 ? 0.035f + h2 * 0.055f : 0.045f);
+    const float startV = p.sceneEmberStartVBase + h2 * p.sceneEmberStartVJitter;
     const float localHeat = sampleScalar(heatField, p, startU, startV, startW);
     const float localChar = sampleScalar(charField, p, startU, startV, startW);
     const float localPyrolysis = sampleScalar(pyrolysisField, p, startU, startV, startW);
@@ -2390,16 +2844,16 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
         return;
     }
     const float temperatureK = 620.0f + localHeat * 330.0f + localPyrolysis * 210.0f + localChar * 42.0f;
-    const float sceneLift = p.sceneId == 1 ? 0.86f : (p.sceneId == 2 ? 0.16f : 0.80f);
-    const float t = life * (p.sceneId == 1 ? 1.24f : (p.sceneId == 2 ? 0.34f : 1.10f));
-    const float drag = expf(-t * (p.sceneId == 2 ? 4.8f : 1.35f));
+    const float sceneLift = p.sceneEmberLift;
+    const float t = life * p.sceneEmberLifeScale;
+    const float drag = expf(-t * p.sceneEmberDrag);
     const float buoyantRise = (0.26f + h3 * 0.62f + localTurbulence * 0.11f) * t * sceneLift;
     const float3 sparkWorld = make_float3(
         startX + (localVelocity.x * 0.34f + (h1 - 0.5f) * 0.20f + p.wind * 0.26f) * t * drag,
         startV * 2.03f + 0.02f + buoyantRise - (0.22f + h2 * 0.16f) * t * t,
         startZ + (localVelocity.z * 0.28f + (h2 - 0.5f) * 0.18f) * t * drag);
     const float prevT = fmaxf(0.0f, t - 0.045f);
-    const float prevDrag = expf(-prevT * (p.sceneId == 2 ? 4.8f : 1.35f));
+    const float prevDrag = expf(-prevT * p.sceneEmberDrag);
     const float3 prevWorld = make_float3(
         startX + (localVelocity.x * 0.34f + (h1 - 0.5f) * 0.20f + p.wind * 0.26f) * prevT * prevDrag,
         startV * 2.03f + 0.02f + (0.26f + h3 * 0.62f + localTurbulence * 0.11f) * prevT * sceneLift - (0.22f + h2 * 0.16f) * prevT * prevT,
@@ -2411,23 +2865,23 @@ __global__ void __launch_bounds__(kCudaBlockThreads, 1) emberHdrKernel(
     }
 
     const float emberSize = smoothstepf(720.0f, 1580.0f, temperatureK) * materialGate;
-    const float radius = ((p.sceneId == 2 ? 0.00042f : 0.00086f) + h3 * (p.sceneId == 2 ? 0.00042f : 0.00145f)) * (0.72f + emberSize * 0.90f) / fmaxf(0.55f, sparkScreen.z);
+    const float radius = (p.sceneEmberRadiusBase + h3 * p.sceneEmberRadiusJitter) * (0.72f + emberSize * 0.90f) / fmaxf(0.55f, sparkScreen.z);
     const float centerX = sparkScreen.x * static_cast<float>(p.frameW) - 0.5f;
     const float centerY = sparkScreen.y * static_cast<float>(p.frameH) - 0.5f;
     const float2 rawTrail = sub2(make_float2(sparkScreen.x, sparkScreen.y), make_float2(prevScreen.x, prevScreen.y));
     const float rawTrailLen = sqrtf(dot2(rawTrail, rawTrail));
-    const float cappedTrailLen = fminf(rawTrailLen, p.sceneId == 1 ? 0.016f : 0.005f);
+    const float cappedTrailLen = fminf(rawTrailLen, p.sceneEmberTrailCap);
     const float2 trailDir = rawTrailLen > 0.000001f ? mul2(rawTrail, 1.0f / rawTrailLen) : make_float2(0.0f, -1.0f);
     const int pad = max(2, static_cast<int>(ceilf((radius + cappedTrailLen) * static_cast<float>(max(p.frameW, p.frameH)) * 3.0f)));
     const int minX = max(0, static_cast<int>(floorf(centerX)) - pad);
     const int maxX = min(p.frameW - 1, static_cast<int>(ceilf(centerX)) + pad);
     const int minY = max(0, static_cast<int>(floorf(centerY)) - pad);
     const int maxY = min(p.frameH - 1, static_cast<int>(ceilf(centerY)) + pad);
-    const float3 hotCore = p.sceneId == 2 ? make_float3(0.36f, 0.58f, 1.04f) : make_float3(1.0f, 0.42f, 0.090f);
-    const float3 cooled = p.sceneId == 2 ? make_float3(0.055f, 0.10f, 0.18f) : make_float3(0.18f, 0.026f, 0.008f);
+    const float3 hotCore = make_float3(p.sceneEmberHotR, p.sceneEmberHotG, p.sceneEmberHotB);
+    const float3 cooled = make_float3(p.sceneEmberCoolR, p.sceneEmberCoolG, p.sceneEmberCoolB);
     const float cooling = smoothstepf(0.16f, 0.92f, life) * (1.0f - saturate(localHeat * 0.045f));
     const float3 sparkColor = lerp3(hotCore, cooled, cooling);
-    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.16f, life) * sparkGate * materialGate * emberSize * (p.sceneId == 2 ? 0.055f : (p.sceneId == 1 ? 0.58f : 0.82f));
+    const float lifeFade = smoothstepf(1.0f, 0.08f, life) * smoothstepf(0.0f, 0.16f, life) * sparkGate * materialGate * emberSize * p.sceneEmberAlphaScale;
 
     for (int y = minY; y <= maxY; ++y) {
         const float uy = (static_cast<float>(y) + 0.5f) / static_cast<float>(p.frameH);
@@ -2537,6 +2991,7 @@ void freeDeviceMemory() {
     cudaFree(g_sceneLight);
     cudaFree(g_sceneLightNext);
     cudaFree(g_sceneShadow);
+    cudaFree(g_brickMeta);
     for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
         cudaFree(g_renderHeat[slot]);
         cudaFree(g_renderFuel[slot]);
@@ -2581,6 +3036,10 @@ void freeDeviceMemory() {
     if (g_afterRenderEvent != nullptr) {
         cudaEventDestroy(g_afterRenderEvent);
     }
+    if (g_hostFrameStaging != nullptr) {
+        cudaFreeHost(g_hostFrameStaging);
+        g_hostFrameStaging = nullptr;
+    }
     g_heat = nullptr;
     g_heatNext = nullptr;
     g_fuel = nullptr;
@@ -2617,6 +3076,7 @@ void freeDeviceMemory() {
     g_sceneLight = nullptr;
     g_sceneLightNext = nullptr;
     g_sceneShadow = nullptr;
+    g_brickMeta = nullptr;
     for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
         g_renderHeat[slot] = nullptr;
         g_renderFuel[slot] = nullptr;
@@ -2650,6 +3110,12 @@ void freeDeviceMemory() {
     g_afterRenderEvent = nullptr;
     g_time = 0.0f;
     g_renderTime = 0.0f;
+    g_hostFrameStagingBytes = 0;
+    g_brickNx = 0;
+    g_brickNy = 0;
+    g_brickNz = 0;
+    g_brickCount = 0;
+    g_allocatedBytes = 0;
 }
 
 SimParams makeParams(float dt = 1.0f / 60.0f) {
@@ -2666,7 +3132,7 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.time = g_time;
     params.mouseX = 0.5f;
     params.mouseY = 0.12f;
-    params.sceneId = 0;
+    params.sceneId = kProductSceneId;
     params.turbulence = 0.72f;
     params.detail = 0.88f;
     params.smokeGain = 0.92f;
@@ -2675,8 +3141,15 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.cameraDistance = 3.35f;
     params.cinematicMode = 1;
     params.raymarchSteps = 56;
+    params.sparseRaymarchMaxEmptyStride = kSparseRaymarchMaxEmptyStride;
+    params.sparseRaymarchMediumEmptyStride = kSparseRaymarchMediumEmptyStride;
+    params.sparseRaymarchActiveThreshold = kSparseRaymarchActiveThreshold;
+    params.sparseRaymarchFineThreshold = kSparseRaymarchFineThreshold;
+    params.temporalJitterPhase = 0;
+    params.radianceCacheUpdateInterval = kRadianceCacheUpdateIntervalFrames;
     params.emberCount = 96;
     params.renderDebugMode = 0;
+    params.plumeTestMode = 0;
     params.exposure = 1.0f;
     params.reflectionGain = 1.0f;
     params.smokeDarkness = 1.0f;
@@ -2685,7 +3158,6 @@ SimParams makeParams(float dt = 1.0f / 60.0f) {
     params.emitterHeightNorm = 0.0f;
     params.emitterHeightBandNorm = 0.06f;
     params.emitterRadius = 0.48f;
-    params.burnerCenterCount = 0;
     params.launchZStart = 0;
     params.launchZEnd = g_nz;
     params.launchFrameYStart = 0;
@@ -2797,7 +3269,7 @@ bool allocateSnapshotFloatFields(const SnapshotFloatField* fields, int count, in
     for (int i = 0; i < count; ++i) {
         char label[96];
         std::snprintf(label, sizeof(label), "cudaMalloc render snapshot %s", fields[i].label);
-        if (!check(label, cudaMalloc(&fields[i].slots[slot], fields[i].bytes))) {
+        if (!allocateDeviceBuffer(label, reinterpret_cast<void**>(&fields[i].slots[slot]), fields[i].bytes)) {
             return false;
         }
     }
@@ -2808,7 +3280,7 @@ bool allocateSnapshotFloat4Fields(const SnapshotFloat4Field* fields, int count, 
     for (int i = 0; i < count; ++i) {
         char label[96];
         std::snprintf(label, sizeof(label), "cudaMalloc render snapshot %s", fields[i].label);
-        if (!check(label, cudaMalloc(&fields[i].slots[slot], fields[i].bytes))) {
+        if (!allocateDeviceBuffer(label, reinterpret_cast<void**>(&fields[i].slots[slot]), fields[i].bytes)) {
             return false;
         }
     }
@@ -2938,49 +3410,61 @@ bool fireCudaInitialize(int frameWidth, int frameHeight, int gridWidth, int grid
     const std::size_t lightCount = static_cast<std::size_t>(g_lightNx) * static_cast<std::size_t>(g_lightNy) * static_cast<std::size_t>(g_lightNz);
     const std::size_t lightBytes = lightCount * sizeof(float4);
     const std::size_t shadowBytes = lightCount * sizeof(float);
+    g_brickNx = (g_nx + kSparseBrickSize - 1) / kSparseBrickSize;
+    g_brickNy = (g_ny + kSparseBrickSize - 1) / kSparseBrickSize;
+    g_brickNz = (g_nz + kSparseBrickSize - 1) / kSparseBrickSize;
+    g_brickCount = g_brickNx * g_brickNy * g_brickNz;
+    const std::size_t brickBytes = static_cast<std::size_t>(g_brickCount) * sizeof(BrickMeta);
 
+    g_allocatedBytes = 0;
     if (!check("cudaSetDevice", cudaSetDevice(g_cudaDevice))) {
         return false;
     }
-    if (!check("cudaMalloc heat", cudaMalloc(&g_heat, scalarBytes)) ||
-        !check("cudaMalloc heatNext", cudaMalloc(&g_heatNext, scalarBytes)) ||
-        !check("cudaMalloc fuel", cudaMalloc(&g_fuel, scalarBytes)) ||
-        !check("cudaMalloc fuelNext", cudaMalloc(&g_fuelNext, scalarBytes)) ||
-        !check("cudaMalloc oxygen", cudaMalloc(&g_oxygen, scalarBytes)) ||
-        !check("cudaMalloc oxygenNext", cudaMalloc(&g_oxygenNext, scalarBytes)) ||
-        !check("cudaMalloc soot", cudaMalloc(&g_soot, scalarBytes)) ||
-        !check("cudaMalloc sootNext", cudaMalloc(&g_sootNext, scalarBytes)) ||
-        !check("cudaMalloc char", cudaMalloc(&g_char, scalarBytes)) ||
-        !check("cudaMalloc charNext", cudaMalloc(&g_charNext, scalarBytes)) ||
-        !check("cudaMalloc ash", cudaMalloc(&g_ash, scalarBytes)) ||
-        !check("cudaMalloc ashNext", cudaMalloc(&g_ashNext, scalarBytes)) ||
-        !check("cudaMalloc pyrolysis", cudaMalloc(&g_pyrolysis, scalarBytes)) ||
-        !check("cudaMalloc pyrolysisNext", cudaMalloc(&g_pyrolysisNext, scalarBytes)) ||
-        !check("cudaMalloc progress", cudaMalloc(&g_progress, scalarBytes)) ||
-        !check("cudaMalloc progressNext", cudaMalloc(&g_progressNext, scalarBytes)) ||
-        !check("cudaMalloc turbulenceEnergy", cudaMalloc(&g_turbulenceEnergy, scalarBytes)) ||
-        !check("cudaMalloc turbulenceEnergyNext", cudaMalloc(&g_turbulenceEnergyNext, scalarBytes)) ||
-        !check("cudaMalloc sootOptics", cudaMalloc(&g_sootOptics, scalarBytes)) ||
-        !check("cudaMalloc sootOpticsNext", cudaMalloc(&g_sootOpticsNext, scalarBytes)) ||
-        !check("cudaMalloc pressure", cudaMalloc(&g_pressure, scalarBytes)) ||
-        !check("cudaMalloc pressureNext", cudaMalloc(&g_pressureNext, scalarBytes)) ||
-        !check("cudaMalloc divergence", cudaMalloc(&g_divergence, scalarBytes)) ||
-        !check("cudaMalloc divergenceAfter", cudaMalloc(&g_divergenceAfter, scalarBytes)) ||
-        !check("cudaMalloc u", cudaMalloc(&g_u, uBytes)) ||
-        !check("cudaMalloc uNext", cudaMalloc(&g_uNext, uBytes)) ||
-        !check("cudaMalloc v", cudaMalloc(&g_v, vBytes)) ||
-        !check("cudaMalloc vNext", cudaMalloc(&g_vNext, vBytes)) ||
-        !check("cudaMalloc w", cudaMalloc(&g_w, wBytes)) ||
-        !check("cudaMalloc wNext", cudaMalloc(&g_wNext, wBytes)) ||
-        !check("cudaMalloc metrics", cudaMalloc(&g_metricsDevice, sizeof(MetricAccumulator))) ||
-        !check("cudaMalloc frame", cudaMalloc(&g_frameDevice, frameBytes)) ||
-        !check("cudaMalloc hdr frame", cudaMalloc(&g_hdrFrameDevice, hdrFrameBytes)) ||
-        !check("cudaMalloc scene light", cudaMalloc(&g_sceneLight, lightBytes)) ||
-        !check("cudaMalloc scene light next", cudaMalloc(&g_sceneLightNext, lightBytes)) ||
-        !check("cudaMalloc scene shadow", cudaMalloc(&g_sceneShadow, shadowBytes))) {
+    if (!allocateDeviceBuffer("cudaMalloc heat", reinterpret_cast<void**>(&g_heat), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc heatNext", reinterpret_cast<void**>(&g_heatNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc fuel", reinterpret_cast<void**>(&g_fuel), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc fuelNext", reinterpret_cast<void**>(&g_fuelNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc oxygen", reinterpret_cast<void**>(&g_oxygen), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc oxygenNext", reinterpret_cast<void**>(&g_oxygenNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc soot", reinterpret_cast<void**>(&g_soot), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc sootNext", reinterpret_cast<void**>(&g_sootNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc char", reinterpret_cast<void**>(&g_char), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc charNext", reinterpret_cast<void**>(&g_charNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc ash", reinterpret_cast<void**>(&g_ash), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc ashNext", reinterpret_cast<void**>(&g_ashNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc pyrolysis", reinterpret_cast<void**>(&g_pyrolysis), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc pyrolysisNext", reinterpret_cast<void**>(&g_pyrolysisNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc progress", reinterpret_cast<void**>(&g_progress), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc progressNext", reinterpret_cast<void**>(&g_progressNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc turbulenceEnergy", reinterpret_cast<void**>(&g_turbulenceEnergy), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc turbulenceEnergyNext", reinterpret_cast<void**>(&g_turbulenceEnergyNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc sootOptics", reinterpret_cast<void**>(&g_sootOptics), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc sootOpticsNext", reinterpret_cast<void**>(&g_sootOpticsNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc pressure", reinterpret_cast<void**>(&g_pressure), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc pressureNext", reinterpret_cast<void**>(&g_pressureNext), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc divergence", reinterpret_cast<void**>(&g_divergence), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc divergenceAfter", reinterpret_cast<void**>(&g_divergenceAfter), scalarBytes) ||
+        !allocateDeviceBuffer("cudaMalloc u", reinterpret_cast<void**>(&g_u), uBytes) ||
+        !allocateDeviceBuffer("cudaMalloc uNext", reinterpret_cast<void**>(&g_uNext), uBytes) ||
+        !allocateDeviceBuffer("cudaMalloc v", reinterpret_cast<void**>(&g_v), vBytes) ||
+        !allocateDeviceBuffer("cudaMalloc vNext", reinterpret_cast<void**>(&g_vNext), vBytes) ||
+        !allocateDeviceBuffer("cudaMalloc w", reinterpret_cast<void**>(&g_w), wBytes) ||
+        !allocateDeviceBuffer("cudaMalloc wNext", reinterpret_cast<void**>(&g_wNext), wBytes) ||
+        !allocateDeviceBuffer("cudaMalloc metrics", reinterpret_cast<void**>(&g_metricsDevice), sizeof(MetricAccumulator)) ||
+        !allocateDeviceBuffer("cudaMalloc frame", reinterpret_cast<void**>(&g_frameDevice), frameBytes) ||
+        !allocateDeviceBuffer("cudaMalloc hdr frame", reinterpret_cast<void**>(&g_hdrFrameDevice), hdrFrameBytes) ||
+        !allocateDeviceBuffer("cudaMalloc scene light", reinterpret_cast<void**>(&g_sceneLight), lightBytes) ||
+        !allocateDeviceBuffer("cudaMalloc scene light next", reinterpret_cast<void**>(&g_sceneLightNext), lightBytes) ||
+        !allocateDeviceBuffer("cudaMalloc scene shadow", reinterpret_cast<void**>(&g_sceneShadow), shadowBytes) ||
+        !allocateDeviceBuffer("cudaMalloc sparse brick metadata", reinterpret_cast<void**>(&g_brickMeta), brickBytes)) {
         freeDeviceMemory();
         return false;
     }
+    if (!allocatePinnedHostBuffer("cudaHostAlloc frame staging", reinterpret_cast<void**>(&g_hostFrameStaging), frameBytes)) {
+        freeDeviceMemory();
+        return false;
+    }
+    g_hostFrameStagingBytes = frameBytes;
     for (int slot = 0; slot < kRenderSnapshotSlots; ++slot) {
         if (!allocateRenderSnapshotSlot(slot, scalarBytes, uBytes, vBytes, wBytes, lightBytes, shadowBytes)) {
             freeDeviceMemory();
@@ -3010,8 +3494,8 @@ bool resetSimulationFields(const SimParams& params) {
     }
 
     const dim3 scalarBlock(8, 8, 4);
-    for (int zStart = 0; zStart < g_nz; zStart += kVolumeLaunchDepth) {
-        const int zEnd = std::min(g_nz, zStart + kVolumeLaunchDepth);
+    for (int zStart = 0; zStart < g_nz; zStart += g_volumeLaunchDepth) {
+        const int zEnd = std::min(g_nz, zStart + g_volumeLaunchDepth);
         const SimParams slice = withVolumeWindow(params, zStart, zEnd);
         const dim3 scalarGrid = gridFor3d(g_nx, g_ny, zEnd - zStart, scalarBlock);
         const dim3 uGrid = gridFor3d(g_nx + 1, g_ny, zEnd - zStart, scalarBlock);
@@ -3030,8 +3514,8 @@ bool resetSimulationFields(const SimParams& params) {
         resetVKernel<<<vGrid, scalarBlock>>>(g_v, slice);
         resetVKernel<<<vGrid, scalarBlock>>>(g_vNext, slice);
     }
-    for (int zStart = 0; zStart < g_nz + 1; zStart += kVolumeLaunchDepth) {
-        const int zEnd = std::min(g_nz + 1, zStart + kVolumeLaunchDepth);
+    for (int zStart = 0; zStart < g_nz + 1; zStart += g_volumeLaunchDepth) {
+        const int zEnd = std::min(g_nz + 1, zStart + g_volumeLaunchDepth);
         const SimParams slice = withVolumeWindow(params, zStart, zEnd);
         const dim3 wGrid = gridFor3d(g_nx, g_ny, zEnd - zStart, scalarBlock);
         resetWKernel<<<wGrid, scalarBlock>>>(g_w, slice);
@@ -3041,9 +3525,11 @@ bool resetSimulationFields(const SimParams& params) {
         return false;
     }
     const std::size_t lightCount = static_cast<std::size_t>(g_lightNx) * static_cast<std::size_t>(g_lightNy) * static_cast<std::size_t>(g_lightNz);
+    const std::size_t brickBytes = static_cast<std::size_t>(g_brickCount) * sizeof(BrickMeta);
     if (!check("reset scene light", cudaMemset(g_sceneLight, 0, lightCount * sizeof(float4))) ||
         !check("reset scene light next", cudaMemset(g_sceneLightNext, 0, lightCount * sizeof(float4))) ||
-        !check("reset scene shadow", cudaMemset(g_sceneShadow, 0, lightCount * sizeof(float)))) {
+        !check("reset scene shadow", cudaMemset(g_sceneShadow, 0, lightCount * sizeof(float))) ||
+        !check("reset sparse brick metadata", cudaMemset(g_brickMeta, 0, brickBytes))) {
         return false;
     }
     g_renderSnapshotFront = 0;
@@ -3061,6 +3547,12 @@ bool resetSimulationFields(const SimParams& params) {
 
 bool fireCudaReset() {
     return resetSimulationFields(makeParams());
+}
+
+bool fireCudaSetLaunchBudget(const FireCudaLaunchBudget& budget) {
+    g_volumeLaunchDepth = clampHost(budget.volumeSliceDepth, 4, 256);
+    g_renderLaunchRows = clampHost(budget.renderSliceRows, 16, 1024);
+    return true;
 }
 
 bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics) {
@@ -3096,11 +3588,44 @@ bool fireCudaGetDiagnostics(FireCudaDiagnostics* diagnostics) {
         out.computeMajor = props.major;
         out.computeMinor = props.minor;
         out.totalGlobalMem = static_cast<std::uint64_t>(props.totalGlobalMem);
+        std::size_t freeMem = 0;
+        std::size_t totalMem = 0;
+        if (check("cudaMemGetInfo", cudaMemGetInfo(&freeMem, &totalMem))) {
+            out.freeGlobalMem = static_cast<std::uint64_t>(freeMem);
+        }
+        out.allocatedBytes = g_allocatedBytes;
+        out.stagingBytes = static_cast<std::uint64_t>(g_hostFrameStagingBytes);
+        out.sparseBrickX = g_brickNx;
+        out.sparseBrickY = g_brickNy;
+        out.sparseBrickZ = g_brickNz;
+        out.sparseBrickCount = g_brickCount;
+        SparseBrickEffectiveness sparseStats = {};
+        if (!collectSparseBrickEffectiveness(&sparseStats)) {
+            return false;
+        }
+        out.sparseActiveBrickCount = sparseStats.activeBrickCount;
+        out.sparseActiveBrickFraction = sparseStats.activeFraction;
+        out.sparseMaxBrickEmission = sparseStats.maxEmission;
+        out.sparseMaxBrickExtinction = sparseStats.maxExtinction;
+        out.sparseRaymarchMaxEmptyStride = kSparseRaymarchMaxEmptyStride;
+        out.sparseRaymarchMediumEmptyStride = kSparseRaymarchMediumEmptyStride;
+        out.sparseRaymarchActiveThreshold = kSparseRaymarchActiveThreshold;
+        out.sparseRaymarchFineThreshold = kSparseRaymarchFineThreshold;
+        out.volumeSliceDepth = g_volumeLaunchDepth;
+        out.renderSliceRows = g_renderLaunchRows;
         std::snprintf(out.deviceName, sizeof(out.deviceName), "%s", props.name);
     }
 
     *diagnostics = out;
     return true;
+}
+
+bool fireCudaProfilerStart() {
+    return check("cudaProfilerStart", cudaProfilerStart());
+}
+
+bool fireCudaProfilerStop() {
+    return check("cudaProfilerStop", cudaProfilerStop());
 }
 
 bool stepAndRenderInternal(
@@ -3110,6 +3635,7 @@ bool stepAndRenderInternal(
     bool writeD3DInterop,
     bool advanceSimulation,
     bool renderOutput) {
+    NvtxRange stepRange(advanceSimulation ? "firesim_step_and_render" : "firesim_render_snapshot");
     if (g_heat == nullptr || g_frameDevice == nullptr || g_hdrFrameDevice == nullptr) {
         std::snprintf(g_lastError, sizeof(g_lastError), "CUDA renderer is not initialized.");
         return false;
@@ -3132,7 +3658,7 @@ bool stepAndRenderInternal(
     }
 
     const bool collectMetrics = metrics != nullptr;
-    const float stepDt = std::max(0.001f, std::min(settings.dt, 1.0f / 30.0f));
+    const float stepDt = std::max(0.0f, std::min(settings.dt, 1.0f / 30.0f));
     g_renderTime += stepDt;
     if (advanceSimulation) {
         g_time += stepDt;
@@ -3146,19 +3672,31 @@ bool stepAndRenderInternal(
     params.rightDown = settings.rightDown;
     params.showGizmos = settings.showGizmos;
     params.activeGizmo = settings.activeGizmo;
-    params.sceneId = std::max(0, std::min(kSceneCount - 1, settings.sceneId));
-    params.wind = std::max(-1.0f, std::min(1.0f, settings.wind));
-    params.turbulence = std::max(0.05f, std::min(1.8f, settings.turbulence));
+    (void)settings.sceneId;
+    params.sceneId = kProductSceneId;
+    params.plumeTestMode = settings.plumeTestMode != 0 ? 1 : 0;
+    params.wind = params.plumeTestMode != 0 ? 0.0f : std::max(-1.0f, std::min(1.0f, settings.wind));
+    params.turbulence = params.plumeTestMode != 0 ? std::max(0.0f, std::min(0.20f, settings.turbulence)) : std::max(0.05f, std::min(1.8f, settings.turbulence));
     params.detail = std::max(0.1f, std::min(1.5f, settings.detail));
     params.smokeGain = std::max(0.0f, std::min(1.6f, settings.smoke));
     params.intensity = std::max(0.2f, std::min(2.4f, settings.intensity));
     params.cameraYaw = settings.cameraYaw;
     params.cameraPitch = std::max(-0.75f, std::min(0.75f, settings.cameraPitch));
     params.cameraDistance = std::max(1.5f, std::min(6.0f, settings.cameraDistance));
+    params.cameraTargetX = std::max(-1.20f, std::min(1.20f, settings.cameraTargetX));
+    params.cameraTargetY = std::max(0.02f, std::min(1.85f, settings.cameraTargetY));
+    params.cameraTargetZ = std::max(-0.95f, std::min(0.95f, settings.cameraTargetZ));
+    params.cameraFovYDegrees = std::max(28.0f, std::min(68.0f, settings.cameraFovYDegrees));
     params.cinematicMode = settings.cinematicMode != 0 ? 1 : 0;
     params.raymarchSteps = std::max(24, std::min(kMaxRaymarchSteps, settings.raymarchSteps));
+    params.sparseRaymarchMaxEmptyStride = kSparseRaymarchMaxEmptyStride;
+    params.sparseRaymarchMediumEmptyStride = kSparseRaymarchMediumEmptyStride;
+    params.sparseRaymarchActiveThreshold = kSparseRaymarchActiveThreshold;
+    params.sparseRaymarchFineThreshold = kSparseRaymarchFineThreshold;
+    params.temporalJitterPhase = static_cast<int>(g_frameIndex % kTemporalBlueNoisePhases);
+    params.radianceCacheUpdateInterval = kRadianceCacheUpdateIntervalFrames;
     params.emberCount = std::max(0, std::min(kMaxEmberCount, settings.emberCount));
-    params.renderDebugMode = std::max(0, std::min(6, settings.renderDebugMode));
+    params.renderDebugMode = clampRenderDebugMode(settings.renderDebugMode);
     params.exposure = std::max(0.45f, std::min(2.40f, settings.exposure));
     params.reflectionGain = std::max(0.0f, std::min(2.2f, settings.reflectionGain));
     params.smokeDarkness = std::max(0.35f, std::min(2.4f, settings.smokeDarkness));
@@ -3167,15 +3705,89 @@ bool stepAndRenderInternal(
     params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, settings.emitterHeightNorm));
     params.emitterHeightBandNorm = std::max(0.006f, std::min(0.20f, settings.emitterHeightBandNorm));
     params.emitterRadius = std::max(0.035f, std::min(0.80f, settings.emitterRadius));
-    params.burnerCenterCount = std::max(0, std::min(4, settings.burnerCenterCount));
-    for (int i = 0; i < 4; ++i) {
-        params.burnerCenterX[i] = std::max(-1.05f, std::min(1.05f, settings.burnerCenterX[i]));
-        params.burnerCenterY[i] = std::max(0.0f, std::min(2.03f, settings.burnerCenterY[i]));
-        params.burnerCenterZ[i] = std::max(-0.82f, std::min(0.82f, settings.burnerCenterZ[i]));
-    }
-    if (params.sceneId == 2 && params.burnerCenterCount > 0) {
-        params.emitterHeightNorm = std::max(0.0f, std::min(0.96f, (params.burnerCenterY[0] - 0.02f) / 2.03f));
-    }
+    (void)settings.sceneSourceMode;
+    params.sceneSourceMode = 3;
+    params.sceneSourceHeightCeiling = std::max(0.0f, std::min(0.40f, settings.sceneSourceHeightCeiling));
+    params.sceneCharScale = std::max(0.0f, std::min(2.0f, settings.sceneCharScale));
+    params.sceneSootScale = std::max(0.0f, std::min(2.0f, settings.sceneSootScale));
+    params.sceneInitialFuelBase = std::max(0.0f, std::min(5.0f, settings.sceneInitialFuelBase));
+    params.sceneInitialFuelNoise = std::max(0.0f, std::min(1.0f, settings.sceneInitialFuelNoise));
+    params.sceneGasFeed = std::max(0.0f, std::min(3.0f, settings.sceneGasFeed));
+    params.scenePyrolysisGain = std::max(0.0f, std::min(3.0f, settings.scenePyrolysisGain));
+    params.sceneFuelGain = std::max(0.0f, std::min(3.0f, settings.sceneFuelGain));
+    params.sceneHeatGain = std::max(0.0f, std::min(4.0f, settings.sceneHeatGain));
+    params.sceneSootGain = std::max(0.0f, std::min(3.0f, settings.sceneSootGain));
+    params.sceneCharGrowth = std::max(0.0f, std::min(0.12f, settings.sceneCharGrowth));
+    params.sceneAshScale = std::max(0.0f, std::min(2.0f, settings.sceneAshScale));
+    params.sceneBedHeatBase = std::max(0.0f, std::min(20.0f, settings.sceneBedHeatBase));
+    params.scenePyrolysisFuelScale = std::max(0.0f, std::min(5.0f, settings.scenePyrolysisFuelScale));
+    params.scenePyrolysisSootScale = std::max(0.0f, std::min(2.0f, settings.scenePyrolysisSootScale));
+    params.sceneSootYieldScale = std::max(0.0f, std::min(2.0f, settings.sceneSootYieldScale));
+    params.sceneStoichOxygenFuelMassRatio = std::max(0.20f, std::min(4.0f, settings.sceneStoichOxygenFuelMassRatio));
+    params.sceneHeatOfCombustionProxy = std::max(1.0f, std::min(60.0f, settings.sceneHeatOfCombustionProxy));
+    params.sceneRadiativeFraction = std::max(0.0f, std::min(0.80f, settings.sceneRadiativeFraction));
+    params.sceneTargetMassBurnRateGps = std::max(0.0f, std::min(200.0f, settings.sceneTargetMassBurnRateGps));
+    params.sceneMeasuredSootYield = std::max(0.0f, std::min(0.30f, settings.sceneMeasuredSootYield));
+    params.sceneAmbientTemperatureK = std::max(250.0f, std::min(340.0f, settings.sceneAmbientTemperatureK));
+    params.sceneCurlScale = std::max(0.0f, std::min(2.0f, settings.sceneCurlScale));
+    params.sceneBuoyancyScale = std::max(0.0f, std::min(2.0f, settings.sceneBuoyancyScale));
+    params.sceneBuoyancyCeiling = std::max(0.0f, std::min(1.0f, settings.sceneBuoyancyCeiling));
+    params.sceneBuoyancyFloor = std::max(0.0f, std::min(1.0f, settings.sceneBuoyancyFloor));
+    params.sceneFloorGlowR = std::max(0.0f, std::min(2.0f, settings.sceneFloorGlowR));
+    params.sceneFloorGlowG = std::max(0.0f, std::min(2.0f, settings.sceneFloorGlowG));
+    params.sceneFloorGlowB = std::max(0.0f, std::min(2.0f, settings.sceneFloorGlowB));
+    params.sceneFloorTongueR = std::max(0.0f, std::min(2.0f, settings.sceneFloorTongueR));
+    params.sceneFloorTongueG = std::max(0.0f, std::min(2.0f, settings.sceneFloorTongueG));
+    params.sceneFloorTongueB = std::max(0.0f, std::min(2.0f, settings.sceneFloorTongueB));
+    params.sceneFloorGlowScale = std::max(0.0f, std::min(1.0f, settings.sceneFloorGlowScale));
+    params.sceneFloorTongueScale = std::max(0.0f, std::min(1.0f, settings.sceneFloorTongueScale));
+    params.sceneWallGlowR = std::max(0.0f, std::min(2.0f, settings.sceneWallGlowR));
+    params.sceneWallGlowG = std::max(0.0f, std::min(2.0f, settings.sceneWallGlowG));
+    params.sceneWallGlowB = std::max(0.0f, std::min(2.0f, settings.sceneWallGlowB));
+    params.sceneWallGlowScale = std::max(0.0f, std::min(1.0f, settings.sceneWallGlowScale));
+    params.sceneOrangeEmissionScale = std::max(0.0f, std::min(8.0f, settings.sceneOrangeEmissionScale));
+    params.sceneFilamentEmissionScale = std::max(0.0f, std::min(5.0f, settings.sceneFilamentEmissionScale));
+    params.sceneWarmScatter = std::max(0.0f, std::min(1.0f, settings.sceneWarmScatter));
+    params.sceneSmokeScale = std::max(0.0f, std::min(2.0f, settings.sceneSmokeScale));
+    params.sceneSourcePlaneMode = std::max(0.0f, std::min(2.0f, settings.sceneSourcePlaneMode));
+    params.sceneConvectiveHeightTop = std::max(-0.20f, std::min(1.40f, settings.sceneConvectiveHeightTop));
+    params.sceneConvectiveHeightBottom = std::max(-0.20f, std::min(1.00f, settings.sceneConvectiveHeightBottom));
+    params.sceneFlameHeightTop = std::max(-0.20f, std::min(1.40f, settings.sceneFlameHeightTop));
+    params.sceneFlameHeightBottom = std::max(-0.20f, std::min(1.00f, settings.sceneFlameHeightBottom));
+    params.sceneLowerWhiteHeight = std::max(0.0f, std::min(0.30f, settings.sceneLowerWhiteHeight));
+    params.sceneRoomCoverageBase = std::max(0.0f, std::min(2.0f, settings.sceneRoomCoverageBase));
+    params.sceneRoomCoverageScale = std::max(0.0f, std::min(3.0f, settings.sceneRoomCoverageScale));
+    params.sceneTopDissolveTop = std::max(0.0f, std::min(1.20f, settings.sceneTopDissolveTop));
+    params.sceneTopDissolveBottom = std::max(0.0f, std::min(1.20f, settings.sceneTopDissolveBottom));
+    params.sceneBlueEmissionScale = std::max(0.0f, std::min(3.0f, settings.sceneBlueEmissionScale));
+    params.sceneBlueJetEmissionScale = std::max(0.0f, std::min(3.0f, settings.sceneBlueJetEmissionScale));
+    params.sceneFlameColorR = std::max(0.0f, std::min(3.0f, settings.sceneFlameColorR));
+    params.sceneFlameColorG = std::max(0.0f, std::min(3.0f, settings.sceneFlameColorG));
+    params.sceneFlameColorB = std::max(0.0f, std::min(3.0f, settings.sceneFlameColorB));
+    params.sceneAlternateFlameColorR = std::max(0.0f, std::min(3.0f, settings.sceneAlternateFlameColorR));
+    params.sceneAlternateFlameColorG = std::max(0.0f, std::min(3.0f, settings.sceneAlternateFlameColorG));
+    params.sceneAlternateFlameColorB = std::max(0.0f, std::min(3.0f, settings.sceneAlternateFlameColorB));
+    params.sceneAlternateFlameColorScale = std::max(0.0f, std::min(2.0f, settings.sceneAlternateFlameColorScale));
+    params.sceneEmberRejectAbove = std::max(0.0f, std::min(1.01f, settings.sceneEmberRejectAbove));
+    params.sceneEmberLifeRateBase = std::max(0.0f, std::min(2.0f, settings.sceneEmberLifeRateBase));
+    params.sceneEmberLifeRateJitter = std::max(0.0f, std::min(2.0f, settings.sceneEmberLifeRateJitter));
+    params.sceneEmberLifeRateAdd = std::max(0.0f, std::min(2.0f, settings.sceneEmberLifeRateAdd));
+    params.sceneEmberSpawnMode = std::max(0.0f, std::min(3.0f, settings.sceneEmberSpawnMode));
+    params.sceneEmberStartVBase = std::max(0.0f, std::min(1.0f, settings.sceneEmberStartVBase));
+    params.sceneEmberStartVJitter = std::max(0.0f, std::min(0.30f, settings.sceneEmberStartVJitter));
+    params.sceneEmberLift = std::max(0.0f, std::min(2.0f, settings.sceneEmberLift));
+    params.sceneEmberLifeScale = std::max(0.0f, std::min(3.0f, settings.sceneEmberLifeScale));
+    params.sceneEmberDrag = std::max(0.0f, std::min(8.0f, settings.sceneEmberDrag));
+    params.sceneEmberRadiusBase = std::max(0.0f, std::min(0.004f, settings.sceneEmberRadiusBase));
+    params.sceneEmberRadiusJitter = std::max(0.0f, std::min(0.004f, settings.sceneEmberRadiusJitter));
+    params.sceneEmberTrailCap = std::max(0.0f, std::min(0.040f, settings.sceneEmberTrailCap));
+    params.sceneEmberHotR = std::max(0.0f, std::min(2.0f, settings.sceneEmberHotR));
+    params.sceneEmberHotG = std::max(0.0f, std::min(2.0f, settings.sceneEmberHotG));
+    params.sceneEmberHotB = std::max(0.0f, std::min(2.0f, settings.sceneEmberHotB));
+    params.sceneEmberCoolR = std::max(0.0f, std::min(2.0f, settings.sceneEmberCoolR));
+    params.sceneEmberCoolG = std::max(0.0f, std::min(2.0f, settings.sceneEmberCoolG));
+    params.sceneEmberCoolB = std::max(0.0f, std::min(2.0f, settings.sceneEmberCoolB));
+    params.sceneEmberAlphaScale = std::max(0.0f, std::min(2.0f, settings.sceneEmberAlphaScale));
     updateCameraCache(params);
 
     if (settings.reset != 0 && !resetSimulationFields(params)) {
@@ -3194,14 +3806,15 @@ bool stepAndRenderInternal(
     const dim3 lightGrid = gridFor3d(g_lightNx, g_lightNy, g_lightNz, lightBlock);
 
     if (advanceSimulation) {
-        for (int zStart = 0; zStart < g_nz; zStart += kVolumeLaunchDepth) {
-            const int zEnd = std::min(g_nz, zStart + kVolumeLaunchDepth);
+        NvtxRange simulationRange("simulation_slices");
+        for (int zStart = 0; zStart < g_nz; zStart += g_volumeLaunchDepth) {
+            const int zEnd = std::min(g_nz, zStart + g_volumeLaunchDepth);
             const SimParams slice = withVolumeWindow(params, zStart, zEnd);
             advectUKernel<<<gridFor3d(g_nx + 1, g_ny, zEnd - zStart, fieldBlock), fieldBlock>>>(g_uNext, g_u, g_v, g_w, slice);
             advectVKernel<<<gridFor3d(g_nx, g_ny + 1, zEnd - zStart, fieldBlock), fieldBlock>>>(g_vNext, g_u, g_v, g_w, slice);
         }
-        for (int zStart = 0; zStart < g_nz + 1; zStart += kVolumeLaunchDepth) {
-            const int zEnd = std::min(g_nz + 1, zStart + kVolumeLaunchDepth);
+        for (int zStart = 0; zStart < g_nz + 1; zStart += g_volumeLaunchDepth) {
+            const int zEnd = std::min(g_nz + 1, zStart + g_volumeLaunchDepth);
             const SimParams slice = withVolumeWindow(params, zStart, zEnd);
             advectWKernel<<<gridFor3d(g_nx, g_ny, zEnd - zStart, fieldBlock), fieldBlock>>>(g_wNext, g_u, g_v, g_w, slice);
         }
@@ -3215,8 +3828,8 @@ bool stepAndRenderInternal(
             return false;
         }
 
-        for (int zStart = 0; zStart < g_nz; zStart += kVolumeLaunchDepth) {
-            const int zEnd = std::min(g_nz, zStart + kVolumeLaunchDepth);
+        for (int zStart = 0; zStart < g_nz; zStart += g_volumeLaunchDepth) {
+            const int zEnd = std::min(g_nz, zStart + g_volumeLaunchDepth);
             const SimParams slice = withVolumeWindow(params, zStart, zEnd);
             advectReactKernel<<<gridFor3d(g_nx, g_ny, zEnd - zStart, fieldBlock), fieldBlock>>>(
                 g_heatNext,
@@ -3258,8 +3871,8 @@ bool stepAndRenderInternal(
         std::swap(g_turbulenceEnergy, g_turbulenceEnergyNext);
         std::swap(g_sootOptics, g_sootOpticsNext);
 
-        for (int zStart = 0; zStart < g_nz; zStart += kVolumeLaunchDepth) {
-            const int zEnd = std::min(g_nz, zStart + kVolumeLaunchDepth);
+        for (int zStart = 0; zStart < g_nz; zStart += g_volumeLaunchDepth) {
+            const int zEnd = std::min(g_nz, zStart + g_volumeLaunchDepth);
             const SimParams slice = withVolumeWindow(params, zStart, zEnd);
             forceVelocityKernel<<<gridFor3d(g_nx, g_ny, zEnd - zStart, fieldBlock), fieldBlock>>>(
                 g_u, g_v, g_w, g_heat, g_soot, g_turbulenceEnergy, g_progress, slice);
@@ -3278,9 +3891,12 @@ bool stepAndRenderInternal(
         }
 
         const int pressureParityCells = ((g_nx + 1) / 2) * g_ny * g_nz;
+        {
+            NvtxRange projectionRange("pressure_projection");
         for (int i = 0; i < kPressureIterations; ++i) {
             sorPressureParityKernel<<<(pressureParityCells + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_pressure, g_divergence, params, 0, kPressureOmega);
             sorPressureParityKernel<<<(pressureParityCells + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(g_pressure, g_divergence, params, 1, kPressureOmega);
+        }
         }
         if (!check("pressure SOR launch", cudaGetLastError())) {
             return false;
@@ -3297,23 +3913,46 @@ bool stepAndRenderInternal(
             return false;
         }
 
-        buildSceneLightKernel<<<lightGrid, lightBlock>>>(
-            g_sceneLight,
-            g_sceneShadow,
+        const dim3 brickBlock(4, 4, 4);
+        buildBrickMetaKernel<<<gridFor3d(g_brickNx, g_brickNy, g_brickNz, brickBlock), brickBlock>>>(
+            g_brickMeta,
             g_heat,
             g_fuel,
-            g_oxygen,
             g_soot,
-            g_char,
-            g_ash,
-            g_pyrolysis,
             g_progress,
             g_sootOptics,
-            params);
-        propagateSceneLightKernel<<<lightGrid, lightBlock>>>(g_sceneLightNext, g_sceneLight, g_sceneShadow, params, 0.48f, 0.92f);
-        propagateSceneLightKernel<<<lightGrid, lightBlock>>>(g_sceneLight, g_sceneLightNext, g_sceneShadow, params, 0.34f, 0.96f);
-        if (!check("scene lighting launch", cudaGetLastError())) {
+            g_u,
+            g_v,
+            g_w,
+            params,
+            g_brickNx,
+            g_brickNy,
+            g_brickNz);
+        if (!check("sparse brick metadata launch", cudaGetLastError())) {
             return false;
+        }
+
+        const int radianceCacheInterval = std::max(1, params.radianceCacheUpdateInterval);
+        const bool updateRadianceCache = settings.reset != 0 || g_frameIndex == 0 || (g_frameIndex % radianceCacheInterval) == 0;
+        if (updateRadianceCache) {
+            buildSceneLightKernel<<<lightGrid, lightBlock>>>(
+                g_sceneLight,
+                g_sceneShadow,
+                g_heat,
+                g_fuel,
+                g_oxygen,
+                g_soot,
+                g_char,
+                g_ash,
+                g_pyrolysis,
+                g_progress,
+                g_sootOptics,
+                params);
+            propagateSceneLightKernel<<<lightGrid, lightBlock>>>(g_sceneLightNext, g_sceneLight, g_sceneShadow, params, 0.48f, 0.92f);
+            propagateSceneLightKernel<<<lightGrid, lightBlock>>>(g_sceneLight, g_sceneLightNext, g_sceneShadow, params, 0.34f, 0.96f);
+            if (!check("scene lighting launch", cudaGetLastError())) {
+                return false;
+            }
         }
         if (!publishRenderSnapshot()) {
             return false;
@@ -3332,32 +3971,53 @@ bool stepAndRenderInternal(
         return true;
     }
 
-    if (!g_haveRenderSnapshot && !publishRenderSnapshot()) {
+    const bool renderFromLiveFields = advanceSimulation;
+    if (!renderFromLiveFields && !g_haveRenderSnapshot && !publishRenderSnapshot()) {
         return false;
     }
     params.time = g_renderTime;
     const int renderSlot = g_renderSnapshotFront;
+    const float* renderHeat = renderFromLiveFields ? g_heat : g_renderHeat[renderSlot];
+    const float* renderFuel = renderFromLiveFields ? g_fuel : g_renderFuel[renderSlot];
+    const float* renderOxygen = renderFromLiveFields ? g_oxygen : g_renderOxygen[renderSlot];
+    const float* renderSoot = renderFromLiveFields ? g_soot : g_renderSoot[renderSlot];
+    const float* renderChar = renderFromLiveFields ? g_char : g_renderChar[renderSlot];
+    const float* renderAsh = renderFromLiveFields ? g_ash : g_renderAsh[renderSlot];
+    const float* renderPyrolysis = renderFromLiveFields ? g_pyrolysis : g_renderPyrolysis[renderSlot];
+    const float* renderProgress = renderFromLiveFields ? g_progress : g_renderProgress[renderSlot];
+    const float* renderTurbulenceEnergy = renderFromLiveFields ? g_turbulenceEnergy : g_renderTurbulenceEnergy[renderSlot];
+    const float* renderSootOptics = renderFromLiveFields ? g_sootOptics : g_renderSootOptics[renderSlot];
+    const float4* renderSceneLight = renderFromLiveFields ? g_sceneLight : g_renderSceneLight[renderSlot];
+    const float* renderSceneShadow = renderFromLiveFields ? g_sceneShadow : g_renderSceneShadow[renderSlot];
+    const float* renderU = renderFromLiveFields ? g_u : g_renderU[renderSlot];
+    const float* renderV = renderFromLiveFields ? g_v : g_renderV[renderSlot];
+    const float* renderW = renderFromLiveFields ? g_w : g_renderW[renderSlot];
     const dim3 frameBlock(16, 16);
-    for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-        const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
+    NvtxRange renderRange("volume_raymarch_sparse_skip_slices");
+    for (int yStart = 0; yStart < g_frameH; yStart += g_renderLaunchRows) {
+        const int yEnd = std::min(g_frameH, yStart + g_renderLaunchRows);
         const SimParams slice = withFrameWindow(params, yStart, yEnd);
         renderKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(
             g_hdrFrameDevice,
-            g_renderHeat[renderSlot],
-            g_renderFuel[renderSlot],
-            g_renderOxygen[renderSlot],
-            g_renderSoot[renderSlot],
-            g_renderChar[renderSlot],
-            g_renderAsh[renderSlot],
-            g_renderPyrolysis[renderSlot],
-            g_renderProgress[renderSlot],
-            g_renderTurbulenceEnergy[renderSlot],
-            g_renderSootOptics[renderSlot],
-            g_renderSceneLight[renderSlot],
-            g_renderSceneShadow[renderSlot],
-            g_renderU[renderSlot],
-            g_renderV[renderSlot],
-            g_renderW[renderSlot],
+            renderHeat,
+            renderFuel,
+            renderOxygen,
+            renderSoot,
+            renderChar,
+            renderAsh,
+            renderPyrolysis,
+            renderProgress,
+            renderTurbulenceEnergy,
+            renderSootOptics,
+            renderSceneLight,
+            renderSceneShadow,
+            g_brickMeta,
+            g_brickNx,
+            g_brickNy,
+            g_brickNz,
+            renderU,
+            renderV,
+            renderW,
             slice);
     }
     if (!check("renderKernel launch", cudaGetLastError())) {
@@ -3366,13 +4026,13 @@ bool stepAndRenderInternal(
     if (params.emberCount > 0 && params.renderDebugMode == 0) {
         emberHdrKernel<<<(params.emberCount + kCudaBlockThreads - 1) / kCudaBlockThreads, kCudaBlockThreads>>>(
             g_hdrFrameDevice,
-            g_renderHeat[renderSlot],
-            g_renderChar[renderSlot],
-            g_renderPyrolysis[renderSlot],
-            g_renderTurbulenceEnergy[renderSlot],
-            g_renderU[renderSlot],
-            g_renderV[renderSlot],
-            g_renderW[renderSlot],
+            renderHeat,
+            renderChar,
+            renderPyrolysis,
+            renderTurbulenceEnergy,
+            renderU,
+            renderV,
+            renderW,
             params);
         if (!check("emberHdrKernel launch", cudaGetLastError())) {
             return false;
@@ -3395,8 +4055,8 @@ bool stepAndRenderInternal(
             wroteToD3D = check("cudaCreateSurfaceObject d3d fp16", cudaCreateSurfaceObject(&surface, &surfaceDesc));
         }
         if (wroteToD3D) {
-            for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-                const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
+            for (int yStart = 0; yStart < g_frameH; yStart += g_renderLaunchRows) {
+                const int yEnd = std::min(g_frameH, yStart + g_renderLaunchRows);
                 const SimParams slice = withFrameWindow(params, yStart, yEnd);
                 packFp16SurfaceKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(surface, g_hdrFrameDevice, slice);
             }
@@ -3410,18 +4070,18 @@ bool stepAndRenderInternal(
             return false;
         }
     } else {
-        for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-            const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
+        for (int yStart = 0; yStart < g_frameH; yStart += g_renderLaunchRows) {
+            const int yEnd = std::min(g_frameH, yStart + g_renderLaunchRows);
             const SimParams slice = withFrameWindow(params, yStart, yEnd);
             tonemapKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_frameDevice, g_hdrFrameDevice, slice);
         }
         if (!check("tonemapKernel launch", cudaGetLastError())) {
             return false;
         }
-        for (int yStart = 0; yStart < g_frameH; yStart += kRenderLaunchRows) {
-            const int yEnd = std::min(g_frameH, yStart + kRenderLaunchRows);
+        for (int yStart = 0; yStart < g_frameH; yStart += g_renderLaunchRows) {
+            const int yEnd = std::min(g_frameH, yStart + g_renderLaunchRows);
             const SimParams slice = withFrameWindow(params, yStart, yEnd);
-            overlayKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_frameDevice, g_renderHeat[renderSlot], slice);
+            overlayKernel<<<gridForFrameRows(g_frameW, yEnd - yStart, frameBlock), frameBlock>>>(g_frameDevice, renderHeat, slice);
         }
         if (!check("overlayKernel launch", cudaGetLastError())) {
             return false;
@@ -3436,8 +4096,14 @@ bool stepAndRenderInternal(
 
     if (!writeD3DInterop) {
         const std::size_t frameBytes = static_cast<std::size_t>(g_frameW) * static_cast<std::size_t>(g_frameH) * sizeof(std::uint32_t);
-        if (!check("cudaMemcpy frame", cudaMemcpy(bgraPixels, g_frameDevice, frameBytes, cudaMemcpyDeviceToHost))) {
+        void* staging = g_hostFrameStaging != nullptr && g_hostFrameStagingBytes >= frameBytes
+            ? static_cast<void*>(g_hostFrameStaging)
+            : static_cast<void*>(bgraPixels);
+        if (!check("cudaMemcpy frame staging", cudaMemcpy(staging, g_frameDevice, frameBytes, cudaMemcpyDeviceToHost))) {
             return false;
+        }
+        if (staging != static_cast<void*>(bgraPixels)) {
+            std::memcpy(bgraPixels, staging, frameBytes);
         }
     }
     if (collectMetrics) {
@@ -3542,6 +4208,19 @@ bool stepAndRenderInternal(
         out.divergenceAfterL2 = divAfterL2;
         out.divergenceAfterMax = floatFromBits(deviceMetrics.divergenceAfterMaxBits);
         out.divergenceReduction = divBeforeL2 > 0.000001f ? 1.0f - divAfterL2 / divBeforeL2 : 0.0f;
+        SparseBrickEffectiveness sparseStats = {};
+        if (!collectSparseBrickEffectiveness(&sparseStats)) {
+            return false;
+        }
+        out.sparseBrickCount = sparseStats.totalBrickCount;
+        out.sparseActiveBrickCount = sparseStats.activeBrickCount;
+        out.sparseActiveBrickFraction = sparseStats.activeFraction;
+        out.sparseMaxBrickEmission = sparseStats.maxEmission;
+        out.sparseMaxBrickExtinction = sparseStats.maxExtinction;
+        out.sparseRaymarchMaxEmptyStride = kSparseRaymarchMaxEmptyStride;
+        out.sparseRaymarchMediumEmptyStride = kSparseRaymarchMediumEmptyStride;
+        out.sparseRaymarchActiveThreshold = kSparseRaymarchActiveThreshold;
+        out.sparseRaymarchFineThreshold = kSparseRaymarchFineThreshold;
         *metrics = out;
     }
     ++g_frameIndex;

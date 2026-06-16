@@ -1,9 +1,18 @@
 # metric,min,max
-# Initial engineering envelopes for bounded CUDA-vs-NIST calibration runs.
-# These catch broken or non-comparable outputs; tighten only after calibration work.
-calibrationHrrShapeRmse,0.00,1.00
-calibrationMassShapeRmse,0.00,1.00
-calibrationSmokeOpticalDepthShapeRmse,0.00,1.00
-calibrationRadiantHeatFluxShapeRmse,0.00,1.00
-averageGpuSolveMs,0.00,250.00
-averageGpuRenderMs,0.00,250.00
+# Methanol truth gate for the NIST FCD Methanol_1m_Pool_R1 runtime.
+# This is intentionally no longer a "does it run" envelope. It fails when the
+# desktop-visible methanol scene is physically non-comparable, visually empty,
+# stale, or too slow to be a real interactive target.
+calibrationHrrShapeRmse,0.00,0.35
+calibrationMassShapeRmse,0.00,0.20
+calibrationSmokeOpticalDepthShapeRmse,0.00,0.18
+calibrationRadiantHeatFluxShapeRmse,0.00,0.22
+averageGpuSolveMs,0.00,30.00
+averageGpuRenderMs,0.00,30.00
+averageGpuRaymarchMs,0.00,18.00
+averageGpuReactionMs,0.00,16.00
+averageGpuProjectionMs,0.00,26.00
+imageBrightPixels,256.00,999999.00
+imageWhiteCoreFraction,0.00010,0.05000
+maxFlameHeightMeters,0.20,1.10
+finalMeanRoomIrradiance,0.00100,1.00000

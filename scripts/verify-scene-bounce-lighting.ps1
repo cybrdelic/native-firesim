@@ -1,24 +1,26 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "verify-helpers.ps1")
 $root = Split-Path -Parent $PSScriptRoot
-$cuda = Get-Content (Join-Path $root "src/fire_cuda.cu") -Raw
-$main = Get-Content (Join-Path $root "src/main.cpp") -Raw
+$cuda = Read-RepoText "src/fire_cuda.cu"
+$main = Read-RepoText "src/main.cpp"
+$sceneRuntime = Read-RepoText "src/scene_runtime.cpp"
 
-function Require-Text($text, $needle, $message) {
-    if (-not $text.Contains($needle)) {
-        Write-Error $message
-    }
-}
 
 Require-Text $cuda "floorLift * luminance3(direct) * 0.18f" "floor contact bounce is missing"
 Require-Text $cuda "grazingBounce" "grazing bounce boost is missing"
 Require-Text $cuda "4.20f * grazingBounce" "gathered scene irradiance boost is missing"
 Require-Text $cuda "giSample.x, giSample.y, giSample.z), 0.42f" "local scene light contribution is too low or missing"
 Require-Text $cuda "contactWarmth = surface == 1 ? 1.72f" "surface-specific bounce warmth is missing"
-Require-Text $cuda "emberBed * glow * 0.26f" "room tray ember-bed bounce is missing"
-Require-Text $cuda "reflectCore * p.reflectionGain * 0.48f" "floor reflected fire core response is missing"
-Require-Text $cuda "wallGlow * 0.090f" "wall fire spill response is missing"
-Require-Text $main "lowSource * 0.66" "mesh fire bounce low-source term is missing"
-Require-Text $main "material * (0.038 + ndl * 0.24" "mesh ambient lighting must not dominate fire bounce"
+Require-Text $cuda "emberBed * glow * 0.26f" "methanol ember-bed bounce is missing"
+Require-Text $cuda "floorGlowColor = make_float3(p.sceneFloorGlowR" "methanol floor response must come from product profile coefficients"
+Require-Text $cuda "wallGlowColor = make_float3(p.sceneWallGlowR" "methanol wall spill must come from product profile coefficients"
+Require-Text $sceneRuntime "settings.sceneFloorGlowR = render.floorGlowR" "scene profile floor lighting coefficients must reach FireSettings"
+Require-Text $sceneRuntime "settings.sceneWallGlowR = render.wallGlowR" "scene profile wall lighting coefficients must reach FireSettings"
+Require-Text $main "meshLightingPass=removed; fire scenes are CUDA volumes without imported GLB geometry" "scene bounce gate still expects removed GLB mesh lighting to stay removed"
+Require-Text $main "sceneSourceWorld(g_sceneEmitters[scene], g_placement.scene(scene), scene)" "methanol light must be fed by canonical source coordinates"
+Require-Text $sceneRuntime "emitter.centerX + placement.sourceOffset.x" "methanol source x no longer follows canonical placement"
+Require-Text $sceneRuntime "emitter.centerZ + placement.sourceOffset.z" "methanol source z no longer follows canonical placement"
+Require-Text $main "productLightingLayer=methanol floor/wall response receives flame-fed irradiance gated by volumetric shadow and material albedo" "scene bounce lighting must stay in the CUDA product lighting layer"
 
 Write-Host "scene bounce lighting gate ok"

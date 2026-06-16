@@ -9,8 +9,9 @@ from pathlib import Path
 
 def number(row: dict[str, str], key: str, default: float = 0.0) -> float:
     try:
-        return float(row.get(key, default))
-    except ValueError:
+        value = row.get(key, default)
+        return default if value is None or value == "" else float(value)
+    except (TypeError, ValueError):
         return default
 
 
@@ -54,7 +55,12 @@ def periodic_skip_score(presented: list[int]) -> float:
 
 def analyze(path: Path) -> dict:
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        field_count = len(reader.fieldnames or [])
+        rows = [
+            row for row in reader
+            if field_count > 0 and len(row) == field_count and None not in row.values()
+        ]
     if len(rows) < 8:
         raise SystemExit(f"trace needs at least 8 rows: {path}")
 

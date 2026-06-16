@@ -7,7 +7,7 @@ Raw CSV: https://www.nist.gov/fcd-s3?path=%2FHRR%2FASSET_FILES%2FMethanolPoolFir
 FCD DOI: https://doi.org/10.18434/mds2-2314
 License/terms: https://www.nist.gov/open/license
 
-This benchmark includes direct CSV channels for HRR, natural-gas burner HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived massRemainingKg and smokeOpticalDepth columns.
+This benchmark includes direct CSV channels for HRR, auxiliary HRR, exhaust mass flow, O2/CO2/CO volume fractions, radiant heat flux, and smoke extinction. It also includes derived massRemainingKg and smokeOpticalDepth columns.
 
 alidation-targets.csv declares the first bounded CUDA-vs-NIST comparison envelopes. They are deliberately broad until calibration work tightens the model.
 

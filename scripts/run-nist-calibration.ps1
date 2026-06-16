@@ -102,24 +102,25 @@ if (-not (Test-Path -LiteralPath $nativeExe)) {
 
 $nativeArgs = @(
     "--validation",
-    "--manifest=`"$ManifestPath`"",
+    "--manifest=$ManifestPath",
     "--dataset-id=$experimentId",
-    "--calibration=`"$calibrationPath`"",
-    "--geometry=`"$geometryPath`"",
-    "--output-dir=`"$OutputDir`"",
+    "--calibration=$calibrationPath",
+    "--geometry=$geometryPath",
+    "--output-dir=$OutputDir",
     "--validation-frames=$Frames",
+    "--scene=0",
     "--pool-fire-calibration",
     "--allow-gpu-kernels",
     "--accept-bugcheck-risk"
 )
 if (-not [string]::IsNullOrWhiteSpace($targetPath)) {
-    $nativeArgs += "--targets=`"$targetPath`""
+    $nativeArgs += "--targets=$targetPath"
 }
 
 Push-Location $root
 try {
-    & $nativeExe @nativeArgs
-    $nativeExit = $LASTEXITCODE
+    $nativeProcess = Start-Process -FilePath $nativeExe -ArgumentList $nativeArgs -PassThru -Wait -WindowStyle Hidden
+    $nativeExit = $nativeProcess.ExitCode
 } finally {
     Pop-Location
 }
@@ -133,6 +134,19 @@ if (-not $SkipPlots -and
     & python (Join-Path $PSScriptRoot "build_calibration_report.py") --output-dir $OutputDir --manifest $ManifestPath
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
+    }
+}
+
+$truthGate = Join-Path $PSScriptRoot "verify-methanol-truth-gate.ps1"
+$reportPath = Join-Path $OutputDir "validation-report.json"
+if (Test-Path -LiteralPath $reportPath) {
+    try {
+        & $truthGate -ReportPath $reportPath
+    } catch {
+        if ($nativeExit -eq 0) {
+            throw
+        }
+        Write-Warning $_.Exception.Message
     }
 }
 

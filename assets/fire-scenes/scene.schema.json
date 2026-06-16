@@ -3,13 +3,19 @@
   "required": [
     "id",
     "displayName",
-    "mesh",
-    "meshTransform",
     "emitter",
     "volumeBounds",
     "lighting",
     "material",
     "expectedBehavior"
   ],
-  "description": "Native FireSim scene contract. This is intentionally small and loader-oriented: every scene must define the mesh, transform, source, volume, lighting, material, and expected behavior in one place."
+  "description": "Native FireSim scene contract. Every scene defines source, volume, lighting, material, and expected behavior in one place. Imported GLB scene geometry is intentionally not part of the runtime contract."
+  ,
+  "emitterSourcePolicy": {
+    "enum": [
+      "authored",
+      "mask-derived",
+      "authored-with-mask-debug"
+    ]
+  }
 }
